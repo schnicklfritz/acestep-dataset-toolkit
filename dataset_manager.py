@@ -12,7 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List
+from modules.homogeneity 
 
+import HomogeneityEngine
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
@@ -176,6 +178,34 @@ class DatasetPipeline:
         subprocess.run(cmd, check=True)
         logger.info("Stage 3 complete: Dataset uploaded successfully.")
 
+
+def cmd_audit(args):
+    engine = HomogeneityEngine(target_sr=args.sr, target_lufs=args.lufs)
+    report = engine.analyze_directory(Path(args.target_dir))
+
+    print("\n" + "=" * 60)
+    print(
+        f" DATASET HOMOGENEITY SCORE: {report.score} / 100 ({report.total_tracks} tracks)"
+    )
+    print("=" * 60)
+    print(f"Sample Rates:      {report.sample_rates}")
+    print(
+        f"Loudness Spread:   Mean {report.lufs_mean} LUFS (± {report.lufs_std} LUFS)"
+    )
+    print(
+        f"Dynamic Range:     Mean Crest {report.crest_mean_db} dB (± {report.crest_std_db} dB)"
+    )
+    print(f"Outlier Tracks:    {report.outliers_count} flagged")
+    print("\nHarmonization Action Plan:")
+    for step in report.action_plan:
+        print(f" -> {step}")
+
+    if report.outliers_count > 0:
+        print("\nFlagged Outliers:")
+        for t in report.track_details:
+            if t.is_outlier:
+                print(f" - {t.file_name}: {', '.join(t.outlier_reasons)}")
+    print("")
 
 def main():
     parser = argparse.ArgumentParser(
