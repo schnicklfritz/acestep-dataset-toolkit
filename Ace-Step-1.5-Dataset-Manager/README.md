@@ -1,82 +1,130 @@
-# ACE-Step LoRA Dataset Studio (Python / Qt6 Edition)
+# ACE-Step Dataset Toolkit (Python / Qt6 Edition)
 
-A flexible dataset management and auto-captioning suite designed for preparing, labeling, and structuring audio datasets for **ACE-Step 1.5 LoRA** fine-tuning.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PySide6](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt6-green.svg)](https://pypi.org/project/PySide6/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A lightweight, multi-backend desktop utility for preparing, tagging, captioning, and formatting audio datasets for **ACE-Step (1.5 / XL / LoRA / LoKR)** fine-tuning.
 
 ---
 
 ## 🌟 Overview & Attribution
 
-This project is a Python / Qt6 fork and modern rewrite of the original C++ dataset concept. 
+This project is a standalone Python/Qt6 application inspired by the foundational dataset management concepts originally prototyped in C++.
 
-* **Original Idea & Architecture**: Full credit to the original author for the foundational workflow and C++ data management concept.
-* **Why the Python Conversion?**: The original design was reimagined in Python/PySide6 to seamlessly bridge the gap between dataset preparation and the modern AI ecosystem (`transformers`, `PyTorch`, `HuggingFace Hub`, `Kaggle API`, `Modal`, `RunPod`).
-
----
-
-## 🚀 Why This Python / Qt6 Fork?
-
-While native C++ excels at real-time DSP audio plugins and low-latency audio playback, modern audio-language models (such as `ACE-Step/acestep-captioner` 11B) are natively implemented and updated within the Python machine learning stack. 
-
-This conversion provides key advantages:
-1. **Direct AI Integration**: Zero C++/LibTorch compilation friction; works directly with upstream PyTorch and HuggingFace models.
-2. **Generic Dataset Architecture**: Completely decoupled from hardcoded templates or sample-specific presets. It operates as a blank-canvas studio for any genre, artist, or style dataset.
-3. **Multi-Backend Cloud & Local AI**: Supports **Local Rule Engine**, **Kaggle Cloud (Free 30h/week GPU)**, **Local CUDA (11B)**, and **Universal REST Webhooks** (RunPod, Vast.ai, Modal, Ollama).
-4. **Bandwidth-Optimized Staging**: Automatically encodes disposable lightweight previews (16 kHz mono) in temporary scratch storage to accelerate cloud uploads while linking generated captions back to original lossless `.wav` files.
-5. **Multi-Monitor Responsive GUI**: Uses responsive layouts and scroll containers, dynamically scaling down to 720p external monitors or expanding to 4K displays.
+* **Attribution**: Full credit to the original author for the foundational data structures, workflow concept, and dataset layout.
+* **Why the Python/Qt6 Rewrite?**: While native C++ is ideal for real-time digital signal processing, modern neural audio captioners (such as `ACE-Step/acestep-captioner` 11B) are natively developed and maintained within the Python ecosystem (`transformers`, `torchaudio`, `accelerate`). This rewrite provides direct access to cloud GPUs, headless workers, and REST endpoints without C++/LibTorch compilation barriers.
 
 ---
 
-## 🛠 Features
+## ✨ Key Features
 
-* **Multi-Format Ingestion**: Load `.wav`, `.flac`, and `.mp3` tracks into a unified dataset matrix.
-* **Granular Complexity Control**:
-  * **Concise Tags**: Short comma-separated acoustic descriptors.
-  * **Standard Paragraph**: Coherent overview of instruments and dynamics.
-  * **Deep Structural Breakdown**: Multi-section analysis (intro, verses, chorus dynamics, solo instruments, outro).
-* **Metadata & Lyric Synchronization**: Edit BPM, musical key scale, structural section markers (`[Verse]`, `[Chorus]`, `[Solo]`), and custom trigger tags (`custom_tag`).
-* **Clean In-App Credential Management**: Configure Kaggle or Custom REST Endpoints directly in the UI without modifying config files.
-* **One-Click JSON Dataset Export**: Outputs structured training JSON schemas matching the official ACE-Step LoRA specifications.
+* **Multi-Backend AI Captioning**:
+  * **Local Rule Engine (CPU)**: Instant profile-based caption generation without GPU requirements.
+  * **Kaggle Cloud GPU (100% Free)**: Pre-configured headless batch worker that runs the 11B captioner using free Kaggle GPU compute (30 hours/week).
+  * **Local CUDA (11B)**: Direct PyTorch GPU inference for systems with 16GB+ VRAM.
+  * **Custom REST Webhook**: Connect any self-hosted or serverless inference endpoint (RunPod, Vast.ai, Modal, Ollama).
+* **Disposable Bandwidth Optimization**:
+  * Automatically downsamples audio tracks to temporary 16 kHz mono preview files in system scratch memory before remote upload, reducing payload sizes by up to 95% while keeping captions mapped to original lossless `.wav` files.
+* **3-Tier Caption Complexity**:
+  * **Concise Tags**: Focused, comma-separated acoustic tags for style adapters.
+  * **Standard Paragraph**: Balanced descriptive overview of instruments, timbre, and mix.
+  * **Deep Structural Breakdown**: Multi-section analysis mapping acoustic changes across intro, verses, chorus dynamics, and outro.
+* **Full Metadata & Lyrics Editor**:
+  * Inspect and modify musical key scale, BPM, language, custom trigger tags, and structured lyrics with section markers (`[Intro]`, `[Verse]`, `[Chorus]`, `[Bridge]`).
+* **Responsive Multi-Screen GUI**:
+  * Adaptive layout designed to scale fluidly from low-resolution 720p laptop displays to large 4K external monitors.
+* **Standard Dataset JSON Export**:
+  * Outputs training manifests that plug directly into ACE-Step training pipelines.
 
 ---
 
-## 📋 Prerequisites & Installation
+## 🛠 Prerequisites & Installation
 
-### Quick Start
+### 1. System Dependencies (Optional for Fast Pre-processing)
+For fast background audio compression, ensure `ffmpeg` is available on your system PATH:
+* **Debian / Ubuntu**: `sudo apt install ffmpeg`
+* **macOS (Homebrew)**: `brew install ffmpeg`
+* **Windows (Winget)**: `winget install Gyan.FFmpeg`
+
+*(If `ffmpeg` is not present, the toolkit will fall back to processing original source audio directly.)*
+
+### 2. Python Environment
 ```bash
-# 1. Clone the repository
-git clone https://github.com/your-username/acestep-dataset-studio.git
-cd acestep-dataset-studio
+# Clone the repository
+git clone https://github.com/<YOUR-USERNAME>/acestep-dataset-toolkit.git
+cd acestep-dataset-toolkit
 
-# 2. Install dependencies
+# Install dependencies
 pip install PySide6
-
-# Optional: Install ffmpeg on your system PATH for fast audio compression:
-# Ubuntu/Debian: sudo apt install ffmpeg
-# macOS: brew install ffmpeg
-# Windows: winget install Gyan.FFmpeg
 ```
 
-### Running the Application
+### 3. Launching the App
 ```bash
 python dataset_manager.py
 ```
 
-*(Note: An automated cross-platform installation script will be included in an upcoming release once initial testing is complete.)*
-
 ---
 
-## ⚙️ AI Engine Backends
+## 🚀 AI Backend Configuration
 
-| Backend | Requirements | Speed / Latency | Cost |
+| Backend | Setup Required | Latency / Speed | Cost |
 | :--- | :--- | :--- | :--- |
-| **Local Rule Engine** | None (CPU native) | Instant (<10ms) | Free |
-| **Kaggle Cloud GPU** | Free Kaggle Account & API Key | ~3–4 min (Queue + 11B Inference) | Free (30h/wk) |
-| **Local ACE-Step** | NVIDIA GPU (16GB+ VRAM) + PyTorch | ~1–3s per track | Free |
-| **Custom Webhook** | RunPod / Modal / Vast / Local Server | ~2–5s per track | User's compute |
+| **Local Rule Engine** | None | Instant (<10ms) | Free |
+| **Kaggle Cloud GPU** | Free Kaggle Account & API Key | ~3–4 min (Queue + 11B Batch) | Free (30h/week) |
+| **Local ACE-Step** | NVIDIA GPU (16GB+ VRAM) + PyTorch | ~1–3s per song | Free |
+| **Custom Webhook** | Endpoint URL & Auth Key | ~2–5s per song | User's compute |
+
+### Setting Up Free Kaggle Cloud GPU:
+1. Create a free account at [kaggle.com](https://www.kaggle.com).
+2. Go to **Settings** $\rightarrow$ **API** $\rightarrow$ **Create New Token** to download `kaggle.json`.
+3. In this toolkit, click **`⚙ Configure Endpoints`** and paste your Kaggle Username and API Key.
 
 ---
 
-## 📄 License & Acknowledgments
+## 📄 Output Schema Example
 
-* Designed for the **ACE-Step 1.5** training ecosystem.
-* Gratefully builds upon the original C++ dataset tool concepts created by the community.
+Saved JSON datasets follow the standard ACE-Step manifest structure:
+
+```json
+{
+  "metadata": {
+    "name": "Custom_Dataset",
+    "custom_tag": "YourTriggerTag",
+    "tag_position": "prepend",
+    "num_samples": 14
+  },
+  "samples": [
+    {
+      "id": "e03aa4d7",
+      "audio_path": "/path/to/audio.wav",
+      "filename": "track_01.wav",
+      "caption": "YourTriggerTag, vintage psychedelic rock, Vox organ riff, driving bassline, expressive baritone vocal",
+      "genre": "Psychedelic Rock",
+      "lyrics": "[Verse 1]\nExample lyrics...\n[Chorus]\nMain hook...",
+      "formatted_lyrics": "[Verse 1]\nExample lyrics...\n[Chorus]\nMain hook...",
+      "bpm": 124,
+      "keyscale": "E minor",
+      "timesignature": "4/4",
+      "duration": 210,
+      "language": "en",
+      "custom_tag": "YourTriggerTag"
+    }
+  ]
+}
+```
+
+---
+
+## 🤝 Contributing & Roadmap
+
+- [ ] One-click cross-platform desktop installer script (`install.sh` / `install.bat`)
+- [ ] Automatic batch BPM and key-scale audio detection
+- [ ] Direct one-click dataset push to HuggingFace Datasets Hub
+
+Pull requests and community feedback are welcome!
+
+---
+
+## 📜 License
+Distributed under the MIT License. See `LICENSE` for details.
