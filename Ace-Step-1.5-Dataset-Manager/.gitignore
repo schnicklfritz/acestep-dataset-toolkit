@@ -1,0 +1,24 @@
+# Python Bytecode & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+
+# OS & Temp Files
+.DS_Store
+Thumbs.db
+*.tmp
+ace_stage_*
+*.mp3_preview.mp3
+
+# Local User Settings & Secrets (Keep your Kaggle keys private)
+settings.json
+kaggle.json
+*.local
