@@ -1,0 +1,25 @@
+# ==============================================================================
+# Python Pip Dependencies
+# ==============================================================================
+numpy>=1.24.0
+soundfile>=0.12.1
+pyloudnorm>=0.1.1
+kaggle>=1.6.0
+pillow>=10.0.0
+requests>=2.31.0
+
+# ==============================================================================
+# System Dependencies (Must be installed via OS package manager)
+# ==============================================================================
+# Arch / CachyOS / Manjaro:
+#   sudo pacman -S tk ffmpeg libsndfile
+#
+# Debian / Ubuntu / Mint:
+#   sudo apt-get update && sudo apt-get install python3-tk ffmpeg libsndfile1
+#
+# Fedora / RHEL:
+#   sudo dnf install python3-tkinter ffmpeg libsndfile
+#
+# macOS (Homebrew):
+#   brew install python-tk ffmpeg libsndfile
+# ==============================================================================

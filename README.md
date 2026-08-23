@@ -41,27 +41,55 @@ This project is a standalone Python/Qt6 application inspired by the foundational
 
 ## 🛠 Prerequisites & Installation
 
-### 1. System Dependencies (Optional for Fast Pre-processing)
-For fast background audio compression, ensure `ffmpeg` is available on your system PATH:
-* **Debian / Ubuntu**: `sudo apt install ffmpeg`
-* **macOS (Homebrew)**: `brew install ffmpeg`
-* **Windows (Winget)**: `winget install Gyan.FFmpeg`
+### 1. System Dependencies
+The toolkit uses native audio decoders and Tkinter desktop bindings. Install the system libraries for your OS:
 
-*(If `ffmpeg` is not present, the toolkit will fall back to processing original source audio directly.)*
+* **Arch Linux / CachyOS / Manjaro**:
+  ```bash
+  sudo pacman -S tk ffmpeg libsndfile
+  ```
+* **Debian / Ubuntu / Mint**:
+  ```bash
+  sudo apt-get update && sudo apt-get install -y python3-tk ffmpeg libsndfile1
+  ```
+* **Fedora / RHEL**:
+  ```bash
+  sudo dnf install python3-tkinter ffmpeg libsndfile
+  ```
+* **macOS (Homebrew)**:
+  ```bash
+  brew install python-tk ffmpeg libsndfile
+  ```
+* **Windows**:
+  ```powershell
+  winget install Gyan.FFmpeg
+  ```
+  *(Python on Windows includes Tkinter by default during standard installation.)*
 
-### 2. Python Environment
+### 2. Python Environment Setup
+Clone the repository and install the audio DSP and pipeline dependencies:
+
 ```bash
-# Clone the repository
+# Clone repository
 git clone https://github.com/<YOUR-USERNAME>/acestep-dataset-toolkit.git
 cd acestep-dataset-toolkit
 
-# Install dependencies
-pip install PySide6
+# Install required Python packages
+pip install -r requirements.txt
 ```
 
 ### 3. Launching the App
+Launch the graphical interface or use the headless CLI:
+
 ```bash
+# Graphical User Interface (Default)
 python dataset_manager.py
+
+# Headless CLI - Homogeneity Audit
+python dataset_manager.py audit ./raw_audio
+
+# Headless CLI - 2-Pass Loudness Normalization
+python dataset_manager.py normalize --raw-dir ./raw_audio --out-dir ./processed_dataset
 ```
 
 ---
