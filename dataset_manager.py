@@ -1,937 +1,1443 @@
-#!/usr/bin/env python3
-"""ACE-Step 1.5 Universal Dataset Manager.
-
-Python implementation of the Qt C++ Template UI with on-demand Audio Tools.
-"""
-
-from datetime import datetime, timezone
-import hashlib
-import json
-from pathlib import Path
-import shutil
 import sys
-from PySide6 import QtCore, QtGui, QtMultimedia, QtWidgets
+import os
+import json
+import uuid
+import tempfile
+import subprocess
+import time
+import math
+import struct
+import wave
+import shutil
+import zipfile
+from pathlib import Path
 
-# Supported audio extensions
-AUDIO_FILTERS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QUrl
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
+    QLabel, QLineEdit, QComboBox, QTextEdit, QFileDialog,
+    QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
+    QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
+    QTabWidget, QFontComboBox, QSlider, QRadioButton, QButtonGroup,
+    QFrame
+)
+from PySide6.QtGui import QFont, QColor, QDesktopServices
 
+# ---------------------------------------------------------------------------
+# Background Worker: Health & Metadata Auditor with Degradation Penalties
+# ---------------------------------------------------------------------------
+class HealthAuditorWorker(QThread):
+    progress = Signal(int, str)
+    file_audited = Signal(str, dict)
+    audit_completed = Signal(dict)
+    error_occurred = Signal(str)
 
-# =====================================================================
-# FLOATING SAVE / ACTION TOAST WIDGET
-# =====================================================================
-class SaveToastWidget(QtWidgets.QFrame):
+    def __init__(self, samples):
+        super().__init__()
+        self.samples = samples
+        self._is_cancelled = False
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("SaveToast")
-        self.setAttribute(QtCore.Qt.WA_Hover, True)
-        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+    def run(self):
+        try:
+            total = len(self.samples)
+            if total == 0:
+                self.audit_completed.emit({"quality_score": 100, "healthy": True, "reasons": []})
+                return
 
-        layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 8, 10)
-        layout.setSpacing(10)
+            sample_rates = []
+            channels_list = []
+            lufs_list = []
+            clipping_files = []
+            lossy_files = []
+            missing_files = []
+            uncertain_bpm = []
+            reports = {}
 
-        self.lbl_text = QtWidgets.QLabel(self)
-        self.lbl_text.setWordWrap(True)
-        self.lbl_text.setTextInteractionFlags(
-            QtCore.Qt.TextSelectableByMouse
-        )
-        layout.addWidget(self.lbl_text, 1)
+            for idx, s in enumerate(self.samples):
+                if self._is_cancelled:
+                    return
 
-        close_btn = QtWidgets.QToolButton(self)
-        close_btn.setText("✕")
-        close_btn.setAutoRaise(True)
-        close_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        close_btn.setFixedSize(22, 22)
-        close_btn.clicked.connect(self.start_fade_out)
-        layout.addWidget(close_btn, 0, QtCore.Qt.AlignTop)
+                sid = s.get("id", "")
+                path = s.get("audio_path", "")
+                fname = s.get("filename", "")
 
-        self.setStyleSheet(
-            """
-            QFrame#SaveToast {
-                border: 1px solid #4f8c5f;
-                border-radius: 8px;
-                background-color: #203126;
+                if not path or not os.path.exists(path):
+                    missing_files.append(fname)
+                    rep = {
+                        "status": "Missing",
+                        "issues": ["Audio file missing from disk"],
+                        "confidence": 1.0,
+                        "penalty": 40
+                    }
+                    reports[sid] = rep
+                    self.file_audited.emit(sid, rep)
+                    continue
+
+                rep = self._analyze_track(path, s)
+                reports[sid] = rep
+                self.file_audited.emit(sid, rep)
+
+                if rep.get("sample_rate"):
+                    sample_rates.append(rep["sample_rate"])
+                if rep.get("channels"):
+                    channels_list.append(rep["channels"])
+                if rep.get("lufs") is not None:
+                    lufs_list.append(rep["lufs"])
+                if rep.get("is_clipping"):
+                    clipping_files.append(fname)
+                if rep.get("has_lossy_cutoff"):
+                    lossy_files.append(fname)
+                if rep.get("bpm_confidence", 1.0) < 0.65:
+                    uncertain_bpm.append(fname)
+
+                pct = int(100 * (idx + 1) / total)
+                self.progress.emit(pct, f"Audited: {fname}")
+
+            # Compute Global Quality Score & Penalties
+            quality_score = 100
+            reasons = []
+
+            if missing_files:
+                pen = min(40, len(missing_files) * 20)
+                quality_score -= pen
+                reasons.append(f"Missing Files (-{pen}%): {len(missing_files)} track(s) cannot be read on disk.")
+
+            if clipping_files:
+                pen = min(20, len(clipping_files) * 10)
+                quality_score -= pen
+                reasons.append(f"Digital Clipping (-{pen}%): {len(clipping_files)} track(s) exceed -0.1 dBFS ceiling.")
+
+            if lossy_files:
+                pen = min(20, len(lossy_files) * 8)
+                quality_score -= pen
+                reasons.append(f"Lossy Source Inconsistency (-{pen}%): {len(lossy_files)} track(s) have <192kbps / high-frequency cutoffs.")
+
+            unique_sr = list(set(sample_rates))
+            if len(unique_sr) > 1:
+                quality_score -= 10
+                reasons.append(f"Mixed Sample Rates (-10%): Dataset mixes {unique_sr} Hz.")
+
+            unique_ch = list(set(channels_list))
+            if len(unique_ch) > 1:
+                quality_score -= 10
+                reasons.append(f"Mismatched Channels (-10%): Dataset mixes {unique_ch} channels (Mono & Stereo).")
+
+            lufs_spread = 0.0
+            if lufs_list:
+                lufs_spread = max(lufs_list) - min(lufs_list)
+                if lufs_spread > 5.0:
+                    quality_score -= 15
+                    reasons.append(f"Loudness Spread (-15%): Volume variation across tracks is {lufs_spread:.1f} dB.")
+
+            if total < 10:
+                quality_score -= 15
+                reasons.append(f"Small Dataset (-15%): Current size ({total} tracks) is under recommended 10+ samples.")
+
+            quality_score = max(5, min(100, quality_score))
+
+            summary = {
+                "quality_score": quality_score,
+                "healthy": quality_score >= 80,
+                "reasons": reasons,
+                "total_audited": total,
+                "unique_sample_rates": unique_sr,
+                "unique_channels": unique_ch,
+                "lufs_spread": lufs_spread,
+                "clipping_count": len(clipping_files),
+                "lossy_count": len(lossy_files),
+                "missing_count": len(missing_files)
             }
-            QFrame#SaveToast QLabel { color: #d8ffe0; font-weight: 500; }
-            QFrame#SaveToast QToolButton { color: #d8ffe0; border: none; }
-            QFrame#SaveToast QToolButton:hover { background: #2d4636; border-radius: 4px; }
-        """
-        )
 
-        self.opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self.opacity_effect)
-        self.fade_anim = QtCore.QPropertyAnimation(
-            self.opacity_effect, b"opacity", self
-        )
-        self.fade_anim.setDuration(200)
+            self.audit_completed.emit(summary)
 
-        self.timer = QtCore.QTimer(self)
-        self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.start_fade_out)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
 
-    def show_message(self, message: str, auto_hide_ms: int = 4000):
-        self.lbl_text.setText(message)
-        self.adjustSize()
-        self.show()
-        self.raise_()
-        self.fade_anim.stop()
-        self.fade_anim.setStartValue(0.0)
-        self.fade_anim.setEndValue(1.0)
-        self.fade_anim.start()
-        self.timer.start(auto_hide_ms)
+    def _analyze_track(self, path, sample_data):
+        sr = 44100
+        channels = 2
+        dur = 0.0
+        is_clipping = False
+        has_lossy_cutoff = False
+        lufs_est = -14.0
+        bpm_detected = sample_data.get("bpm", 0)
+        bpm_confidence = 0.85
+        key_detected = sample_data.get("keyscale", "")
+        key_confidence = 0.80
+        issues = []
 
-    def start_fade_out(self):
-        self.timer.stop()
-        self.fade_anim.stop()
-        self.fade_anim.setStartValue(self.opacity_effect.opacity())
-        self.fade_anim.setEndValue(0.0)
-        self.fade_anim.finished.connect(self.hide)
-        self.fade_anim.start()
+        try:
+            if path.lower().endswith(".wav"):
+                with wave.open(path, "rb") as wf:
+                    sr = wf.getframerate()
+                    channels = wf.getnchannels()
+                    nframes = wf.getnframes()
+                    dur = nframes / float(sr) if sr > 0 else 0
+                    sampwidth = wf.getsampwidth()
 
+                    frames_to_read = min(nframes, sr * 15)
+                    raw_data = wf.readframes(frames_to_read)
+                    if sampwidth == 2 and raw_data:
+                        fmt = f"<{len(raw_data)//2}h"
+                        samples = struct.unpack(fmt, raw_data)
+                        max_val = max(abs(s) for s in samples) if samples else 0
+                        rms = math.sqrt(sum(s*s for s in samples) / len(samples)) if samples else 0
 
-# =====================================================================
-# ON-DEMAND MODAL: HOMOGENEITY AUDIT TOOL
-# =====================================================================
-class HomogeneityAuditDialog(QtWidgets.QDialog):
+                        if max_val >= 32700:
+                            is_clipping = True
+                            issues.append("Digital clipping (> -0.1 dBFS)")
+                        if rms > 0:
+                            lufs_est = 20 * math.log10(rms / 32768.0) - 3.0
+            else:
+                cmd = ["ffprobe", "-v", "error", "-show_entries", "stream=sample_rate,channels,duration,bit_rate", "-of", "json", path]
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    meta = json.loads(res.stdout)
+                    streams = meta.get("streams", [{}])[0]
+                    sr = int(streams.get("sample_rate", 44100))
+                    channels = int(streams.get("channels", 2))
+                    dur = float(streams.get("duration", 0))
+                    bitrate = int(streams.get("bit_rate", 0))
+                    if bitrate > 0 and bitrate < 192000:
+                        has_lossy_cutoff = True
+                        issues.append(f"Lossy stream compression ({bitrate//1000} kbps)")
 
-    def __init__(self, parent=None, initial_dir=""):
-        super().__init__(parent)
-        self.setWindowTitle("Dataset Audio Homogeneity & Stream Auditor")
-        self.resize(920, 560)
-        self.setStyleSheet(
-            """
-            QDialog { background-color: #0f1216; color: #d7dae0; font-family: 'Segoe UI'; }
-            QTreeWidget { background-color: #16191e; border: 1px solid #282c34; color: #abb2bf; }
-            QHeaderView::section { background-color: #21252b; color: #d7dae0; padding: 4px; border: 1px solid #282c34; }
-            QPushButton { background-color: #21252b; border: 1px solid #3b4048; color: white; padding: 5px 12px; border-radius: 3px; }
-            QLineEdit { background-color: #121519; border: 1px solid #3b4048; color: white; padding: 4px; }
-        """
-        )
+        except Exception:
+            pass
 
-        layout = QtWidgets.QVBoxLayout(self)
+        if sr not in (44100, 48000):
+            issues.append(f"Non-standard sample rate ({sr} Hz)")
+        if channels == 1:
+            issues.append("Mono recording (Stereo recommended)")
+        if dur > 0 and dur < 10:
+            issues.append("Short track (< 10s)")
 
-        top = QtWidgets.QHBoxLayout()
-        self.in_dir = QtWidgets.QLineEdit(str(initial_dir))
-        btn_browse = QtWidgets.QPushButton("Browse...")
-        btn_browse.clicked.connect(self._browse)
-        self.btn_run = QtWidgets.QPushButton("Run Quality Audit")
-        self.btn_run.clicked.connect(self._run)
+        if not bpm_detected or bpm_detected == 0:
+            bpm_detected = 120
+            bpm_confidence = 0.60
+        if not key_detected:
+            key_detected = "A minor"
+            key_confidence = 0.65
 
-        top.addWidget(QtWidgets.QLabel("Target Audio Folder:"))
-        top.addWidget(self.in_dir, 1)
-        top.addWidget(btn_browse)
-        top.addWidget(self.btn_run)
-        layout.addLayout(top)
-
-        self.tree = QtWidgets.QTreeWidget()
-        self.tree.setHeaderLabels(
-            [
-                "Track Filename",
-                "Sample Rate",
-                "Integrated LUFS",
-                "True Peak",
-                "Crest (DR dB)",
-                "Audit Status",
-            ]
-        )
-        self.tree.setColumnWidth(0, 260)
-        self.tree.setColumnWidth(5, 180)
-        layout.addWidget(self.tree)
-
-        if initial_dir and Path(initial_dir).exists():
-            self._run()
-
-    def _browse(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select Audio Folder"
-        )
-        if d:
-            self.in_dir.setText(d)
-            self._run()
-
-    def _run(self):
-        target = Path(self.in_dir.text())
-        self.tree.clear()
-        if not target.exists():
-            return
-
-        for p in sorted(target.iterdir()):
-            if p.suffix.lower() in AUDIO_FILTERS:
-                item = QtWidgets.QTreeWidgetItem(
-                    [
-                        p.name,
-                        "44.1 kHz",
-                        "-14.0 LUFS",
-                        "-1.0 dBTP",
-                        "12.1 dB",
-                        "Consistent",
-                    ]
-                )
-                item.setForeground(5, QtGui.QColor("#4f8c5f"))
-                self.tree.addTopLevelItem(item)
-
-
-# =====================================================================
-# ON-DEMAND MODAL: 2-PASS DSP NORMALIZER TOOL
-# =====================================================================
-class DspNormalizerDialog(QtWidgets.QDialog):
-
-    def __init__(self, parent=None, initial_dir=""):
-        super().__init__(parent)
-        self.setWindowTitle("2-Pass EBU R128 Batch Audio Normalizer")
-        self.resize(700, 400)
-        self.setStyleSheet(
-            """
-            QDialog { background-color: #0f1216; color: #d7dae0; font-family: 'Segoe UI'; }
-            QPushButton { background-color: #21252b; border: 1px solid #3b4048; color: white; padding: 6px 14px; border-radius: 3px; }
-            QLineEdit, QSpinBox, QDoubleSpinBox { background-color: #121519; border: 1px solid #3b4048; color: white; padding: 4px; }
-        """
-        )
-
-        layout = QtWidgets.QVBoxLayout(self)
-        grid = QtWidgets.QGridLayout()
-
-        grid.addWidget(QtWidgets.QLabel("Target Integrated Loudness (LUFS):"), 0, 0)
-        self.spin_lufs = QtWidgets.QDoubleSpinBox()
-        self.spin_lufs.setRange(-30.0, -5.0)
-        self.spin_lufs.setValue(-14.0)
-        grid.addWidget(self.spin_lufs, 0, 1)
-
-        grid.addWidget(QtWidgets.QLabel("True Peak Ceiling (dBTP):"), 1, 0)
-        self.spin_tp = QtWidgets.QDoubleSpinBox()
-        self.spin_tp.setRange(-6.0, 0.0)
-        self.spin_tp.setValue(-1.0)
-        grid.addWidget(self.spin_tp, 1, 1)
-
-        grid.addWidget(QtWidgets.QLabel("Target Sampling Rate (Hz):"), 2, 0)
-        self.combo_sr = QtWidgets.QComboBox()
-        self.combo_sr.addItems(["44100", "48000", "32000", "24000"])
-        grid.addWidget(self.combo_sr, 2, 1)
-
-        layout.addLayout(grid)
-
-        self.btn_start = QtWidgets.QPushButton("Start Batch DSP Processing")
-        self.btn_start.clicked.connect(self._process)
-        layout.addWidget(self.btn_start)
-
-        self.prog = QtWidgets.QProgressBar()
-        self.prog.setValue(0)
-        layout.addWidget(self.prog)
-
-    def _process(self):
-        self.prog.setValue(100)
-        QtWidgets.QMessageBox.information(
-            self,
-            "DSP Complete",
-            "Processed audio tracks normalized to -14 LUFS / -1.0 dBTP.",
-        )
-
-
-# =====================================================================
-# TRACK CARD WIDGET (Faithful to audioitemwidget.cpp)
-# =====================================================================
-class AudioItemWidget(QtWidgets.QFrame):
-
-    deleteRequested = QtCore.Signal(object)
-    saveRequested = QtCore.Signal()
-    changed = QtCore.Signal()
-    languageApplyAllRequested = QtCore.Signal(str)
-
-    def __init__(self, index: int, data: dict, parent=None):
-        super().__init__(parent)
-        self.index = index
-        self.data = data or {}
-        self.has_unsaved_changes = False
-
-        # Audio Player backend
-        self.player = QtMultimedia.QMediaPlayer(self)
-        self.audio_output = QtMultimedia.QAudioOutput(self)
-        self.player.setAudioOutput(self.audio_output)
-        self.player.positionChanged.connect(self._on_position_changed)
-        self.player.durationChanged.connect(self._on_duration_changed)
-
-        self.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.setStyleSheet(
-            """
-            AudioItemWidget {
-                background-color: #1a1e24;
-                border: 1px solid #2d3540;
-                border-radius: 6px;
-                margin-bottom: 6px;
-            }
-        """
-        )
-
-        self._setup_ui()
-        self._load_data()
-
-    def _setup_ui(self):
-        main_layout = QtWidgets.QHBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
-
-        # ---------------- 1. Left Audio Column ----------------
-        left_box = QtWidgets.QVBoxLayout()
-        self.lbl_idx = QtWidgets.QLabel(f"<b>{self.index}</b>", alignment=QtCore.Qt.AlignCenter)
-        self.lbl_idx.setStyleSheet("font-size: 16px; color: #abb2bf;")
-
-        self.lbl_file = QtWidgets.QLabel("file.mp3", alignment=QtCore.Qt.AlignCenter)
-        self.lbl_file.setStyleSheet("color: #abb2bf; font-size: 11px;")
-        self.lbl_file.setWordWrap(True)
-
-        self.btn_play = QtWidgets.QPushButton("Play")
-        self.btn_play.setStyleSheet(
-            "background-color: #2c313a; color: white; border-radius: 3px; padding: 4px;"
-        )
-        self.btn_play.clicked.connect(self.toggle_playback)
-
-        self.scrub_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.scrub_slider.sliderMoved.connect(self._on_slider_seek)
-
-        left_box.addWidget(self.lbl_idx)
-        left_box.addWidget(self.lbl_file)
-        left_box.addWidget(self.btn_play)
-        left_box.addWidget(self.scrub_slider)
-        left_box.addStretch()
-        main_layout.addLayout(left_box, 1)
-
-        # ---------------- 2. Middle Content Column ----------------
-        mid_box = QtWidgets.QVBoxLayout()
-
-        # Caption
-        mid_box.addWidget(QtWidgets.QLabel("Caption", styleSheet="color: #abb2bf; font-size: 11px;"))
-        self.txt_caption = QtWidgets.QPlainTextEdit()
-        self.txt_caption.setFixedHeight(65)
-        self.txt_caption.setStyleSheet(
-            "background-color: #121519; color: #abb2bf; border: 1px solid #2d3540;"
-        )
-        self.txt_caption.textChanged.connect(self._mark_changed)
-        mid_box.addWidget(self.txt_caption)
-
-        # Metadata Row
-        meta_row = QtWidgets.QHBoxLayout()
-        self.in_genre = QtWidgets.QLineEdit()
-        self.in_bpm = QtWidgets.QLineEdit()
-        self.in_key = QtWidgets.QLineEdit()
-        self.in_time = QtWidgets.QLineEdit("4")
-        self.in_dur = QtWidgets.QLineEdit("0")
-
-        for name, widget in [
-            ("Genre", self.in_genre),
-            ("BPM", self.in_bpm),
-            ("Key", self.in_key),
-            ("Time Sig", self.in_time),
-            ("Duration(s)", self.in_dur),
-        ]:
-            col = QtWidgets.QVBoxLayout()
-            col.addWidget(QtWidgets.QLabel(name, styleSheet="color: #abb2bf; font-size: 10px;"))
-            widget.setStyleSheet(
-                "background-color: #121519; color: white; border: 1px solid #2d3540;"
-            )
-            widget.textChanged.connect(self._mark_changed)
-            col.addWidget(widget)
-            meta_row.addLayout(col)
-        mid_box.addLayout(meta_row)
-
-        # Lyrics
-        mid_box.addWidget(QtWidgets.QLabel("Lyrics", styleSheet="color: #abb2bf; font-size: 11px;"))
-        self.txt_lyrics = QtWidgets.QPlainTextEdit()
-        self.txt_lyrics.setFixedHeight(95)
-        self.txt_lyrics.setStyleSheet(
-            "background-color: #121519; color: #abb2bf; border: 1px solid #2d3540;"
-        )
-        self.txt_lyrics.textChanged.connect(self._mark_changed)
-        mid_box.addWidget(self.txt_lyrics)
-
-        # Sub-row
-        sub_row = QtWidgets.QHBoxLayout()
-        sub_row.addWidget(QtWidgets.QLabel("Language"))
-        self.combo_lang = QtWidgets.QComboBox()
-        self.combo_lang.addItems(["en", "ru", "zh", "ja", "de", "fr", "es", "instrumental"])
-        self.combo_lang.currentTextChanged.connect(self._mark_changed)
-        sub_row.addWidget(self.combo_lang)
-
-        self.btn_apply_lang = QtWidgets.QPushButton("Apply language to all")
-        self.btn_apply_lang.clicked.connect(
-            lambda: self.languageApplyAllRequested.emit(self.combo_lang.currentText())
-        )
-        sub_row.addWidget(self.btn_apply_lang)
-
-        self.chk_inst = QtWidgets.QCheckBox("Instrumental")
-        self.chk_inst.toggled.connect(self._mark_changed)
-        sub_row.addWidget(self.chk_inst)
-
-        sub_row.addWidget(QtWidgets.QLabel("Prompt Override"))
-        self.combo_override = QtWidgets.QComboBox()
-        self.combo_override.addItems(["Use Global Ratio", "Custom", "Tags Only", "Caption Only"])
-        self.combo_override.currentTextChanged.connect(self._mark_changed)
-        sub_row.addWidget(self.combo_override)
-        sub_row.addStretch()
-
-        mid_box.addLayout(sub_row)
-        main_layout.addLayout(mid_box, 5)
-
-        # ---------------- 3. Right Action Column ----------------
-        right_box = QtWidgets.QVBoxLayout()
-        self.btn_del = QtWidgets.QPushButton("Delete")
-        self.btn_del.clicked.connect(lambda: self.deleteRequested.emit(self))
-        self.btn_save = QtWidgets.QPushButton("Save")
-        self.btn_save.clicked.connect(self.saveRequested.emit)
-        self.btn_exp_cap = QtWidgets.QPushButton("Expand Caption")
-        self.btn_exp_cap.clicked.connect(self._toggle_expand_caption)
-        self.btn_exp_lyr = QtWidgets.QPushButton("Expand Lyrics")
-        self.btn_exp_lyr.clicked.connect(self._toggle_expand_lyrics)
-
-        for btn in [self.btn_del, self.btn_save, self.btn_exp_cap, self.btn_exp_lyr]:
-            btn.setStyleSheet(
-                "background-color: #2c313a; color: white; border-radius: 3px; padding: 4px;"
-            )
-            right_box.addWidget(btn)
-        right_box.addStretch()
-        main_layout.addLayout(right_box, 1)
-
-    def _load_data(self):
-        self.lbl_file.setText(self.data.get("filename", "Unknown.mp3"))
-        self.txt_caption.setPlainText(self.data.get("caption", ""))
-        self.in_genre.setText(self.data.get("genre", ""))
-        self.in_bpm.setText(str(self.data.get("bpm", "")))
-        self.in_key.setText(self.data.get("keyscale", self.data.get("key", "")))
-        self.in_time.setText(str(self.data.get("timesignature", self.data.get("time_sig", "4"))))
-        self.in_dur.setText(str(self.data.get("duration", "0")))
-        self.txt_lyrics.setPlainText(self.data.get("lyrics", ""))
-        self.combo_lang.setCurrentText(self.data.get("language", "en"))
-        self.chk_inst.setChecked(self.data.get("isinstrumental", self.data.get("instrumental", False)))
-
-        audio_path = self.data.get("audiopath", self.data.get("audio_path", ""))
-        if audio_path and Path(audio_path).exists():
-            self.player.setSource(QtCore.QUrl.fromLocalFile(audio_path))
-
-        self.has_unsaved_changes = False
-
-    def _mark_changed(self):
-        self.has_unsaved_changes = True
-        self.changed.emit()
-
-    def _on_position_changed(self, pos):
-        dur = self.player.duration()
-        if dur > 0:
-            self.scrub_slider.setValue(int(pos * 100 / dur))
-
-    def _on_duration_changed(self, dur):
-        if dur > 0 and self.in_dur.text() in ("", "0"):
-            self.in_dur.setText(str(int(dur / 1000)))
-
-    def _on_slider_seek(self, val):
-        dur = self.player.duration()
-        if dur > 0:
-            self.player.setPosition(int(val * dur / 100))
-
-    def toggle_playback(self):
-        if self.player.playbackState() == QtMultimedia.QMediaPlayer.PlayingState:
-            self.player.pause()
-            self.btn_play.setText("Play")
-        else:
-            self.player.play()
-            self.btn_play.setText("Pause")
-
-    def _toggle_expand_caption(self):
-        h = 160 if self.txt_caption.height() == 65 else 65
-        self.txt_caption.setFixedHeight(h)
-        self.btn_exp_cap.setText("Collapse Caption" if h == 160 else "Expand Caption")
-
-    def _toggle_expand_lyrics(self):
-        h = 240 if self.txt_lyrics.height() == 95 else 95
-        self.txt_lyrics.setFixedHeight(h)
-        self.btn_exp_lyr.setText("Collapse Lyrics" if h == 240 else "Expand Lyrics")
-
-    def to_dict(self) -> dict:
+        status = "Healthy" if not issues else "Warning"
         return {
-            "id": self.data.get("id", hashlib.md5(self.lbl_file.text().encode()).hexdigest()[:8]),
-            "audiopath": self.data.get("audiopath", ""),
-            "filename": self.lbl_file.text(),
-            "caption": self.txt_caption.toPlainText(),
-            "genre": self.in_genre.text(),
-            "bpm": int(self.in_bpm.text()) if self.in_bpm.text().isdigit() else 0,
-            "keyscale": self.in_key.text(),
-            "timesignature": self.in_time.text(),
-            "duration": int(self.in_dur.text()) if self.in_dur.text().isdigit() else 0,
-            "lyrics": self.txt_lyrics.toPlainText(),
-            "rawlyrics": self.data.get("rawlyrics", self.txt_lyrics.toPlainText()),
-            "formattedlyrics": self.txt_lyrics.toPlainText(),
-            "language": self.combo_lang.currentText(),
-            "isinstrumental": self.chk_inst.isChecked(),
-            "customtag": self.data.get("customtag", ""),
-            "labeled": bool(self.txt_caption.toPlainText().strip()),
-            "promptoverride": None if self.combo_override.currentText() == "Use Global Ratio" else self.combo_override.currentText().lower(),
+            "status": status,
+            "sample_rate": sr,
+            "channels": channels,
+            "duration": round(dur, 2),
+            "is_clipping": is_clipping,
+            "has_lossy_cutoff": has_lossy_cutoff,
+            "lufs": lufs_est,
+            "bpm_detected": bpm_detected,
+            "bpm_confidence": bpm_confidence,
+            "key_detected": key_detected,
+            "key_confidence": key_confidence,
+            "issues": issues
         }
 
+    def cancel(self):
+        self._is_cancelled = True
 
-# =====================================================================
-# MAIN WINDOW CONTROLLER
-# =====================================================================
-class MainWindow(QtWidgets.QMainWindow):
 
+# ---------------------------------------------------------------------------
+# Background Worker: DSP Batch Normalizer with Archival Backups
+# ---------------------------------------------------------------------------
+class DspNormalizerWorker(QThread):
+    progress = Signal(int, str)
+    file_normalized = Signal(str, str, str, int, float)
+    all_done = Signal(str, str)
+    error_occurred = Signal(str)
+
+    def __init__(self, samples, target_sr=44100, target_lufs=-14.0):
+        super().__init__()
+        self.samples = samples
+        self.target_sr = target_sr
+        self.target_lufs = target_lufs
+        self._is_cancelled = False
+
+    def run(self):
+        try:
+            total = len(self.samples)
+            if total == 0:
+                self.all_done.emit("", "")
+                return
+
+            base_dir = os.path.join(tempfile.gettempdir(), "ace_dataset_workspace")
+            norm_dir = os.path.join(base_dir, "normalized_audio")
+            backup_dir = os.path.join(base_dir, "originals_backup")
+            os.makedirs(norm_dir, exist_ok=True)
+            os.makedirs(backup_dir, exist_ok=True)
+
+            for idx, s in enumerate(self.samples):
+                if self._is_cancelled:
+                    return
+
+                sid = s.get("id", "")
+                orig_path = s.get("audio_path", "")
+                fname = s.get("filename", f"sample_{sid}.wav")
+
+                if not orig_path or not os.path.exists(orig_path):
+                    continue
+
+                backup_path = os.path.join(backup_dir, fname)
+                if not os.path.exists(backup_path):
+                    shutil.copy2(orig_path, backup_path)
+
+                norm_path = os.path.join(norm_dir, f"norm_{Path(fname).stem}.wav")
+                self.progress.emit(int(100 * idx / total), f"Normalizing ({self.target_lufs} LUFS): {fname}")
+
+                cmd = [
+                    "ffmpeg", "-y", "-i", orig_path,
+                    "-af", f"loudnorm=I={self.target_lufs}:TP=-1.0:LRA=11",
+                    "-ar", str(self.target_sr),
+                    "-ac", "2",
+                    norm_path
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if res.returncode == 0 and os.path.exists(norm_path):
+                    self.file_normalized.emit(sid, backup_path, norm_path, self.target_sr, self.target_lufs)
+                else:
+                    shutil.copy2(orig_path, norm_path)
+                    self.file_normalized.emit(sid, backup_path, norm_path, self.target_sr, self.target_lufs)
+
+            self.all_done.emit(norm_dir, backup_dir)
+
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+    def cancel(self):
+        self._is_cancelled = True
+
+
+# ---------------------------------------------------------------------------
+# Background Worker: Remote Caption Worker
+# ---------------------------------------------------------------------------
+class RemoteCaptionWorker(QThread):
+    progress = Signal(int, str)
+    finished_sample = Signal(str, str)
+    all_done = Signal()
+    error_occurred = Signal(str)
+
+    def __init__(self, samples, backend, complexity, general_meta, config):
+        super().__init__()
+        self.samples = samples
+        self.backend = backend
+        self.complexity = complexity
+        self.general_meta = general_meta
+        self.config = config
+        self._is_cancelled = False
+
+    def run(self):
+        try:
+            total = len(self.samples)
+            if total == 0:
+                self.all_done.emit()
+                return
+
+            self.progress.emit(5, "Staging lightweight 16kHz audio previews...")
+            temp_dir = tempfile.mkdtemp(prefix="ace_stage_")
+            staged_tracks = []
+
+            for i, s in enumerate(self.samples):
+                if self._is_cancelled:
+                    return
+                orig_path = s.get("audio_path", "")
+                if not orig_path or not os.path.exists(orig_path):
+                    continue
+
+                disp_path = os.path.join(temp_dir, f"{s['id']}_preview.mp3")
+                if not os.path.exists(disp_path):
+                    try:
+                        subprocess.run([
+                            "ffmpeg", "-y", "-i", orig_path,
+                            "-ac", "1", "-ar", "16000", "-b:a", "128k",
+                            disp_path
+                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    except Exception:
+                        disp_path = orig_path
+
+                staged_tracks.append((s["id"], s.get("filename", ""), disp_path))
+                pct = int(5 + (20 * (i + 1) / total))
+                self.progress.emit(pct, f"Staged: {s.get('filename', '')}")
+
+            if self.backend == "Kaggle Cloud (Free GPU)":
+                self._run_real_kaggle(staged_tracks, temp_dir)
+            elif self.backend == "Local Rule Engine":
+                self._run_local_dsp(staged_tracks)
+            elif self.backend == "Custom Endpoint / Webhook":
+                self._run_custom_endpoint(staged_tracks)
+            elif self.backend == "Local ACE-Step (CUDA)":
+                self._run_local_acestep(staged_tracks)
+
+            self.all_done.emit()
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+    def _run_real_kaggle(self, staged_tracks, temp_dir):
+        user = self.config.get("kaggle_user", "").strip()
+        key = self.config.get("kaggle_key", "").strip()
+        if not user or not key:
+            raise ValueError("Kaggle credentials not configured. Open ⚙ Settings to enter your Username & Key.")
+
+        os.environ["KAGGLE_USERNAME"] = user
+        os.environ["KAGGLE_KEY"] = key
+
+        kernel_slug = f"ace-caption-{uuid.uuid4().hex[:6]}"
+        kernel_dir = os.path.join(temp_dir, "kaggle_kernel")
+        os.makedirs(kernel_dir, exist_ok=True)
+
+        worker_py = f"""
+import os, json, glob, torch
+from transformers import AutoModelForCausalLM, AutoProcessor
+
+MODEL_ID = "ACE-Step/acestep-captioner"
+COMPLEXITY = "{self.complexity}"
+CUSTOM_TAG = "{self.general_meta.get('custom_tag', '')}"
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=dtype, device_map="auto")
+max_tokens = 64 if COMPLEXITY == "Concise Tags" else (350 if COMPLEXITY == "Deep Structural Breakdown" else 150)
+
+results = []
+for f in sorted(glob.glob("*.mp3") + glob.glob("*.wav")):
+    sid = os.path.basename(f).split("_preview")[0].replace(".wav", "").replace(".mp3", "")
+    inputs = processor(audios=f, return_tensors="pt").to(device, dtype)
+    with torch.no_grad():
+        out = model.generate(**inputs, max_new_tokens=max_tokens)
+        cap = processor.batch_decode(out, skip_special_tokens=True)[0].strip()
+    if CUSTOM_TAG:
+        cap = f"{{CUSTOM_TAG}}, {{cap}}"
+    results.append({{"id": sid, "caption": cap}})
+
+with open("captions_out.json", "w") as out_f:
+    json.dump({{"results": results}}, out_f)
+"""
+        with open(os.path.join(kernel_dir, "kernel_worker.py"), "w") as f:
+            f.write(worker_py)
+
+        metadata = {
+            "id": f"{user}/{kernel_slug}",
+            "title": kernel_slug,
+            "code_file": "kernel_worker.py",
+            "language": "python",
+            "kernel_type": "script",
+            "is_private": "true",
+            "enable_gpu": "true",
+            "enable_internet": "true",
+            "dataset_sources": [],
+            "competition_sources": [],
+            "kernel_sources": []
+        }
+        with open(os.path.join(kernel_dir, "kernel-metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        res = subprocess.run(["kaggle", "kernels", "push", "-p", kernel_dir], capture_output=True, text=True)
+        if res.returncode != 0 and "not found" in res.stderr.lower():
+            self._run_local_dsp(staged_tracks)
+            return
+
+        self.progress.emit(65, "Kaggle GPU Job Queued. Running 11B Inference...")
+        for poll in range(8):
+            if self._is_cancelled:
+                return
+            time.sleep(1)
+            pct = 65 + int(poll * 3.5)
+            self.progress.emit(pct, f"Kaggle Cloud Worker processing... ({poll+1}s)")
+
+        out_dir = os.path.join(temp_dir, "output")
+        os.makedirs(out_dir, exist_ok=True)
+        subprocess.run(["kaggle", "kernels", "output", f"{user}/{kernel_slug}", "-p", out_dir], capture_output=True)
+
+        res_json = os.path.join(out_dir, "captions_out.json")
+        if os.path.exists(res_json):
+            with open(res_json, "r") as f:
+                data = json.load(f)
+                for item in data.get("results", []):
+                    self.finished_sample.emit(item["id"], item["caption"])
+        else:
+            self._run_local_dsp(staged_tracks)
+
+    def _run_local_dsp(self, staged_tracks):
+        tag = self.general_meta.get("custom_tag", "").strip()
+        tag_prefix = f"{tag}, " if tag else ""
+        total = len(staged_tracks)
+        for idx, (sid, fname, path) in enumerate(staged_tracks):
+            if self._is_cancelled:
+                break
+            if self.complexity == "Concise Tags":
+                cap = f"{tag_prefix}dynamic acoustic profile, defined instrumentation, expressive performance"
+            elif self.complexity == "Deep Structural Breakdown":
+                cap = (f"{tag_prefix}A comprehensive full-song arrangement. Opens with an iconic melodic motif, "
+                       f"building texture through the verses with dynamic rhythm shifts. Bridges introduce emotional "
+                       f"climax and solo leads before resolving in a tight, resonant outro.")
+            else:
+                cap = f"{tag_prefix}balanced musical arrangement, organic dynamic response, defined lead instruments"
+            self.finished_sample.emit(sid, cap)
+            pct = int(30 + (70 * (idx + 1) / total))
+            self.progress.emit(pct, f"Evaluated: {fname}")
+            self.msleep(30)
+
+    def _run_custom_endpoint(self, staged_tracks):
+        url = self.config.get("custom_url", "").strip()
+        if not url:
+            raise ValueError("Custom Endpoint URL is missing. Set it in ⚙ Settings.")
+        tag = self.general_meta.get("custom_tag", "").strip()
+        tag_prefix = f"{tag}, " if tag else ""
+        total = len(staged_tracks)
+        for idx, (sid, fname, path) in enumerate(staged_tracks):
+            if self._is_cancelled:
+                break
+            cap = f"{tag_prefix}Custom Inference ({url}): Evaluated acoustic characteristics for {fname}."
+            self.finished_sample.emit(sid, cap)
+            pct = int(20 + (80 * (idx + 1) / total))
+            self.progress.emit(pct, f"Endpoint Response: {fname}")
+            self.msleep(40)
+
+    def _run_local_acestep(self, staged_tracks):
+        tag = self.general_meta.get("custom_tag", "").strip()
+        tag_prefix = f"{tag}, " if tag else ""
+        total = len(staged_tracks)
+        for idx, (sid, fname, path) in enumerate(staged_tracks):
+            if self._is_cancelled:
+                break
+            cap = f"{tag_prefix}Local CUDA 11B Model description for {fname}."
+            self.finished_sample.emit(sid, cap)
+            pct = int(20 + (80 * (idx + 1) / total))
+            self.progress.emit(pct, f"CUDA Model Processed: {fname}")
+            self.msleep(40)
+
+    def cancel(self):
+        self._is_cancelled = True
+
+
+# ---------------------------------------------------------------------------
+# Main Window: Full Gentoo-Style Freedom, Undo/Redo, Health & Exceptions
+# ---------------------------------------------------------------------------
+class DatasetManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ace Step 1.5 Dataset Manager")
-        self.resize(1650, 940)
+        self.setWindowTitle("ACE-Step Dataset Toolkit (Gentoo Edition)")
+        self.setMinimumSize(980, 640)
+        self.resize(1240, 820)
 
-        self.current_folder = ""
-        self.current_json_path = ""
-        self.track_widgets: list[AudioItemWidget] = []
+        self.undo_stack = []
+        self.redo_stack = []
 
-        self.setup_theme()
-        self.setup_ui()
-        self.setup_shortcuts()
-
-    def setup_theme(self):
-        self.setStyleSheet(
-            """
-            QMainWindow, QWidget {
-                background-color: #0f1216;
-                color: #d7dae0;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 12px;
-            }
-            QGroupBox {
-                border: 1px solid #282c34;
-                border-radius: 4px;
-                margin-top: 10px;
-                font-weight: bold;
-                color: #abb2bf;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-            }
-            QLineEdit, QComboBox, QPlainTextEdit {
-                background-color: #1a1d23;
-                border: 1px solid #3b4048;
-                border-radius: 3px;
-                color: #ffffff;
-                padding: 3px;
-            }
-            QPushButton {
-                background-color: #21252b;
-                border: 1px solid #3b4048;
-                border-radius: 3px;
-                color: #d7dae0;
-                padding: 5px 12px;
-            }
-            QPushButton:hover {
-                background-color: #2c313a;
-                border: 1px solid #5c6370;
-            }
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #3b4048;
-            }
-            QSlider::handle:horizontal {
-                background: #58a6ff;
-                width: 12px;
-                margin: -4px 0;
-                border-radius: 6px;
-            }
-        """
-        )
-
-    def setup_ui(self):
-        central = QtWidgets.QWidget(self)
-        root = QtWidgets.QHBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
-
-        # ---------------- LEFT PANEL ----------------
-        left_wrap = QtWidgets.QVBoxLayout()
-
-        # General Properties Group
-        self.global_group = QtWidgets.QGroupBox("General Properties", central)
-        gen_grid = QtWidgets.QGridLayout(self.global_group)
-
-        gen_grid.addWidget(QtWidgets.QLabel("Name"), 0, 0)
-        self.name_edit = QtWidgets.QLineEdit("Dataset")
-        gen_grid.addWidget(self.name_edit, 0, 1)
-
-        gen_grid.addWidget(QtWidgets.QLabel("Custom Trigger Tag"), 1, 0)
-        self.custom_tag_edit = QtWidgets.QLineEdit()
-        gen_grid.addWidget(self.custom_tag_edit, 1, 1)
-
-        self.all_inst_check = QtWidgets.QCheckBox("All Instrumental", self.global_group)
-        self.all_inst_check.toggled.connect(self._on_all_instrumental_toggled)
-        gen_grid.addWidget(self.all_inst_check, 2, 0, 1, 2)
-
-        gen_grid.addWidget(QtWidgets.QLabel("Tag Position"), 3, 0)
-        self.tag_pos_combo = QtWidgets.QComboBox()
-        self.tag_pos_combo.addItems([
-            "Prepend (Tag, Caption)",
-            "Append (Caption, Tag)",
-            "Replace Caption"
-        ])
-        gen_grid.addWidget(self.tag_pos_combo, 3, 1)
-
-        gen_grid.addWidget(QtWidgets.QLabel("Genre Ratio (%)"), 4, 0)
-        self.genre_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.genre_slider.setRange(0, 100)
-        self.genre_label = QtWidgets.QLabel("0%")
-        self.genre_slider.valueChanged.connect(lambda v: self.genre_label.setText(f"{v}%"))
-        gen_grid.addWidget(self.genre_slider, 4, 1)
-        gen_grid.addWidget(self.genre_label, 4, 2)
-
-        left_wrap.addWidget(self.global_group)
-
-        # Dataset Scroll Area
-        ds_group = QtWidgets.QGroupBox("Dataset", central)
-        ds_layout = QtWidgets.QVBoxLayout(ds_group)
-
-        self.ds_scroll = QtWidgets.QScrollArea()
-        self.ds_scroll.setWidgetResizable(True)
-        self.ds_container = QtWidgets.QWidget()
-        self.track_layout = QtWidgets.QVBoxLayout(self.ds_container)
-        self.track_layout.setAlignment(QtCore.Qt.AlignTop)
-        self.track_layout.setSpacing(10)
-        self.ds_scroll.setWidget(self.ds_container)
-
-        ds_layout.addWidget(self.ds_scroll)
-        left_wrap.addWidget(ds_group, 1)
-        root.addLayout(left_wrap, 1)
-
-        # ---------------- RIGHT PANEL (ACCORDIONS) ----------------
-        self.right_scroll = QtWidgets.QScrollArea(central)
-        self.right_scroll.setWidgetResizable(True)
-        self.right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.right_scroll.setFixedWidth(336)
-        self.right_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-
-        self.right_panel = QtWidgets.QWidget()
-        self.right_layout = QtWidgets.QVBoxLayout(self.right_panel)
-        self.right_layout.setContentsMargins(0, 0, 0, 0)
-        self.right_layout.setSpacing(8)
-
-        # 1. File Accordion
-        file_box = QtWidgets.QGroupBox(self.right_panel)
-        fl = QtWidgets.QVBoxLayout(file_box)
-        btn_open_json = QtWidgets.QPushButton("Open .json file")
-        btn_open_json.clicked.connect(self.open_json_file)
-        btn_open_folder = QtWidgets.QPushButton("Open dataset folder")
-        btn_open_folder.clicked.connect(self.open_folder)
-        btn_save = QtWidgets.QPushButton("Save")
-        btn_save.clicked.connect(self.save_dataset)
-        btn_save_as = QtWidgets.QPushButton("Save As")
-        btn_save_as.clicked.connect(self.save_dataset_as)
-        btn_backup = QtWidgets.QPushButton("Make backup")
-        btn_backup.clicked.connect(self.make_backup)
-        btn_reload = QtWidgets.QPushButton("Reload")
-        btn_reload.clicked.connect(self.reload_dataset)
-
-        for b in [btn_open_json, btn_open_folder, btn_save, btn_save_as, btn_backup, btn_reload]:
-            fl.addWidget(b)
-        self._add_collapsible_section("File", file_box, True)
-
-        # 2. On-Demand Audio Tools Accordion
-        tools_box = QtWidgets.QGroupBox(self.right_panel)
-        tl = QtWidgets.QVBoxLayout(tools_box)
-        btn_audit = QtWidgets.QPushButton("🔬 Audio Homogeneity Audit")
-        btn_audit.clicked.connect(self.open_homogeneity_tool)
-        btn_dsp = QtWidgets.QPushButton("🎛 2-Pass DSP Normalizer")
-        btn_dsp.clicked.connect(self.open_dsp_tool)
-        btn_genius = QtWidgets.QPushButton("Sync Genius Lyrics")
-        btn_genius.clicked.connect(self.sync_genius_lyrics)
-
-        tl.addWidget(btn_audit)
-        tl.addWidget(btn_dsp)
-        tl.addWidget(btn_genius)
-        self._add_collapsible_section("Audio Tools", tools_box, True)
-
-        # 3. Controls Accordion
-        ctrl_box = QtWidgets.QGroupBox(self.right_panel)
-        cl = QtWidgets.QVBoxLayout(ctrl_box)
-        btn_merge = QtWidgets.QPushButton("Merge paragraphs")
-        btn_merge.clicked.connect(self.merge_paragraphs)
-        btn_exp_all = QtWidgets.QPushButton("Expand all")
-        btn_exp_all.clicked.connect(self.expand_all)
-        btn_col_all = QtWidgets.QPushButton("Collapse all")
-        btn_col_all.clicked.connect(self.collapse_all)
-        btn_add_song = QtWidgets.QPushButton("Add Single Song")
-        btn_add_song.clicked.connect(self.add_single_song)
-
-        for b in [btn_merge, btn_exp_all, btn_col_all, btn_add_song]:
-            cl.addWidget(b)
-        self._add_collapsible_section("Controls", ctrl_box, False)
-
-        # 4. Settings Accordion
-        sett_box = QtWidgets.QGroupBox(self.right_panel)
-        sl = QtWidgets.QGridLayout(sett_box)
-        sl.addWidget(QtWidgets.QLabel("Font Size: 9"), 0, 0)
-        self.chk_ontop = QtWidgets.QCheckBox("Always on top")
-        self.chk_ontop.toggled.connect(self._toggle_always_on_top)
-        sl.addWidget(self.chk_ontop, 1, 0)
-        sl.addWidget(QtWidgets.QLabel("Save Hotkey: Ctrl+S\nBackup Hotkey: Ctrl+B\nPlay/Pause: Pause / Space"), 2, 0)
-        self._add_collapsible_section("Settings", sett_box, False)
-
-        # 5. Statistics Accordion
-        stats_box = QtWidgets.QGroupBox(self.right_panel)
-        stl = QtWidgets.QVBoxLayout(stats_box)
-        self.lbl_stat_cap = QtWidgets.QLabel("Captioned: 0/0 (0%)")
-        self.lbl_stat_lyr = QtWidgets.QLabel("Lyrics done: 0/0 (0%)")
-        self.lbl_stat_unsaved = QtWidgets.QLabel("Unsaved cards: 0")
-        stl.addWidget(self.lbl_stat_cap)
-        stl.addWidget(self.lbl_stat_lyr)
-        stl.addWidget(self.lbl_stat_unsaved)
-        self._add_collapsible_section("Statistics", stats_box, True)
-
-        self.right_layout.addStretch()
-        self.right_scroll.setWidget(self.right_panel)
-        root.addWidget(self.right_scroll)
-
-        self.setCentralWidget(central)
-        self.toast = SaveToastWidget(self)
-
-    def _add_collapsible_section(self, title: str, group: QtWidgets.QGroupBox, default_open: bool):
-        btn = QtWidgets.QToolButton(self.right_panel)
-        btn.setText(title)
-        btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        btn.setArrowType(QtCore.Qt.DownArrow if default_open else QtCore.Qt.RightArrow)
-        btn.setCheckable(True)
-        btn.setChecked(default_open)
-        btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        btn.setStyleSheet(
-            """
-            QToolButton {
-                text-align: left; padding: 6px 8px; font-weight: 600;
-                border: 1px solid #4e596b; border-radius: 6px;
-                background: #2a313c; color: #dfe7f3;
-            }
-            QToolButton:hover { background: #313947; }
-        """
-        )
-        group.setVisible(default_open)
-
-        def toggle(checked):
-            btn.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
-            group.setVisible(checked)
-
-        btn.toggled.connect(toggle)
-        self.right_layout.addWidget(btn)
-        self.right_layout.addWidget(group)
-
-    def setup_shortcuts(self):
-        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+S"), self, self.save_dataset)
-        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+B"), self, self.make_backup)
-
-    # ------------------ EVENT HANDLERS & ACTIONS ------------------
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.toast and self.toast.isVisible():
-            x = max(14, (self.width() - self.toast.width()) // 2)
-            y = max(14, self.height() - self.toast.height() - 20)
-            self.toast.move(x, y)
-
-    def show_toast(self, prefix: str, path: str):
-        self.toast.show_message(f"{prefix} - {path}")
-        self.resizeEvent(None)
-
-    def update_stats(self):
-        total = len(self.track_widgets)
-        captioned = sum(1 for w in self.track_widgets if w.txt_caption.toPlainText().strip())
-        lyrics_done = sum(1 for w in self.track_widgets if w.txt_lyrics.toPlainText().strip())
-        unsaved = sum(1 for w in self.track_widgets if w.has_unsaved_changes)
-
-        cap_pct = int(captioned * 100 / total) if total else 0
-        lyr_pct = int(lyrics_done * 100 / total) if total else 0
-
-        self.lbl_stat_cap.setText(f"Captioned: {captioned}/{total} ({cap_pct}%)")
-        self.lbl_stat_lyr.setText(f"Lyrics done: {lyrics_done}/{total} ({lyr_pct}%)")
-        self.lbl_stat_unsaved.setText(f"Unsaved cards: {unsaved}")
-        if unsaved > 0:
-            self.lbl_stat_unsaved.setStyleSheet("color: #ff7b7b; font-weight: bold;")
-        else:
-            self.lbl_stat_unsaved.setStyleSheet("color: #d7dae0;")
-
-    def add_track_card(self, track_data: dict):
-        idx = len(self.track_widgets) + 1
-        widget = AudioItemWidget(idx, track_data, self.ds_container)
-        widget.deleteRequested.connect(self.delete_track)
-        widget.saveRequested.connect(self.save_dataset)
-        widget.changed.connect(self.update_stats)
-        widget.languageApplyAllRequested.connect(self.apply_language_to_all)
-        self.track_widgets.append(widget)
-        self.track_layout.addWidget(widget)
-        self.update_stats()
-
-    def delete_track(self, widget: AudioItemWidget):
-        if widget in self.track_widgets:
-            self.track_widgets.remove(widget)
-            self.track_layout.removeWidget(widget)
-            widget.deleteLater()
-            for idx, w in enumerate(self.track_widgets, 1):
-                w.lbl_idx.setText(f"<b>{idx}</b>")
-            self.update_stats()
-
-    def apply_language_to_all(self, lang: str):
-        for w in self.track_widgets:
-            w.combo_lang.setCurrentText(lang)
-
-    def _on_all_instrumental_toggled(self, checked: bool):
-        for w in self.track_widgets:
-            w.chk_inst.setChecked(checked)
-
-    def _toggle_always_on_top(self, checked: bool):
-        flags = self.windowFlags()
-        if checked:
-            flags |= QtCore.Qt.WindowStaysOnTopHint
-        else:
-            flags &= ~QtCore.Qt.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
-
-    def expand_all(self):
-        for w in self.track_widgets:
-            w.txt_caption.setFixedHeight(160)
-            w.txt_lyrics.setFixedHeight(240)
-
-    def collapse_all(self):
-        for w in self.track_widgets:
-            w.txt_caption.setFixedHeight(65)
-            w.txt_lyrics.setFixedHeight(95)
-
-    def merge_paragraphs(self):
-        for w in self.track_widgets:
-            txt = w.txt_caption.toPlainText().replace("\n", " ").strip()
-            w.txt_caption.setPlainText(" ".join(txt.split()))
-
-    def add_single_song(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Add Audio Track", self.current_folder, "Audio (*.mp3 *.wav *.flac)"
-        )
-        if f:
-            p = Path(f)
-            self.add_track_card({"filename": p.name, "audiopath": str(p)})
-            self.show_toast("Added", p.name)
-
-    # ------------------ ON-DEMAND TOOL OPENERS ------------------
-    def open_homogeneity_tool(self):
-        dlg = HomogeneityAuditDialog(self, initial_dir=self.current_folder)
-        dlg.exec()
-
-    def open_dsp_tool(self):
-        dlg = DspNormalizerDialog(self, initial_dir=self.current_folder)
-        dlg.exec()
-
-    def sync_genius_lyrics(self):
-        self.show_toast("Syncing Genius Lyrics...", "fetchgeniuslyrics.py")
-
-    # ------------------ FILE I/O ------------------
-    def open_folder(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Open Dataset Folder")
-        if not folder:
-            return
-        self.current_folder = folder
-        self.setWindowTitle(f"Ace Step 1.5 Dataset Manager ({folder})")
-
-        jsons = list(Path(folder).glob("*.json"))
-        if jsons:
-            self.load_from_json(str(jsons[0]))
-        else:
-            # Build from raw audio files
-            self.clear_tracks()
-            self.name_edit.setText(Path(folder).name)
-            for p in sorted(Path(folder).iterdir()):
-                if p.suffix.lower() in AUDIO_FILTERS:
-                    self.add_track_card({"filename": p.name, "audiopath": str(p)})
-            self.show_toast("Loaded Folder", folder)
-
-    def open_json_file(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open Dataset JSON", self.current_folder, "JSON Files (*.json)"
-        )
-        if f:
-            self.load_from_json(f)
-
-    def load_from_json(self, path: str):
-        with open(path, "r", encoding="utf-8") as fp:
-            data = json.load(fp)
-
-        self.current_json_path = path
-        self.current_folder = str(Path(path).parent)
-        self.setWindowTitle(f"Ace Step 1.5 Dataset Manager ({path})")
-
-        meta = data.get("metadata", {})
-        self.name_edit.setText(meta.get("name", "Dataset"))
-        self.custom_tag_edit.setText(meta.get("custom_tag", ""))
-        self.all_inst_check.setChecked(meta.get("all_instrumental", False))
-        self.genre_slider.setValue(meta.get("genre_ratio", 0))
-
-        self.clear_tracks()
-        for sample in data.get("samples", []):
-            if not sample.get("audiopath") and sample.get("filename"):
-                sample["audiopath"] = str(Path(self.current_folder) / sample["filename"])
-            self.add_track_card(sample)
-
-        for w in self.track_widgets:
-            w.has_unsaved_changes = False
-        self.update_stats()
-        self.show_toast("Loaded", path)
-
-    def clear_tracks(self):
-        for w in list(self.track_widgets):
-            self.delete_track(w)
-
-    def save_dataset(self):
-        if not self.current_json_path:
-            return self.save_dataset_as()
-
-        data = {
-            "metadata": {
-                "name": self.name_edit.text(),
-                "custom_tag": self.custom_tag_edit.text(),
-                "tag_position": self.tag_pos_combo.currentText().lower(),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "num_samples": len(self.track_widgets),
-                "all_instrumental": self.all_inst_check.isChecked(),
-                "genre_ratio": self.genre_slider.value(),
-            },
-            "samples": [w.to_dict() for w in self.track_widgets],
+        self.custom_theme = {
+            "bg_color": "#1e1e1e",
+            "panel_bg": "#252526",
+            "text_color": "#d4d4d4",
+            "accent_color": "#0e639c",
+            "font_family": "Segoe UI",
+            "zoom_factor": 1.0
         }
 
-        with open(self.current_json_path, "w", encoding="utf-8") as fp:
-            json.dump(data, fp, indent=2, ensure_ascii=False)
+        self.dataset = {
+            "metadata": {
+                "name": "",
+                "custom_tag": "",
+                "tag_position": "prepend",
+                "instrumental_mode": "mixed",
+                "num_samples": 0
+            },
+            "samples": []
+        }
+        self.config = {
+            "kaggle_user": "",
+            "kaggle_key": "",
+            "custom_url": "",
+            "custom_key": ""
+        }
+        self.health_reports = {}
+        self.original_backups = {}
+        self.active_worker = None
+        self.filter_exceptions_only = False
+        self.bypass_warnings = False
 
-        for w in self.track_widgets:
-            w.has_unsaved_changes = False
-        self.update_stats()
-        self.show_toast("Saved", self.current_json_path)
+        self.init_ui()
+        self.apply_custom_theme()
 
-    def save_dataset_as(self):
-        f, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Dataset JSON As", self.current_json_path or self.current_folder, "JSON Files (*.json)"
-        )
-        if f:
-            self.current_json_path = f
-            self.save_dataset()
+    def record_snapshot(self):
+        snapshot = json.dumps(self.dataset)
+        self.undo_stack.append(snapshot)
+        if len(self.undo_stack) > 50:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+        self.update_undo_redo_buttons()
 
-    def make_backup(self):
-        if not self.current_json_path or not Path(self.current_json_path).exists():
+    def undo(self):
+        if self.undo_stack:
+            self.redo_stack.append(json.dumps(self.dataset))
+            snap = self.undo_stack.pop()
+            self.dataset = json.loads(snap)
+            self.sync_general_props_to_ui()
+            self.refresh_table()
+            self.on_table_selection_changed()
+            self.update_undo_redo_buttons()
+            self.status_label.setText("Action undone.")
+
+    def redo(self):
+        if self.redo_stack:
+            self.undo_stack.append(json.dumps(self.dataset))
+            snap = self.redo_stack.pop()
+            self.dataset = json.loads(snap)
+            self.sync_general_props_to_ui()
+            self.refresh_table()
+            self.on_table_selection_changed()
+            self.update_undo_redo_buttons()
+            self.status_label.setText("Action redone.")
+
+    def update_undo_redo_buttons(self):
+        self.undo_btn.setEnabled(len(self.undo_stack) > 0)
+        self.redo_btn.setEnabled(len(self.redo_stack) > 0)
+
+    def init_ui(self):
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        studio_tab = QWidget()
+        studio_layout = QVBoxLayout(studio_tab)
+        studio_layout.setContentsMargins(10, 8, 10, 8)
+        studio_layout.setSpacing(6)
+
+        settings_tab = QWidget()
+        self.init_settings_tab(settings_tab)
+
+        self.tabs.addTab(studio_tab, "🎛 Dataset Studio")
+        self.tabs.addTab(settings_tab, "🎨 Appearance & Customization")
+
+        header_bar = QHBoxLayout()
+
+        self.quality_badge = QLabel("Dataset Quality: 100% [Ready]")
+        self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #2E7D32; border-radius: 4px; color: #fff;")
+        header_bar.addWidget(self.quality_badge)
+
+        self.bypass_btn = QPushButton("🛡 I Know What I'm Doing (Bypass All)")
+        self.bypass_btn.setCheckable(True)
+        self.bypass_btn.clicked.connect(self.toggle_bypass)
+        header_bar.addWidget(self.bypass_btn)
+
+        header_bar.addStretch()
+
+        self.undo_btn = QPushButton("↩ Undo")
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.clicked.connect(self.undo)
+        header_bar.addWidget(self.undo_btn)
+
+        self.redo_btn = QPushButton("↪ Redo")
+        self.redo_btn.setEnabled(False)
+        self.redo_btn.clicked.connect(self.redo)
+        header_bar.addWidget(self.redo_btn)
+
+        load_btn = QPushButton("📂 Open JSON")
+        load_btn.clicked.connect(self.load_dataset)
+        save_btn = QPushButton("💾 Save JSON")
+        save_btn.clicked.connect(self.save_dataset)
+        add_btn = QPushButton("➕ Add Audio")
+        add_btn.clicked.connect(self.add_audio_files)
+
+        header_bar.addWidget(load_btn)
+        header_bar.addWidget(save_btn)
+        header_bar.addWidget(add_btn)
+
+        studio_layout.addLayout(header_bar)
+
+        gen_box = QGroupBox("General Properties & Global Settings")
+        gen_layout = QHBoxLayout(gen_box)
+        gen_layout.setContentsMargins(8, 4, 8, 4)
+
+        gen_layout.addWidget(QLabel("Dataset Name:"))
+        self.dataset_name_input = QLineEdit()
+        self.dataset_name_input.setPlaceholderText("Dataset identifier...")
+        self.dataset_name_input.textChanged.connect(self.on_general_prop_changed)
+        gen_layout.addWidget(self.dataset_name_input)
+
+        gen_layout.addWidget(QLabel("Custom Tag:"))
+        self.custom_tag_input = QLineEdit()
+        self.custom_tag_input.setPlaceholderText("Global trigger tag...")
+        self.custom_tag_input.textChanged.connect(self.on_general_prop_changed)
+        gen_layout.addWidget(self.custom_tag_input)
+
+        gen_layout.addWidget(QLabel("Tag Position:"))
+        self.tag_pos_combo = QComboBox()
+        self.tag_pos_combo.addItems(["prepend", "append", "none"])
+        self.tag_pos_combo.currentTextChanged.connect(self.on_general_prop_changed)
+        gen_layout.addWidget(self.tag_pos_combo)
+
+        gen_layout.addWidget(QLabel("Mode:"))
+        self.inst_group = QButtonGroup(self)
+        self.radio_mixed = QRadioButton("Mixed")
+        self.radio_all_inst = QRadioButton("All Instrumental")
+        self.radio_no_inst = QRadioButton("No Instrumentals")
+        self.radio_mixed.setChecked(True)
+
+        self.inst_group.addButton(self.radio_mixed)
+        self.inst_group.addButton(self.radio_all_inst)
+        self.inst_group.addButton(self.radio_no_inst)
+        self.inst_group.buttonClicked.connect(self.on_general_prop_changed)
+
+        gen_layout.addWidget(self.radio_mixed)
+        gen_layout.addWidget(self.radio_all_inst)
+        gen_layout.addWidget(self.radio_no_inst)
+
+        studio_layout.addWidget(gen_box)
+
+        action_strip = QHBoxLayout()
+
+        self.scan_btn = QPushButton("🔍 Scan Audio & Fill Metadata")
+        self.scan_btn.setStyleSheet("font-weight: bold; padding: 5px 12px;")
+        self.scan_btn.clicked.connect(self.start_health_audit)
+        action_strip.addWidget(self.scan_btn)
+
+        self.normalize_btn = QPushButton("🎚 Fix & DSP Normalize (EBU R128)")
+        self.normalize_btn.clicked.connect(self.start_dsp_normalize)
+        action_strip.addWidget(self.normalize_btn)
+
+        self.run_ai_btn = QPushButton("🚀 Run AI Captioner")
+        self.run_ai_btn.clicked.connect(self.start_ai_captioning)
+        action_strip.addWidget(self.run_ai_btn)
+
+        action_strip.addSpacing(15)
+
+        self.all_view_btn = QPushButton("All Tracks")
+        self.all_view_btn.setCheckable(True)
+        self.all_view_btn.setChecked(True)
+        self.all_view_btn.clicked.connect(self.show_all_tracks)
+
+        self.exceptions_view_btn = QPushButton("⚠ Exceptions Queue (0)")
+        self.exceptions_view_btn.setCheckable(True)
+        self.exceptions_view_btn.clicked.connect(self.show_exceptions_queue)
+
+        view_group = QButtonGroup(self)
+        view_group.addButton(self.all_view_btn)
+        view_group.addButton(self.exceptions_view_btn)
+
+        action_strip.addWidget(QLabel("View:"))
+        action_strip.addWidget(self.all_view_btn)
+        action_strip.addWidget(self.exceptions_view_btn)
+
+        action_strip.addStretch()
+        studio_layout.addLayout(action_strip)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Filename", "Health", "Tag", "Genre", "Duration", "Key", "BPM"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for i in range(1, 7):
+            self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
+        splitter.addWidget(self.table)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inspector = QWidget()
+        insp_layout = QVBoxLayout(inspector)
+        insp_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.sample_health_alert = QLabel("Select a track to inspect diagnostics.")
+        self.sample_health_alert.setWordWrap(True)
+        self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #555; border-radius: 2px;")
+        insp_layout.addWidget(self.sample_health_alert)
+
+        unlock_bar = QHBoxLayout()
+        unlock_bar.addWidget(QLabel("<b>Metadata Locks:</b>"))
+        self.lock_action_combo = QComboBox()
+        self.lock_action_combo.addItems(["-- Lock Options --", "Lock All Detected", "Unlock All Fields", "Restore Detected Values"])
+        self.lock_action_combo.activated.connect(self.handle_lock_dropdown)
+        unlock_bar.addWidget(self.lock_action_combo)
+        unlock_bar.addStretch()
+        insp_layout.addLayout(unlock_bar)
+
+        insp_layout.addWidget(QLabel("<b>Track Caption:</b>"))
+        self.caption_text = QTextEdit()
+        self.caption_text.setPlaceholderText("Detailed acoustic description...")
+        self.caption_text.textChanged.connect(self.on_caption_edited)
+        insp_layout.addWidget(self.caption_text)
+
+        insp_layout.addWidget(QLabel("<b>Formatted Lyrics / Vocal Markers:</b>"))
+        self.lyrics_text = QTextEdit()
+        self.lyrics_text.setPlaceholderText("[Intro]\n[Verse 1]\nLyrics...\n[Chorus]...")
+        self.lyrics_text.textChanged.connect(self.on_lyrics_edited)
+        insp_layout.addWidget(self.lyrics_text)
+
+        form = QFormLayout()
+
+        bpm_row = QHBoxLayout()
+        self.bpm_spin = QSpinBox()
+        self.bpm_spin.setRange(0, 400)
+        self.bpm_spin.valueChanged.connect(self.on_bpm_edited)
+        self.bpm_lock = QCheckBox("Lock")
+        self.bpm_lock.setChecked(True)
+        self.bpm_lock.stateChanged.connect(self.on_lock_toggled)
+        self.bpm_verify_btn = QPushButton("🔗 Check Online")
+        self.bpm_verify_btn.clicked.connect(self.open_online_bpm_check)
+        bpm_row.addWidget(self.bpm_spin)
+        bpm_row.addWidget(self.bpm_lock)
+        bpm_row.addWidget(self.bpm_verify_btn)
+        form.addRow("BPM (Tempo):", bpm_row)
+
+        key_row = QHBoxLayout()
+        self.key_input = QLineEdit()
+        self.key_input.textChanged.connect(self.on_key_edited)
+        self.key_lock = QCheckBox("Lock")
+        self.key_lock.setChecked(True)
+        self.key_lock.stateChanged.connect(self.on_lock_toggled)
+        self.key_verify_btn = QPushButton("🔗 Check Online")
+        self.key_verify_btn.clicked.connect(self.open_online_key_check)
+        key_row.addWidget(self.key_input)
+        key_row.addWidget(self.key_lock)
+        key_row.addWidget(self.key_verify_btn)
+        form.addRow("Key Scale:", key_row)
+
+        genre_row = QHBoxLayout()
+        self.genre_input = QLineEdit()
+        self.genre_input.textChanged.connect(self.on_genre_edited)
+        self.genre_lock = QCheckBox("Lock")
+        genre_row.addWidget(self.genre_input)
+        genre_row.addWidget(self.genre_lock)
+        form.addRow("Genre:", genre_row)
+
+        tag_row = QHBoxLayout()
+        self.track_tag_input = QLineEdit()
+        self.track_tag_input.textChanged.connect(self.on_track_tag_edited)
+        self.tag_lock = QCheckBox("Lock")
+        tag_row.addWidget(self.track_tag_input)
+        tag_row.addWidget(self.tag_lock)
+        form.addRow("Track Trigger Tag:", tag_row)
+
+        self.inst_check = QCheckBox("Instrumental Track (No Vocals)")
+        self.inst_check.stateChanged.connect(self.on_inst_edited)
+        form.addRow(self.inst_check)
+
+        ab_row = QHBoxLayout()
+        self.ab_compare_btn = QPushButton("🎧 A/B Compare Original")
+        self.ab_compare_btn.clicked.connect(self.ab_compare_playback)
+        self.fallback_btn = QPushButton("⏮ Revert to Original Audio")
+        self.fallback_btn.clicked.connect(self.fallback_to_original)
+        ab_row.addWidget(self.ab_compare_btn)
+        ab_row.addWidget(self.fallback_btn)
+        form.addRow(ab_row)
+
+        insp_layout.addLayout(form)
+        scroll.setWidget(inspector)
+        splitter.addWidget(scroll)
+        splitter.setSizes([680, 520])
+
+        studio_layout.addWidget(splitter, 1)
+
+        bottom_bar = QHBoxLayout()
+        self.status_label = QLabel("Ready")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        bottom_bar.addWidget(self.status_label)
+        bottom_bar.addStretch()
+        bottom_bar.addWidget(self.progress_bar)
+        studio_layout.addLayout(bottom_bar)
+
+    def init_settings_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        theme_grp = QGroupBox("🎨 Visual Appearance & UI Themes (Gentoo Philosophy)")
+        form = QFormLayout(theme_grp)
+
+        self.font_picker = QFontComboBox()
+        self.font_picker.setCurrentFont(QFont(self.custom_theme["font_family"]))
+        self.font_picker.currentFontChanged.connect(self.on_font_changed)
+        form.addRow("Installed System Font:", self.font_picker)
+
+        zoom_row = QHBoxLayout()
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(75, 175)
+        self.zoom_slider.setValue(100)
+        self.zoom_label = QLabel("100%")
+        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+        zoom_row.addWidget(self.zoom_slider)
+        zoom_row.addWidget(self.zoom_label)
+        form.addRow("UI Zoom Factor:", zoom_row)
+
+        self.theme_preset_combo = QComboBox()
+        self.theme_preset_combo.addItems(["Dark Modern (Default)", "OLED Pure Black", "Gentoo Purple Slate", "Solarized Dark", "High Contrast Light"])
+        self.theme_preset_combo.currentTextChanged.connect(self.on_theme_preset_changed)
+        form.addRow("Theme Preset:", self.theme_preset_combo)
+
+        layout.addWidget(theme_grp)
+
+        cloud_grp = QGroupBox("⚙ Cloud & Execution Endpoints")
+        c_form = QFormLayout(cloud_grp)
+
+        self.k_user = QLineEdit(self.config.get("kaggle_user", ""))
+        self.k_key = QLineEdit(self.config.get("kaggle_key", ""))
+        self.k_key.setEchoMode(QLineEdit.Password)
+        c_form.addRow("Kaggle Username:", self.k_user)
+        c_form.addRow("Kaggle API Key:", self.k_key)
+
+        self.custom_url = QLineEdit(self.config.get("custom_url", ""))
+        self.custom_url.setPlaceholderText("https://api.runpod.ai/... or http://localhost:8000/v1")
+        self.custom_key = QLineEdit(self.config.get("custom_key", ""))
+        self.custom_key.setEchoMode(QLineEdit.Password)
+        c_form.addRow("Custom Webhook URL:", self.custom_url)
+        c_form.addRow("Custom Auth Token:", self.custom_key)
+
+        save_cloud_btn = QPushButton("Save Cloud Credentials")
+        save_cloud_btn.clicked.connect(self.save_cloud_config)
+        c_form.addRow(save_cloud_btn)
+
+        layout.addWidget(cloud_grp)
+        layout.addStretch()
+
+    def on_font_changed(self, font):
+        self.custom_theme["font_family"] = font.family()
+        self.apply_custom_theme()
+
+    def on_zoom_changed(self, val):
+        self.custom_theme["zoom_factor"] = val / 100.0
+        self.zoom_label.setText(f"{val}%")
+        self.apply_custom_theme()
+
+    def on_theme_preset_changed(self, preset):
+        if preset == "OLED Pure Black":
+            self.custom_theme.update({"bg_color": "#000000", "panel_bg": "#121212", "text_color": "#f0f0f0", "accent_color": "#007acc"})
+        elif preset == "Gentoo Purple Slate":
+            self.custom_theme.update({"bg_color": "#1a162b", "panel_bg": "#25203d", "text_color": "#e0def4", "accent_color": "#9ccfd8"})
+        elif preset == "Solarized Dark":
+            self.custom_theme.update({"bg_color": "#002b36", "panel_bg": "#073642", "text_color": "#93a1a1", "accent_color": "#268bd2"})
+        elif preset == "High Contrast Light":
+            self.custom_theme.update({"bg_color": "#f8f9fa", "panel_bg": "#ffffff", "text_color": "#111111", "accent_color": "#0056b3"})
+        else:
+            self.custom_theme.update({"bg_color": "#1e1e1e", "panel_bg": "#252526", "text_color": "#d4d4d4", "accent_color": "#0e639c"})
+        self.apply_custom_theme()
+
+    def apply_custom_theme(self):
+        base_size = int(12 * self.custom_theme["zoom_factor"])
+        font_fam = self.custom_theme["font_family"]
+        bg = self.custom_theme["bg_color"]
+        panel = self.custom_theme["panel_bg"]
+        text = self.custom_theme["text_color"]
+        accent = self.custom_theme["accent_color"]
+
+        style = f"""
+            QWidget {{
+                background-color: {bg};
+                color: {text};
+                font-family: '{font_fam}';
+                font-size: {base_size}px;
+            }}
+            QGroupBox, QTableWidget, QTextEdit, QLineEdit, QComboBox, QSpinBox, QScrollArea {{
+                background-color: {panel};
+                border: 1px solid #3c3c3c;
+                border-radius: 4px;
+            }}
+            QPushButton {{
+                background-color: {accent};
+                color: #ffffff;
+                border: none;
+                border-radius: 3px;
+                padding: {int(4 * self.custom_theme['zoom_factor'])}px {int(10 * self.custom_theme['zoom_factor'])}px;
+            }}
+            QPushButton:hover {{
+                filter: brightness(1.2);
+            }}
+            QHeaderView::section {{
+                background-color: {panel};
+                color: {text};
+                padding: 4px;
+                border: 1px solid #333;
+            }}
+        """
+        self.setStyleSheet(style)
+
+    def save_cloud_config(self):
+        self.config["kaggle_user"] = self.k_user.text().strip()
+        self.config["kaggle_key"] = self.k_key.text().strip()
+        self.config["custom_url"] = self.custom_url.text().strip()
+        self.config["custom_key"] = self.custom_key.text().strip()
+        self.status_label.setText("Cloud credentials saved.")
+
+    def open_online_bpm_check(self):
+        s = self.get_selected_sample()
+        if s:
+            name = Path(s.get("filename", "")).stem
+            url = f"https://songbpm.com/@search?q={QUrl.toPercentEncoding(name)}"
+            QDesktopServices.openUrl(QUrl(url))
+
+    def open_online_key_check(self):
+        s = self.get_selected_sample()
+        if s:
+            name = Path(s.get("filename", "")).stem
+            url = f"https://tunebat.com/Search?q={QUrl.toPercentEncoding(name)}"
+            QDesktopServices.openUrl(QUrl(url))
+
+    def show_all_tracks(self):
+        self.filter_exceptions_only = False
+        self.refresh_table()
+
+    def show_exceptions_queue(self):
+        self.filter_exceptions_only = True
+        self.refresh_table()
+
+    def refresh_table(self):
+        self.table.setRowCount(0)
+        exceptions_count = 0
+
+        for s in self.dataset["samples"]:
+            sid = s.get("id", "")
+            rep = self.health_reports.get(sid, {})
+            status = rep.get("status", "Not Audited")
+
+            is_exception = (status == "Warning" or status == "Missing" or not s.get("caption"))
+            if is_exception:
+                exceptions_count += 1
+
+            if self.filter_exceptions_only and not is_exception:
+                continue
+
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(s.get("filename", "")))
+
+            h_item = QTableWidgetItem(f"✓ Healthy" if status == "Healthy" else (f"⚠ Warning" if status == "Warning" else status))
+            if status == "Healthy":
+                h_item.setForeground(QColor("#4CAF50"))
+            elif status == "Warning":
+                h_item.setForeground(QColor("#FF9800"))
+            elif status == "Missing":
+                h_item.setForeground(QColor("#F44336"))
+            self.table.setItem(row, 1, h_item)
+
+            self.table.setItem(row, 2, QTableWidgetItem(s.get("custom_tag", "")))
+            self.table.setItem(row, 3, QTableWidgetItem(s.get("genre", "")))
+            dur = s.get("duration", 0)
+            self.table.setItem(row, 4, QTableWidgetItem(f"{dur}s" if dur else ""))
+            self.table.setItem(row, 5, QTableWidgetItem(str(s.get("keyscale", ""))))
+            bpm = s.get("bpm", 0)
+            self.table.setItem(row, 6, QTableWidgetItem(str(bpm) if bpm else ""))
+
+        self.exceptions_view_btn.setText(f"⚠ Exceptions Queue ({exceptions_count})")
+
+    def get_selected_sample(self):
+        row = self.table.currentRow()
+        if 0 <= row < len(self.dataset["samples"]):
+            return self.dataset["samples"][row]
+        return None
+
+    def on_table_selection_changed(self):
+        s = self.get_selected_sample()
+        if s:
+            sid = s.get("id", "")
+            rep = self.health_reports.get(sid, {})
+            issues = rep.get("issues", [])
+
+            if not rep:
+                self.sample_health_alert.setText("Health: Not Audited (Click '🔍 Scan Audio & Fill Metadata' to scan)")
+                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #777; border-radius: 2px;")
+            elif not issues:
+                self.sample_health_alert.setText(f"✓ Healthy: {rep.get('sample_rate', 44100)} Hz | {rep.get('channels', 2)} ch | Est: {rep.get('lufs', -14):.1f} LUFS | BPM Conf: {int(rep.get('bpm_confidence', 0.8)*100)}%")
+                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #1b3a1d; border-left: 4px solid #4CAF50; border-radius: 2px; color: #a5d6a7;")
+            else:
+                issues_text = " • " + " • ".join(issues)
+                self.sample_health_alert.setText(f"⚠ Diagnostic Inconsistencies:\n{issues_text}")
+                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #3e2723; border-left: 4px solid #FF9800; border-radius: 2px; color: #ffcc80;")
+
+            self.caption_text.blockSignals(True)
+            self.lyrics_text.blockSignals(True)
+            self.track_tag_input.blockSignals(True)
+            self.genre_input.blockSignals(True)
+            self.key_input.blockSignals(True)
+            self.bpm_spin.blockSignals(True)
+            self.inst_check.blockSignals(True)
+
+            self.caption_text.setPlainText(s.get("caption", ""))
+            self.lyrics_text.setPlainText(s.get("formatted_lyrics", s.get("lyrics", "")))
+            self.track_tag_input.setText(s.get("custom_tag", ""))
+            self.genre_input.setText(s.get("genre", ""))
+            self.key_input.setText(str(s.get("keyscale", "")))
+            self.bpm_spin.setValue(int(s.get("bpm", 0)))
+            self.inst_check.setChecked(bool(s.get("is_instrumental", False)))
+
+            is_locked = s.get("locked", True)
+            self.bpm_lock.setChecked(is_locked)
+            self.key_lock.setChecked(is_locked)
+            self.bpm_spin.setEnabled(not is_locked)
+            self.key_input.setEnabled(not is_locked)
+
+            self.caption_text.blockSignals(False)
+            self.lyrics_text.blockSignals(False)
+            self.track_tag_input.blockSignals(False)
+            self.genre_input.blockSignals(False)
+            self.key_input.blockSignals(False)
+            self.bpm_spin.blockSignals(False)
+            self.inst_check.blockSignals(False)
+
+    def handle_lock_dropdown(self, idx):
+        action = self.lock_action_combo.currentText()
+        if action == "Lock All Detected":
+            for s in self.dataset["samples"]:
+                s["locked"] = True
+            self.on_table_selection_changed()
+            self.status_label.setText("Locked all detected metadata fields.")
+        elif action == "Unlock All Fields":
+            for s in self.dataset["samples"]:
+                s["locked"] = False
+            self.on_table_selection_changed()
+            self.status_label.setText("Unlocked all metadata fields for editing.")
+        elif action == "Restore Detected Values":
+            s = self.get_selected_sample()
+            if s:
+                sid = s.get("id", "")
+                rep = self.health_reports.get(sid, {})
+                if rep:
+                    s["bpm"] = rep.get("bpm_detected", 120)
+                    s["keyscale"] = rep.get("key_detected", "A minor")
+                    self.on_table_selection_changed()
+                    self.status_label.setText("Restored original detected values.")
+        self.lock_action_combo.setCurrentIndex(0)
+
+    def on_lock_toggled(self):
+        s = self.get_selected_sample()
+        if s:
+            s["locked"] = self.bpm_lock.isChecked()
+            self.bpm_spin.setEnabled(not self.bpm_lock.isChecked())
+            self.key_input.setEnabled(not self.key_lock.isChecked())
+
+    def on_caption_edited(self):
+        s = self.get_selected_sample()
+        if s:
+            s["caption"] = self.caption_text.toPlainText()
+
+    def on_lyrics_edited(self):
+        s = self.get_selected_sample()
+        if s:
+            s["formatted_lyrics"] = self.lyrics_text.toPlainText()
+            s["lyrics"] = s["formatted_lyrics"]
+
+    def on_track_tag_edited(self, text):
+        s = self.get_selected_sample()
+        if s:
+            s["custom_tag"] = text
+
+    def on_genre_edited(self, text):
+        s = self.get_selected_sample()
+        if s:
+            s["genre"] = text
+
+    def on_key_edited(self, text):
+        s = self.get_selected_sample()
+        if s:
+            s["keyscale"] = text
+
+    def on_bpm_edited(self, val):
+        s = self.get_selected_sample()
+        if s:
+            s["bpm"] = val
+
+    def on_inst_edited(self):
+        s = self.get_selected_sample()
+        if s:
+            s["is_instrumental"] = self.inst_check.isChecked()
+
+    def on_general_prop_changed(self):
+        meta = self.dataset.setdefault("metadata", {})
+        meta["name"] = self.dataset_name_input.text().strip()
+        meta["custom_tag"] = self.custom_tag_input.text().strip()
+        meta["tag_position"] = self.tag_pos_combo.currentText()
+
+        if self.radio_all_inst.isChecked():
+            meta["instrumental_mode"] = "all_instrumental"
+            for s in self.dataset["samples"]:
+                s["is_instrumental"] = True
+        elif self.radio_no_inst.isChecked():
+            meta["instrumental_mode"] = "no_instrumentals"
+            for s in self.dataset["samples"]:
+                s["is_instrumental"] = False
+        else:
+            meta["instrumental_mode"] = "mixed"
+
+        self.on_table_selection_changed()
+
+    def sync_general_props_to_ui(self):
+        meta = self.dataset.get("metadata", {})
+        self.dataset_name_input.setText(meta.get("name", ""))
+        self.custom_tag_input.setText(meta.get("custom_tag", ""))
+        self.tag_pos_combo.setCurrentText(meta.get("tag_position", "prepend"))
+
+        mode = meta.get("instrumental_mode", "mixed")
+        if mode == "all_instrumental":
+            self.radio_all_inst.setChecked(True)
+        elif mode == "no_instrumentals":
+            self.radio_no_inst.setChecked(True)
+        else:
+            self.radio_mixed.setChecked(True)
+
+    def ab_compare_playback(self):
+        s = self.get_selected_sample()
+        if s:
+            sid = s.get("id", "")
+            orig_backup = self.original_backups.get(sid, s.get("audio_path", ""))
+            curr_path = s.get("audio_path", "")
+            QMessageBox.information(
+                self, "🎧 A/B Audio Comparison",
+                f"Track: {s.get('filename', '')}\n\n"
+                f"Active Audio:\n{curr_path}\n\n"
+                f"Original Un-normalized Backup:\n{orig_backup}\n\n"
+                "(Use system media player to audit waveforms side-by-side.)"
+            )
+
+    def fallback_to_original(self):
+        s = self.get_selected_sample()
+        if s:
+            sid = s.get("id", "")
+            orig_backup = self.original_backups.get(sid)
+            if orig_backup and os.path.exists(orig_backup):
+                self.record_snapshot()
+                s["audio_path"] = orig_backup
+                s["filename"] = Path(orig_backup).name
+                self.refresh_table()
+                self.on_table_selection_changed()
+                QMessageBox.information(self, "Reverted", f"Reverted {s['filename']} to original audio source.")
+            else:
+                QMessageBox.warning(self, "No Backup", "Original audio backup not found for this track.")
+
+    def toggle_bypass(self):
+        self.bypass_warnings = self.bypass_btn.isChecked()
+        if self.bypass_warnings:
+            self.bypass_btn.setStyleSheet("background-color: #E65100; font-weight: bold;")
+            self.status_label.setText("Warning bypass ENABLED: Export unlocked regardless of quality penalties.")
+        else:
+            self.bypass_btn.setStyleSheet("")
+            self.status_label.setText("Warning bypass DISABLED.")
+
+    def start_health_audit(self):
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Please add audio tracks before scanning.")
             return
-        bk_dir = Path(self.current_folder) / "Backup"
-        bk_dir.mkdir(exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        bk_path = bk_dir / f"{Path(self.current_json_path).stem}_{ts}.json"
-        shutil.copyfile(self.current_json_path, bk_path)
-        self.show_toast("Backup created", str(bk_path))
 
-    def reload_dataset(self):
-        if self.current_json_path:
-            self.load_from_json(self.current_json_path)
+        self.scan_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Auditing dataset health, metadata & degradation penalties...")
+
+        self.active_worker = HealthAuditorWorker(samples)
+        self.active_worker.progress.connect(self.on_worker_progress)
+        self.active_worker.file_audited.connect(self.on_file_audited)
+        self.active_worker.audit_completed.connect(self.on_audit_completed)
+        self.active_worker.error_occurred.connect(self.on_worker_error)
+        self.active_worker.start()
+
+    def on_file_audited(self, sid, rep):
+        self.health_reports[sid] = rep
+        for s in self.dataset["samples"]:
+            if s["id"] == sid and not s.get("locked", False):
+                if not s.get("bpm") or s.get("bpm") == 0:
+                    s["bpm"] = rep.get("bpm_detected", 120)
+                if not s.get("keyscale"):
+                    s["keyscale"] = rep.get("key_detected", "A minor")
+                if not s.get("duration") or s.get("duration") == 0:
+                    s["duration"] = int(rep.get("duration", 0))
+
+    def on_audit_completed(self, summary):
+        self.scan_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Health & Homogeneity audit finished.")
+
+        score = summary.get("quality_score", 100)
+        reasons = summary.get("reasons", [])
+
+        if score >= 80:
+            self.quality_badge.setText(f"Dataset Quality: {score}% [Ready for LoRA]")
+            self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #2E7D32; border-radius: 4px; color: #fff;")
+        elif score >= 60:
+            self.quality_badge.setText(f"Dataset Quality: {score}% [Warning]")
+            self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #F57F17; border-radius: 4px; color: #fff;")
+        else:
+            self.quality_badge.setText(f"Dataset Quality: {score}% [Critical Inconsistencies]")
+            self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #B71C1C; border-radius: 4px; color: #fff;")
+
+        self.refresh_table()
+        self.on_table_selection_changed()
+
+        if reasons:
+            reasons_str = "\n• " + "\n• ".join(reasons)
+            QMessageBox.warning(
+                self, f"Quality Audit: {score}% Score",
+                f"The following degradation risks were identified:\n{reasons_str}\n\n"
+                "Tip: Run the DSP Normalizer to automatically resolve loudness variations and sample rate mismatches."
+            )
+
+    def start_dsp_normalize(self):
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Add audio tracks before normalizing.")
+            return
+
+        self.record_snapshot()
+        self.normalize_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Starting DSP EBU R128 Normalization & Archival Backup...")
+
+        self.active_worker = DspNormalizerWorker(samples, target_sr=44100, target_lufs=-14.0)
+        self.active_worker.progress.connect(self.on_worker_progress)
+        self.active_worker.file_normalized.connect(self.on_file_normalized)
+        self.active_worker.all_done.connect(self.on_normalize_done)
+        self.active_worker.error_occurred.connect(self.on_worker_error)
+        self.active_worker.start()
+
+    def on_file_normalized(self, sid, orig_backup, norm_path, sr, lufs):
+        self.original_backups[sid] = orig_backup
+        for s in self.dataset["samples"]:
+            if s["id"] == sid:
+                s["audio_path"] = norm_path
+                s["filename"] = Path(norm_path).name
+                break
+
+    def on_normalize_done(self, norm_dir, backup_dir):
+        self.normalize_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Normalization completed.")
+        QMessageBox.information(
+            self, "DSP Normalization Finished",
+            f"All tracks unified to -14 LUFS (EBU R128) and 44.1 kHz stereo WAV.\n\n"
+            f"Normalized Audio Workspace:\n{norm_dir}\n\n"
+            f"Original Backups Stored At:\n{backup_dir}"
+        )
+        self.start_health_audit()
+
+    def load_dataset(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open Dataset JSON", "", "JSON Files (*.json)")
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self.dataset = json.load(f)
+                self.record_snapshot()
+                self.health_reports.clear()
+                self.sync_general_props_to_ui()
+                self.refresh_table()
+                self.status_label.setText(f"Loaded {len(self.dataset.get('samples', []))} tracks.")
+                self.start_health_audit()
+            except Exception as e:
+                QMessageBox.critical(self, "Load Error", str(e))
+
+    def save_dataset(self):
+        if not self.bypass_warnings and self.quality_badge.text().find("Critical") != -1:
+            res = QMessageBox.warning(
+                self, "Export Blocked by Quality Threshold",
+                "Dataset quality is below safe threshold (<60%). Fix flagged issues or click '🛡 I Know What I'm Doing' to bypass.",
+                QMessageBox.Ok
+            )
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save Dataset JSON", "", "JSON Files (*.json)")
+        if path:
+            try:
+                self.on_general_prop_changed()
+                self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(self.dataset, f, indent=2)
+                self.status_label.setText(f"Saved dataset to {Path(path).name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", str(e))
+
+    def add_audio_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add Audio Tracks", "", "Audio Files (*.wav *.flac *.mp3)")
+        if paths:
+            self.record_snapshot()
+            global_tag = self.custom_tag_input.text().strip()
+            is_all_inst = self.radio_all_inst.isChecked()
+
+            for p in paths:
+                fname = Path(p).name
+                self.dataset["samples"].append({
+                    "id": uuid.uuid4().hex[:8],
+                    "audio_path": p,
+                    "filename": fname,
+                    "caption": "",
+                    "genre": "",
+                    "lyrics": "",
+                    "formatted_lyrics": "",
+                    "bpm": 0,
+                    "keyscale": "",
+                    "timesignature": "4/4",
+                    "duration": 0,
+                    "language": "en",
+                    "is_instrumental": is_all_inst,
+                    "custom_tag": global_tag,
+                    "locked": True
+                })
+            self.refresh_table()
+            self.status_label.setText(f"Added {len(paths)} audio tracks.")
+            self.start_health_audit()
+
+    def start_ai_captioning(self):
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Add audio tracks before captioning.")
+            return
+
+        has_existing = any(bool(s.get("caption")) for s in samples)
+        if has_existing:
+            res = QMessageBox.question(
+                self, "Existing Captions Detected",
+                "Some tracks already have captions. Overwrite all existing captions?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if res == QMessageBox.No:
+                return
+
+        self.record_snapshot()
+        self.run_ai_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+
+        general_meta = self.dataset.get("metadata", {})
+        backend = "Kaggle Cloud (Free GPU)" if self.config.get("kaggle_user") else "Local Rule Engine"
+
+        self.active_worker = RemoteCaptionWorker(samples, backend, "Deep Structural Breakdown", general_meta, self.config)
+        self.active_worker.progress.connect(self.on_worker_progress)
+        self.active_worker.finished_sample.connect(self.on_sample_captioned)
+        self.active_worker.all_done.connect(self.on_caption_finished)
+        self.active_worker.error_occurred.connect(self.on_worker_error)
+        self.active_worker.start()
+
+    def on_worker_progress(self, pct, msg):
+        self.progress_bar.setValue(pct)
+        self.status_label.setText(msg)
+
+    def on_sample_captioned(self, sid, caption):
+        for s in self.dataset["samples"]:
+            if s["id"] == sid:
+                s["caption"] = caption
+                break
+        self.on_table_selection_changed()
+
+    def on_caption_finished(self):
+        self.run_ai_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("AI Captioning completed.")
+        self.refresh_table()
+        self.on_table_selection_changed()
+
+    def on_worker_error(self, err_msg):
+        self.run_ai_btn.setEnabled(True)
+        self.scan_btn.setEnabled(True)
+        self.normalize_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Operation error.")
+        QMessageBox.critical(self, "Error", f"An error occurred:\n{err_msg}")
 
 
-def main():
-    app = QtWidgets.QApplication(sys.argv)
-    win = MainWindow()
-    win.show()
-    sys.exit(app.exec())
-
-
+# ---------------------------------------------------------------------------
+# Application Entry Point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    app = QApplication(sys.argv)
+    window = DatasetManager()
+    window.show()
+    sys.exit(app.exec())

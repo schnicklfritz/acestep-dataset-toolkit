@@ -1,142 +1,123 @@
-# ACE-Step Dataset Toolkit (Python / Qt6 Edition)
+# ACE-Step Dataset Toolkit (Gentoo Edition)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PySide6](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt6-green.svg)](https://pypi.org/project/PySide6/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A lightweight, multi-backend desktop utility for preparing, tagging, captioning, and formatting audio datasets for **ACE-Step (1.5 / XL / LoRA / LoKR)** fine-tuning.
+A lightweight, outcome-driven desktop utility designed for preparing, auditing, normalizing, and auto-captioning audio datasets for **ACE-Step 1.5 / XL / LoRA / LoKR** fine-tuning.
 
 ---
 
-## 🌟 Overview & Attribution
-
-This project is a standalone Python/Qt6 application inspired by the foundational dataset management concepts originally prototyped in C++.
-
-* **Attribution**: Full credit to the original author for the foundational data structures, workflow concept, and dataset layout.
-* **Why the Python/Qt6 Rewrite?**: While native C++ is ideal for real-time digital signal processing, modern neural audio captioners (such as `ACE-Step/acestep-captioner` 11B) are natively developed and maintained within the Python ecosystem (`transformers`, `torchaudio`, `accelerate`). This rewrite provides direct access to cloud GPUs, headless workers, and REST endpoints without C++/LibTorch compilation barriers.
+## 🌟 Philosophy: User Sovereignty (Gentoo-Style)
+* **Zero Hardcoded Restrictions**: If any color, font, zoom level, path, or metadata value cannot be customized or overridden by the user, it is treated as a bug.
+* **Non-Destructive Workflows**: Original audio files are never overwritten. Every normalization, bulk edit, or caption update creates automatic snapshots with full **Undo/Redo** and **A/B Fallback** support.
+* **Bypass Gate**: A prominent **"I Know What I'm Doing"** mode allows intentional exports regardless of diagnostic warnings.
 
 ---
 
-## ✨ Key Features
+## 📊 Dataset Quality Gauge & Degradation Penalties
 
-* **Multi-Backend AI Captioning**:
-  * **Local Rule Engine (CPU)**: Instant profile-based caption generation without GPU requirements.
-  * **Kaggle Cloud GPU (100% Free)**: Pre-configured headless batch worker that runs the 11B captioner using free Kaggle GPU compute (30 hours/week).
-  * **Local CUDA (11B)**: Direct PyTorch GPU inference for systems with 16GB+ VRAM.
-  * **Custom REST Webhook**: Connect any self-hosted or serverless inference endpoint (RunPod, Vast.ai, Modal, Ollama).
-* **Disposable Bandwidth Optimization**:
-  * Automatically downsamples audio tracks to temporary 16 kHz mono preview files in system scratch memory before remote upload, reducing payload sizes by up to 95% while keeping captions mapped to original lossless `.wav` files.
-* **3-Tier Caption Complexity**:
-  * **Concise Tags**: Focused, comma-separated acoustic tags for style adapters.
-  * **Standard Paragraph**: Balanced descriptive overview of instruments, timbre, and mix.
-  * **Deep Structural Breakdown**: Multi-section analysis mapping acoustic changes across intro, verses, chorus dynamics, and outro.
-* **Full Metadata & Lyrics Editor**:
-  * Inspect and modify musical key scale, BPM, language, custom trigger tags, and structured lyrics with section markers (`[Intro]`, `[Verse]`, `[Chorus]`, `[Bridge]`).
-* **Responsive Multi-Screen GUI**:
-  * Adaptive layout designed to scale fluidly from low-resolution 720p laptop displays to large 4K external monitors.
-* **Standard Dataset JSON Export**:
-  * Outputs training manifests that plug directly into ACE-Step training pipelines.
+The toolkit displays a live **Dataset Quality Percentage** at the top of the interface:
+* **🟢 Green (80% – 100%)**: Fully homogeneous, verified sample rates, lossless audio, structured captions.
+* **🟡 Yellow (60% – 79%)**: Minor inconsistencies (loudness spread, unverified tempos, missing lyrics).
+* **🔴 Red (<60%)**: Critical quality risks (digital clipping, missing files, lossy compression artifacts).
+
+### Penalty Breakdown Reference
+
+| Warning Condition | Quality Penalty | Why it Degrades LoRA Training |
+| :--- | :--- | :--- |
+| **Missing / Unreadable File** | `-40%` | Dataloader crashes on broken paths. |
+| **Digital Clipping (> -0.1 dBFS)** | `-20%` | Flat-top square wave distortion gets permanently baked into model timbre. |
+| **Lossy Compression (<192 kbps)** | `-20%` | Model learns to reproduce MP3/AAC artifacts and high-frequency shelf cutoffs. |
+| **Loudness Spread (> 5 dB LUFS)** | `-15%` | Causes unstable energy distribution and dynamic pumping during generation. |
+| **Dataset Size (< 10 Tracks)** | `-15%` | Insufficient acoustic diversity for generalizable LoRA representation. |
+| **Mixed Sample Rates / Channels** | `-10%` | On-the-fly resampling introduces subtle phase artifacts. |
 
 ---
 
-## 🛠 Prerequisites & Installation
+## 🛠 Core Workflow & Capabilities
+[ ➕ Import Audio Tracks / Folder]
+│
+▼
+[ 🔍 Scan Audio & Fill Metadata] ──► Detects Sample Rate, Duration, Channels,
+│ BPM & Key Confidence + Lossy Cutoffs.
+▼
+[ ⚠ Exceptions Queue Filter] ────► Surfaces ONLY rows requiring human review.
+│
+▼
+[ 🎚 DSP Normalizer (EBU R128)] ───► Unifies to -14 LUFS & 44.1kHz stereo.
+│ Archives original audio in backups folder.
+▼
+[ 🚀 Headless Kaggle Cloud GPU] ───► Compresses temporary 16kHz previews,
+│ runs 11B captioner, purges previews.
+▼
+[ 💾 Validate & Save JSON] ────────► Outputs standard ACE-Step manifest.
 
-### 1. System Dependencies
-The toolkit uses native audio decoders and Tkinter desktop bindings. Install the system libraries for your OS:
+---
 
-* **Arch Linux / CachyOS / Manjaro**:
-  ```bash
-  sudo pacman -S tk ffmpeg libsndfile
-  ```
-* **Debian / Ubuntu / Mint**:
-  ```bash
-  sudo apt-get update && sudo apt-get install -y python3-tk ffmpeg libsndfile1
-  ```
-* **Fedora / RHEL**:
-  ```bash
-  sudo dnf install python3-tkinter ffmpeg libsndfile
-  ```
-* **macOS (Homebrew)**:
-  ```bash
-  brew install python-tk ffmpeg libsndfile
-  ```
-* **Windows**:
-  ```powershell
-  winget install Gyan.FFmpeg
-  ```
-  *(Python on Windows includes Tkinter by default during standard installation.)*
+## 🎨 Customization & Appearance Engine
 
-### 2. Python Environment Setup
-Clone the repository and install the audio DSP and pipeline dependencies:
+Switch to the **`🎨 Appearance & Customization`** tab to adjust:
+* **System Font Picker**: Automatically queries all installed system fonts with live typeface preview.
+* **UI Zoom Scale**: Dynamically adjusts interface scale from **75% to 175%** (ideal for 720p through 4K displays).
+* **Theme Presets**: Switch instantly between *Dark Modern*, *OLED Pure Black*, *Gentoo Purple Slate*, *Solarized Dark*, and *High Contrast Light*.
 
+---
+
+## 📋 Quickstart & Installation
+
+### 1. Prerequisites
 ```bash
-# Clone repository
+# Ubuntu / Debian
+sudo apt install ffmpeg
+
+# macOS (Homebrew)
+brew install ffmpeg
+
+# Windows (Winget)
+winget install Gyan.FFmpeg
+```
+
+### 2. Python Setup & Launch
+```bash
 git clone https://github.com/<YOUR-USERNAME>/acestep-dataset-toolkit.git
 cd acestep-dataset-toolkit
-
-# Install required Python packages
-pip install -r requirements.txt
-```
-
-### 3. Launching the App
-Launch the graphical interface or use the headless CLI:
-
-```bash
-# Graphical User Interface (Default)
+pip install PySide6
 python dataset_manager.py
-
-# Headless CLI - Homogeneity Audit
-python dataset_manager.py audit ./raw_audio
-
-# Headless CLI - 2-Pass Loudness Normalization
-python dataset_manager.py normalize --raw-dir ./raw_audio --out-dir ./processed_dataset
 ```
 
 ---
 
-## 🚀 AI Backend Configuration
+## 📄 Manifest Output Format
 
-| Backend | Setup Required | Latency / Speed | Cost |
-| :--- | :--- | :--- | :--- |
-| **Local Rule Engine** | None | Instant (<10ms) | Free |
-| **Kaggle Cloud GPU** | Free Kaggle Account & API Key | ~3–4 min (Queue + 11B Batch) | Free (30h/week) |
-| **Local ACE-Step** | NVIDIA GPU (16GB+ VRAM) + PyTorch | ~1–3s per song | Free |
-| **Custom Webhook** | Endpoint URL & Auth Key | ~2–5s per song | User's compute |
-
-### Setting Up Free Kaggle Cloud GPU:
-1. Create a free account at [kaggle.com](https://www.kaggle.com).
-2. Go to **Settings** $\rightarrow$ **API** $\rightarrow$ **Create New Token** to download `kaggle.json`.
-3. In this toolkit, click **`⚙ Configure Endpoints`** and paste your Kaggle Username and API Key.
-
----
-
-## 📄 Output Schema Example
-
-Saved JSON datasets follow the standard ACE-Step manifest structure:
+Outputs standard training manifests:
 
 ```json
 {
   "metadata": {
-    "name": "Custom_Dataset",
-    "custom_tag": "YourTriggerTag",
+    "name": "My_Dataset",
+    "custom_tag": "MyTriggerTag",
     "tag_position": "prepend",
+    "instrumental_mode": "mixed",
     "num_samples": 14
   },
   "samples": [
     {
       "id": "e03aa4d7",
-      "audio_path": "/path/to/audio.wav",
-      "filename": "track_01.wav",
-      "caption": "YourTriggerTag, vintage psychedelic rock, Vox organ riff, driving bassline, expressive baritone vocal",
-      "genre": "Psychedelic Rock",
-      "lyrics": "[Verse 1]\nExample lyrics...\n[Chorus]\nMain hook...",
-      "formatted_lyrics": "[Verse 1]\nExample lyrics...\n[Chorus]\nMain hook...",
-      "bpm": 124,
-      "keyscale": "E minor",
+      "audio_path": "/path/to/normalized_audio/norm_track_01.wav",
+      "filename": "norm_track_01.wav",
+      "caption": "MyTriggerTag, raw blues rock, Gibson guitar lead, Vox organ solo, gritty dynamic arrangement",
+      "genre": "Blues Rock",
+      "lyrics": "[Verse 1]\nSample lyric text...\n[Chorus]\nMain hook...",
+      "formatted_lyrics": "[Verse 1]\nSample lyric text...\n[Chorus]\nMain hook...",
+      "bpm": 120,
+      "keyscale": "A minor",
       "timesignature": "4/4",
       "duration": 210,
       "language": "en",
-      "custom_tag": "YourTriggerTag"
+      "is_instrumental": false,
+      "custom_tag": "MyTriggerTag",
+      "locked": true
     }
   ]
 }
@@ -144,15 +125,8 @@ Saved JSON datasets follow the standard ACE-Step manifest structure:
 
 ---
 
-## 🤝 Contributing & Roadmap
+## 📜 License & Credits
+* Distributed under the **MIT License**.
+* Built for the **ACE-Step 1.5** training ecosystem.
+* Gratefully credits the original dataset management concepts created by the open-source community.
 
-- [ ] One-click cross-platform desktop installer script (`install.sh` / `install.bat`)
-- [ ] Automatic batch BPM and key-scale audio detection
-- [ ] Direct one-click dataset push to HuggingFace Datasets Hub
-
-Pull requests and community feedback are welcome!
-
----
-
-## 📜 License
-Distributed under the MIT License. See `LICENSE` for details.
