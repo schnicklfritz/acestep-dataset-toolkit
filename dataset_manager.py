@@ -14,7 +14,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QUrl
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QComboBox, QTextEdit, QFileDialog,
+    QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
+    QInputDialog,QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
     QLabel, QLineEdit, QComboBox, QTextEdit, QFileDialog,
     QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
@@ -249,9 +251,10 @@ class DspNormalizerWorker(QThread):
     all_done = Signal(str, str)
     error_occurred = Signal(str)
 
-    def __init__(self, samples, target_sr=44100, target_lufs=-14.0):
+    def __init__(self, samples, target_dir, target_sr=44100, target_lufs=-14.0):
         super().__init__()
         self.samples = samples
+        self.target_dir = target_dir
         self.target_sr = target_sr
         self.target_lufs = target_lufs
         self._is_cancelled = False
@@ -263,9 +266,8 @@ class DspNormalizerWorker(QThread):
                 self.all_done.emit("", "")
                 return
 
-            base_dir = os.path.join(tempfile.gettempdir(), "ace_dataset_workspace")
-            norm_dir = os.path.join(base_dir, "normalized_audio")
-            backup_dir = os.path.join(base_dir, "originals_backup")
+            norm_dir = os.path.join(self.target_dir, "normalized_audio")
+            backup_dir = os.path.join(self.target_dir, "originals_backup")
             os.makedirs(norm_dir, exist_ok=True)
             os.makedirs(backup_dir, exist_ok=True)
 
@@ -300,7 +302,8 @@ class DspNormalizerWorker(QThread):
                 else:
                     shutil.copy2(orig_path, norm_path)
                     self.file_normalized.emit(sid, backup_path, norm_path, self.target_sr, self.target_lufs)
-
+            
+            self.progress.emit(100, "Normalization complete.")
             self.all_done.emit(norm_dir, backup_dir)
 
         except Exception as e:
@@ -941,7 +944,7 @@ class DatasetManager(QMainWindow):
                 padding: {int(4 * self.custom_theme['zoom_factor'])}px {int(10 * self.custom_theme['zoom_factor'])}px;
             }}
             QPushButton:hover {{
-                filter: brightness(1.2);
+                background-color: #1177bb;
             }}
             QHeaderView::section {{
                 background-color: {panel};
@@ -1242,6 +1245,11 @@ class DatasetManager(QMainWindow):
                     s["duration"] = int(rep.get("duration", 0))
 
     def on_audit_completed(self, summary):
+        
+        if hasattr(self, "rescan_notice") and self.rescan_notice is not None:
+            self.rescan_notice.close()
+            self.rescan_notice.deleteLater()
+            self.rescan_notice = None
         self.scan_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_label.setText("Health & Homogeneity audit finished.")
@@ -1270,24 +1278,7 @@ class DatasetManager(QMainWindow):
                 "Tip: Run the DSP Normalizer to automatically resolve loudness variations and sample rate mismatches."
             )
 
-    def start_dsp_normalize(self):
-        samples = self.dataset.get("samples", [])
-        if not samples:
-            QMessageBox.warning(self, "No Tracks", "Add audio tracks before normalizing.")
-            return
-
-        self.record_snapshot()
-        self.normalize_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Starting DSP EBU R128 Normalization & Archival Backup...")
-
-        self.active_worker = DspNormalizerWorker(samples, target_sr=44100, target_lufs=-14.0)
-        self.active_worker.progress.connect(self.on_worker_progress)
-        self.active_worker.file_normalized.connect(self.on_file_normalized)
-        self.active_worker.all_done.connect(self.on_normalize_done)
-        self.active_worker.error_occurred.connect(self.on_worker_error)
-        self.active_worker.start()
+  
 
     def on_file_normalized(self, sid, orig_backup, norm_path, sr, lufs):
         self.original_backups[sid] = orig_backup
@@ -1296,18 +1287,126 @@ class DatasetManager(QMainWindow):
                 s["audio_path"] = norm_path
                 s["filename"] = Path(norm_path).name
                 break
+    def start_dsp_normalize(self):
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Add audio tracks before normalizing.")
+            return
 
+        choices = [
+            f"{s.get('filename', 'Unnamed file')}  [{s.get('id', '')}]"
+            for s in samples
+        ]
+        selected_label, accepted = QInputDialog.getItem(
+            self,
+            "Choose Audio Track",
+            "Select one track to normalize:",
+            choices,
+            0,
+            False
+        )
+
+        if not accepted or not selected_label:
+            self.status_label.setText("DSP normalization cancelled; no files changed.")
+            return
+
+        selected_index = choices.index(selected_label)
+        selected_sample = samples[selected_index]
+        selected_samples = [selected_sample]
+
+        audio_path = selected_sample.get("audio_path", "")
+        default_folder = (
+            str(Path(audio_path).parent)
+            if audio_path
+            else str(Path.home())
+        )
+
+        placement_box = QMessageBox(self)
+        placement_box.setWindowTitle("Normalized Audio & Backup Location")
+        placement_box.setIcon(QMessageBox.Information)
+        placement_box.setText(
+            "Normalized audio and original-file backups will be created "
+            "in the same folder as this track's audio file."
+        )
+        placement_box.setInformativeText(
+            f"Default dataset folder:\n{default_folder}\n\n"
+            "The application will create:\n"
+            "• normalized_audio/\n"
+            "• originals_backup/\n\n"
+            "Choose OK to use the default dataset folder, or Let Me Decide "
+            "to choose another persistent project folder."
+        )
+
+        default_btn = placement_box.addButton("OK", QMessageBox.AcceptRole)
+        decide_btn = placement_box.addButton("Let Me Decide", QMessageBox.ActionRole)
+        placement_box.addButton(QMessageBox.Cancel)
+        placement_box.exec()
+
+        clicked_btn = placement_box.clickedButton()
+
+        if clicked_btn == default_btn:
+            project_folder = default_folder
+        elif clicked_btn == decide_btn:
+            project_folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Persistent Project Folder for Normalized Audio & Backups",
+                default_folder
+            )
+        else:
+            self.status_label.setText("DSP normalization cancelled; no files changed.")
+            return
+
+        if not project_folder:
+            self.status_label.setText("DSP normalization cancelled; no files changed.")
+            return
+
+        self.record_snapshot()
+        self.normalize_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.status_label.setText(
+            f"Starting DSP EBU R128 normalization for: "
+            f"{selected_sample.get('filename', 'selected track')}..."
+        )
+
+        self.active_worker = DspNormalizerWorker(
+            selected_samples,
+            target_dir=project_folder,
+            target_sr=44100,
+            target_lufs=-14.0
+        )
+        self.active_worker.progress.connect(self.on_worker_progress)
+        self.active_worker.file_normalized.connect(self.on_file_normalized)
+        self.active_worker.all_done.connect(self.on_normalize_done)
+        self.active_worker.error_occurred.connect(self.on_worker_error)
+        self.active_worker.start()
     def on_normalize_done(self, norm_dir, backup_dir):
         self.normalize_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_label.setText("Normalization completed.")
+        
         QMessageBox.information(
-            self, "DSP Normalization Finished",
-            f"All tracks unified to -14 LUFS (EBU R128) and 44.1 kHz stereo WAV.\n\n"
+            self, 
+            "DSP Normalization Finished",
+            f"Selected track unified to -14 LUFS (EBU R128) and 44.1 kHz stereo WAV.\n\n"
             f"Normalized Audio Workspace:\n{norm_dir}\n\n"
-            f"Original Backups Stored At:\n{backup_dir}"
+            f"Original Backup Stored At:\n{backup_dir}"
         )
+        
+        self.status_label.setText("Rescanning dataset files. Please wait a few seconds...")
+
+        self.rescan_notice = QMessageBox(self)
+        self.rescan_notice.setWindowTitle("Rescanning Dataset")
+        self.rescan_notice.setIcon(QMessageBox.Information)
+        self.rescan_notice.setText(
+            "Rescanning dataset files. Please wait a few seconds..."
+        )
+        self.rescan_notice.setStandardButtons(QMessageBox.NoButton)
+        self.rescan_notice.setModal(False)
+        self.rescan_notice.show()
+
         self.start_health_audit()
+
 
     def load_dataset(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Dataset JSON", "", "JSON Files (*.json)")
