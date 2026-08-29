@@ -6,6 +6,24 @@
 
 A lightweight, outcome-driven desktop utility designed for preparing, auditing, normalizing, and auto-captioning audio datasets for **ACE-Step 1.5 / XL / LoRA / LoKR** fine-tuning.
 
+## 📁 Project Structure
+
+```
+dataset_manager.py        # Entry point — run with: python dataset_manager.py
+config.py                 # Default configuration (API keys live in settings.json, gitignored)
+stem_separator.py         # MVSEP API stem separation
+modules/homogeneity.py    # DSP homogeneity engine (LUFS, crest factor, spectral centroid)
+workers/                  # Background QThread workers (one per pipeline stage)
+  deepseek.py             #   DeepSeek music-prompt orchestrator client
+  advanced.py             #   Advanced AI pipeline orchestrator
+  spatial.py              #   Spatial pipeline (stems -> sections -> captions)
+  health.py               #   Health audit (metadata, clipping, lossy cutoffs, BPM/key)
+  dsp.py                  #   EBU R128 normalization
+  caption.py              #   Multi-backend captioning (Kaggle / DeepSeek / custom)
+  structural.py           #   Structural pipeline + batch worker
+ui/main_window.py         # DatasetManager QMainWindow (tabs, theming, undo/redo)
+```
+
 ---
 
 ## 🌟 Philosophy: User Sovereignty (Gentoo-Style)

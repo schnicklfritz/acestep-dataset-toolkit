@@ -22,3 +22,6 @@ ace_stage_*
 settings.json
 kaggle.json
 *.local
+
+# Local Backups
+backup/
