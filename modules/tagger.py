@@ -241,7 +241,22 @@ def normalize_instrument(name):
         return INSTRUMENT_ALIASES[n]
     if n.endswith("s") and n[:-1] in INSTRUMENT_ALIASES:
         return INSTRUMENT_ALIASES[n[:-1]]
+    if n.endswith("s") and n[:-1] in CANONICAL_INSTRUMENTS:
+        return n[:-1]
     return n
+
+
+# Canonical instrument names (the catalog's own vocabulary), so plurals like
+# "guitars" collapse to "guitar" even though "guitar" isn't an alias.
+CANONICAL_INSTRUMENTS = frozenset({
+    "organ", "harpsichord", "accordion", "vibraphone", "rhodes", "piano",
+    "guitar", "acoustic guitar", "electric guitar", "pedal steel guitar",
+    "steel guitar", "harp", "mandolin", "banjo", "sitar", "ukulele", "dobro",
+    "violin", "viola", "cello", "double bass", "bass", "drums", "synth",
+    "saxophone", "flute", "trumpet", "trombone", "clarinet", "harmonica",
+    "brass", "woodwind", "percussion", "tambourine", "congas", "marimba",
+    "xylophone", "bells", "cowbell",
+})
 
 
 # ---------------------------------------------------------------------------

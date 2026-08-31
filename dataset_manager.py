@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import re
 import html
 import uuid
 import tempfile
@@ -50,7 +51,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
     QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
     QTabWidget, QFontComboBox, QSlider, QRadioButton, QButtonGroup,
-    QFrame, QListWidget, QTextBrowser, QSizePolicy
+    QFrame, QListWidget, QTextBrowser, QSizePolicy, QAbstractItemView
 )
 from PySide6.QtGui import QFont, QColor, QDesktopServices, QPainter, QPen, QPalette
 
@@ -760,12 +761,18 @@ class DatasetManager(QMainWindow):
         assistant_tab = QWidget()
         self.init_assistant_tab(assistant_tab)
 
+        tag_tab = QWidget()
+        self.init_tag_manager_tab(tag_tab)
+
         self.tabs.addTab(struct_tab, "🎶 Structural Pipeline")
         self.tabs.addTab(studio_tab, "🎛 Dataset Studio")
         self.tabs.addTab(settings_tab, "⚙ Settings")
         self.tabs.addTab(advanced_tab, "🧠 Advanced Tools")
         self.tabs.addTab(spatial_tab, "🌐 Spatial Pipeline")
         self.tabs.addTab(assistant_tab, "🤖 AI Assistant")
+        self.tabs.addTab(tag_tab, "🏷️ Tag Manager")
+        self.tag_tab_index = self.tabs.indexOf(tag_tab)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # Set the Dataset Studio tab as the default visible tab
         studio_index = self.tabs.indexOf(studio_tab)
@@ -1643,6 +1650,203 @@ class DatasetManager(QMainWindow):
         self._set_assistant_busy(False)
         self.assistant_status.setText(f"Error: {err}")
         QMessageBox.warning(self, "AI Assistant", str(err))
+
+    # -----------------------------------------------------------------------
+    # Tag Manager Tab
+    # -----------------------------------------------------------------------
+    def init_tag_manager_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        split = QSplitter(Qt.Horizontal)
+
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.addWidget(QLabel("<b>Tracks (multi-select):</b>"))
+        self.tag_track_list = QListWidget()
+        self.tag_track_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        ll.addWidget(self.tag_track_list)
+        split.addWidget(left)
+
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        top = QHBoxLayout()
+        self.tag_search = QLineEdit()
+        self.tag_search.setPlaceholderText("Filter tags…")
+        self.tag_search.setClearButtonEnabled(True)
+        self.tag_search.textChanged.connect(self.refresh_tag_stats)
+        refresh_btn = QPushButton("↻ Refresh")
+        refresh_btn.clicked.connect(self.refresh_tag_manager)
+        top.addWidget(self.tag_search, 1)
+        top.addWidget(refresh_btn)
+        rl.addLayout(top)
+        self.tag_stats_table = QTableWidget(0, 3)
+        self.tag_stats_table.setHorizontalHeaderLabels(["Tag", "Count", "Tracks"])
+        self.tag_stats_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tag_stats_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tag_stats_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        rl.addWidget(self.tag_stats_table)
+        split.addWidget(right)
+
+        split.setSizes([300, 600])
+        layout.addWidget(split, 1)
+
+        actions = QHBoxLayout()
+        add_btn = QPushButton("+ Add Tag to Selected")
+        add_btn.clicked.connect(self.add_tag_to_selected)
+        remove_btn = QPushButton("− Remove Tag from Selected")
+        remove_btn.clicked.connect(self.remove_tag_from_selected)
+        norm_btn = QPushButton("Normalize Synonyms")
+        norm_btn.clicked.connect(self.normalize_tag_synonyms)
+        actions.addWidget(add_btn)
+        actions.addWidget(remove_btn)
+        actions.addWidget(norm_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self.tag_manager_status = QLabel(
+            "Tags are aggregated from each track's instruments, custom tag, and genre. "
+            "Select tracks on the left to add/remove tags."
+        )
+        self.tag_manager_status.setWordWrap(True)
+        self.tag_manager_status.setStyleSheet("color: #aaa;")
+        layout.addWidget(self.tag_manager_status)
+
+        self.refresh_tag_manager()
+
+    def _on_tab_changed(self, index):
+        if index == self.tag_tab_index and hasattr(self, "tag_stats_table"):
+            self.refresh_tag_manager()
+
+    def refresh_tag_manager(self):
+        self._populate_tag_track_list()
+        self.refresh_tag_stats()
+
+    def _populate_tag_track_list(self):
+        self.tag_track_list.clear()
+        for i, s in enumerate(self.dataset.get("samples", [])):
+            self.tag_track_list.addItem(f"{s.get('filename', '?')} [{i}]")
+            self.tag_track_list.item(i).setData(Qt.UserRole, i)
+
+    def _extract_tags(self, s):
+        tags = []
+        inst = s.get("tags", {}).get("instruments") or s.get("detected_instruments") or []
+        if isinstance(inst, str):
+            inst = [i.strip() for i in inst.split(",") if i.strip()]
+        for i in inst:
+            if i:
+                tags.append(i.strip().lower())
+        for field in ("custom_tag", "genre"):
+            val = (s.get(field) or "").strip()
+            for tok in re.split(r"[,;|/]+", val):
+                t = tok.strip().lower()
+                if t:
+                    tags.append(t)
+        return tags
+
+    def refresh_tag_stats(self):
+        counts = {}
+        tracks = {}
+        for s in self.dataset.get("samples", []):
+            name = s.get("filename", "?")
+            for t in self._extract_tags(s):
+                counts[t] = counts.get(t, 0) + 1
+                tracks.setdefault(t, []).append(name)
+        query = self.tag_search.text().strip().lower()
+        rows = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        self.tag_stats_table.setRowCount(0)
+        for tag, cnt in rows:
+            if query and query not in tag:
+                continue
+            row = self.tag_stats_table.rowCount()
+            self.tag_stats_table.insertRow(row)
+            self.tag_stats_table.setItem(row, 0, QTableWidgetItem(tag))
+            c = QTableWidgetItem(str(cnt))
+            c.setTextAlignment(Qt.AlignCenter)
+            self.tag_stats_table.setItem(row, 1, c)
+            self.tag_stats_table.setItem(row, 2, QTableWidgetItem(
+                ", ".join(tracks[tag][:6]) + ("…" if len(tracks[tag]) > 6 else "")
+            ))
+
+    def _selected_tag_indices(self):
+        return [
+            self.tag_track_list.item(i).data(Qt.UserRole)
+            for i in range(self.tag_track_list.count())
+            if self.tag_track_list.item(i).isSelected()
+        ]
+
+    def add_tag_to_selected(self):
+        idxs = self._selected_tag_indices()
+        if not idxs:
+            QMessageBox.information(self, "Tag Manager", "Select one or more tracks on the left first.")
+            return
+        tag, ok = QInputDialog.getText(self, "Add Tag", "Tag to add:")
+        if not ok or not tag.strip():
+            return
+        tag = tag.strip()
+        self.record_snapshot()
+        changed = 0
+        for i in idxs:
+            s = self.dataset["samples"][i]
+            cur = (s.get("custom_tag") or "").strip()
+            tags = [t.strip() for t in re.split(r"[,;|/]+", cur) if t.strip()] if cur else []
+            if tag.lower() not in [t.lower() for t in tags]:
+                tags.append(tag)
+                s["custom_tag"] = ", ".join(tags)
+                changed += 1
+        self.refresh_tag_manager()
+        self.status_label.setText(f"Added '{tag}' to {changed} track(s).")
+
+    def remove_tag_from_selected(self):
+        idxs = self._selected_tag_indices()
+        if not idxs:
+            QMessageBox.information(self, "Tag Manager", "Select one or more tracks on the left first.")
+            return
+        tag, ok = QInputDialog.getText(self, "Remove Tag", "Tag to remove:")
+        if not ok or not tag.strip():
+            return
+        tag = tag.strip()
+        self.record_snapshot()
+        changed = 0
+        for i in idxs:
+            s = self.dataset["samples"][i]
+            cur = (s.get("custom_tag") or "").strip()
+            tags = [t.strip() for t in re.split(r"[,;|/]+", cur) if t.strip()] if cur else []
+            filtered = [t for t in tags if t.lower() != tag.lower()]
+            if len(filtered) != len(tags):
+                s["custom_tag"] = ", ".join(filtered)
+                changed += 1
+        self.refresh_tag_manager()
+        self.status_label.setText(f"Removed '{tag}' from {changed} track(s).")
+
+    def normalize_tag_synonyms(self):
+        from modules.tagger import normalize_instrument
+
+        self.record_snapshot()
+        changed = 0
+        for s in self.dataset.get("samples", []):
+            cur = (s.get("custom_tag") or "").strip()
+            if cur:
+                toks = [t.strip() for t in re.split(r"[,;|/]+", cur) if t.strip()]
+                norm = [normalize_instrument(t) for t in toks]
+                if norm != toks:
+                    s["custom_tag"] = ", ".join(norm)
+                    changed += 1
+            inst = s.get("detected_instruments")
+            if isinstance(inst, list) and inst:
+                norm_inst = [normalize_instrument(i) for i in inst]
+                if norm_inst != inst:
+                    s["detected_instruments"] = norm_inst
+                    changed += 1
+            tags = s.get("tags")
+            if isinstance(tags, dict) and tags.get("instruments"):
+                ni = [normalize_instrument(i) for i in tags["instruments"]]
+                if ni != tags["instruments"]:
+                    tags["instruments"] = ni
+                    changed += 1
+        self.refresh_tag_manager()
+        self.status_label.setText(f"Normalized tag synonyms across {changed} track(s).")
 
     def init_advanced_tab(self, parent):
         layout = QVBoxLayout(parent)
