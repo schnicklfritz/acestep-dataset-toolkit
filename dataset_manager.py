@@ -23,6 +23,7 @@ from config import DEFAULT_CONFIG
 from modules.config_store import load_config, save_config
 from modules.model_manager import load_catalog, leaderboards, find_model, is_downloaded, remove_model
 from workers.model_manager import ModelDownloadWorker
+from workers.lyrics import TranscribeLyricsWorker
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -209,9 +210,10 @@ class HealthAuditorWorker(QThread):
     audit_completed = Signal(dict)
     error_occurred = Signal(str)
 
-    def __init__(self, samples):
+    def __init__(self, samples, config=None):
         super().__init__()
         self.samples = samples
+        self.config = config or {}
         self._is_cancelled = False
 
     def run(self):
@@ -310,12 +312,64 @@ class HealthAuditorWorker(QThread):
                 quality_score -= 15
                 reasons.append(f"Small Dataset (-15%): Current size ({total} tracks) is under recommended 10+ samples.")
 
+            # ---- Near-duplicate detection (same song, different encodes/masters) ----
+            near_dups = []
+            if total >= 2:
+                try:
+                    from modules.dedup import find_near_duplicates
+                    self.progress.emit(88, "Checking for near-duplicate tracks...")
+                    pairs = find_near_duplicates(
+                        [s.get("audio_path", "") for s in self.samples],
+                        threshold=float(self.config.get("dedup_threshold", 0.95) or 0.95),
+                        progress_cb=lambda p, m: self.progress.emit(88 + int(p * 0.06), m),
+                    )
+                    # keep the original filenames for the report
+                    name_of = {s.get("audio_path"): s.get("filename", "") for s in self.samples}
+                    near_dups = [
+                        (name_of.get(a, os.path.basename(a)),
+                         name_of.get(b, os.path.basename(b)),
+                         round(sim, 3))
+                        for a, b, sim in pairs
+                    ]
+                except Exception as e:  # noqa: BLE001
+                    print(f"dedup check failed: {e}")
+            if near_dups:
+                pen = min(20, len(near_dups) * 10)
+                quality_score -= pen
+                reasons.append(
+                    f"Near-Duplicates (-{pen}%): {len(near_dups)} pair(s) of tracks are near-identical "
+                    "(same song, different encode/master)."
+                )
+
             quality_score = max(5, min(100, quality_score))
+
+            # ---- Recommendations (actionable, copyright-safe) ----
+            recommendations = []
+            if missing_files:
+                recommendations.append("Restore or re-add the missing audio files before exporting.")
+            if clipping_files:
+                recommendations.append("Re-export clipping tracks with a lower ceiling (e.g. -1 dBTP).")
+            if lossy_files:
+                recommendations.append("Replace lossy sources with lossless masters for cleaner training.")
+            if len(unique_sr) > 1:
+                recommendations.append("Run DSP Normalize to resample everything to one sample rate.")
+            if lufs_spread > 5.0:
+                recommendations.append("Run DSP Normalize (EBU R128) to collapse loudness spread.")
+            if near_dups:
+                recommendations.append("Remove or replace near-duplicate tracks so the model does not memorize repeated material.")
+            if uncertain_bpm:
+                recommendations.append("Verify BPM/key on the flagged tracks (tagger confidence was low).")
+            if total < 10:
+                recommendations.append("Aim for 10+ tracks; small datasets limit LoRA generalization.")
+            if not recommendations:
+                recommendations.append("Dataset is healthy — ready to caption and export.")
 
             summary = {
                 "quality_score": quality_score,
                 "healthy": quality_score >= 80,
                 "reasons": reasons,
+                "recommendations": recommendations,
+                "near_duplicates": near_dups,
                 "total_audited": total,
                 "unique_sample_rates": unique_sr,
                 "unique_channels": unique_ch,
@@ -699,6 +753,11 @@ class DatasetManager(QMainWindow):
         self.run_ai_btn = QPushButton("🚀 Run AI Captioner")
         self.run_ai_btn.clicked.connect(self.start_ai_captioning)
         action_strip.addWidget(self.run_ai_btn)
+
+        self.transcribe_btn = QPushButton("🎤 Transcribe Lyrics (WhisperX)")
+        self.transcribe_btn.setToolTip("Word-aligned lyrics for the selected track. Requires: pip install whisperx")
+        self.transcribe_btn.clicked.connect(self.start_lyrics_transcription)
+        action_strip.addWidget(self.transcribe_btn)
 
         action_strip.addSpacing(15)
 
@@ -2796,7 +2855,7 @@ class DatasetManager(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Auditing dataset health, metadata & degradation penalties...")
 
-        self.active_worker = HealthAuditorWorker(samples)
+        self.active_worker = HealthAuditorWorker(samples, self.config)
         self.active_worker.progress.connect(self.on_worker_progress)
         self.active_worker.file_audited.connect(self.on_file_audited)
         self.active_worker.audit_completed.connect(self.on_audit_completed)
@@ -2839,12 +2898,20 @@ class DatasetManager(QMainWindow):
         self.refresh_table()
         self.on_table_selection_changed()
 
-        if reasons:
-            reasons_str = "\n• " + "\n• ".join(reasons)
-            QMessageBox.warning(
+        if reasons or summary.get("recommendations") or summary.get("near_duplicates"):
+            reasons_str = "\n• " + "\n• ".join(reasons) if reasons else "\n• (none)"
+            recs = summary.get("recommendations", [])
+            recs_str = "\n• " + "\n• ".join(recs) if recs else ""
+            dup_str = ""
+            dups = summary.get("near_duplicates", [])
+            if dups:
+                dup_lines = [f"  {a}  ≈  {b}  ({sim:.3f})" for a, b, sim in dups]
+                dup_str = "\nNear-duplicates:\n" + "\n".join(dup_lines)
+            QMessageBox.information(
                 self, f"Quality Audit: {score}% Score",
-                f"The following degradation risks were identified:\n{reasons_str}\n\n"
-                "Tip: Run the DSP Normalizer to automatically resolve loudness variations and sample rate mismatches."
+                f"Degradation risks:\n{reasons_str}\n\n"
+                f"Recommendations:{recs_str}{dup_str}\n\n"
+                "Run DSP Normalize to resolve loudness / sample-rate mismatches automatically."
             )
 
     # -----------------------------------------------------------------------
@@ -3108,6 +3175,52 @@ class DatasetManager(QMainWindow):
         self.status_label.setText("AI Captioning completed.")
         self.refresh_table()
         self.on_table_selection_changed()
+
+    # -----------------------------------------------------------------------
+    # Lyrics transcription (WhisperX, optional)
+    # -----------------------------------------------------------------------
+    def start_lyrics_transcription(self):
+        selected = self.get_selected_sample()
+        if not selected:
+            QMessageBox.warning(self, "No Track Selected", "Select a track to transcribe.")
+            return
+        audio_path = selected.get("audio_path", "")
+        if not audio_path or not os.path.exists(audio_path):
+            QMessageBox.warning(self, "Missing Audio", "The selected track's audio file is missing on disk.")
+            return
+        from modules.lyrics import transcribe_available
+        if not transcribe_available():
+            QMessageBox.information(
+                self, "WhisperX Required",
+                "WhisperX is not installed.\n\n  pip install whisperx\n\n"
+                "(requires torch + transformers.)"
+            )
+            return
+        self.transcribe_btn.setEnabled(False)
+        self.status_label.setText(f"Transcribing lyrics for {selected.get('filename', '')}...")
+        self.lyrics_worker = TranscribeLyricsWorker(audio_path, model_size="small", parent=self)
+        self.lyrics_worker.finished_ok.connect(self.on_lyrics_done)
+        self.lyrics_worker.failed.connect(self.on_lyrics_failed)
+        self.lyrics_worker.start()
+
+    def on_lyrics_done(self, result):
+        self.transcribe_btn.setEnabled(True)
+        lyrics = (result.get("lyrics") or "").strip()
+        sample = self.get_selected_sample()
+        if sample and lyrics:
+            self.record_snapshot()
+            sample["lyrics"] = lyrics
+            sample["formatted_lyrics"] = lyrics
+            self.status_label.setText("Lyrics transcribed.")
+            self.refresh_table()
+            self.on_table_selection_changed()
+        else:
+            self.status_label.setText("Lyrics transcription returned no text.")
+
+    def on_lyrics_failed(self, err):
+        self.transcribe_btn.setEnabled(True)
+        self.status_label.setText("Lyrics transcription failed.")
+        QMessageBox.warning(self, "Transcription Failed", str(err))
 
     # -----------------------------------------------------------------------
     # Common worker callbacks
