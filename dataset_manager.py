@@ -672,7 +672,7 @@ class DatasetManager(QMainWindow):
 
         self.tabs.addTab(struct_tab, "🎶 Structural Pipeline")
         self.tabs.addTab(studio_tab, "🎛 Dataset Studio")
-        self.tabs.addTab(settings_tab, "🎨 Appearance & Customization")
+        self.tabs.addTab(settings_tab, "⚙ Settings")
         self.tabs.addTab(advanced_tab, "🧠 Advanced Tools")
         self.tabs.addTab(spatial_tab, "🌐 Spatial Pipeline")
         self.tabs.addTab(assistant_tab, "🤖 AI Assistant")
@@ -934,9 +934,20 @@ class DatasetManager(QMainWindow):
         inner = QWidget()
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
 
-        theme_grp = QGroupBox("🎨 Visual Appearance & UI Themes (Gentoo Philosophy)")
+        # Title clearance: keep the group-box titles from being overlapped by
+        # the first form row (labels/inputs on the left).
+        scroll.setStyleSheet("QGroupBox { padding-top: 0.9em; }")
+
+        save_all_btn = QPushButton("💾 Save All Settings")
+        save_all_btn.setStyleSheet("font-weight: bold; padding: 8px;")
+        save_all_btn.clicked.connect(self.save_all_settings)
+        layout.addWidget(save_all_btn)
+
+        theme_grp = QGroupBox("🎨 Visual Appearance & UI Themes")
         form = QFormLayout(theme_grp)
+        form.setContentsMargins(8, 18, 8, 8)
 
         self.font_picker = QFontComboBox()
         self.font_picker.setCurrentFont(QFont(self.custom_theme["font_family"]))
@@ -962,6 +973,7 @@ class DatasetManager(QMainWindow):
 
         cloud_grp = QGroupBox("⚙ Cloud & Execution Endpoints")
         c_form = QFormLayout(cloud_grp)
+        c_form.setContentsMargins(8, 18, 8, 8)
 
         self.k_user = QLineEdit(self.config.get("kaggle_user", ""))
         self.k_key = QLineEdit(self.config.get("kaggle_key", ""))
@@ -1054,6 +1066,7 @@ class DatasetManager(QMainWindow):
 
         llm_grp = QGroupBox("🧠 LLM Provider")
         llm_form = QFormLayout(llm_grp)
+        llm_form.setContentsMargins(8, 18, 8, 8)
 
         self.llm_provider_combo = QComboBox()
         self.llm_provider_combo.addItems([
@@ -1111,6 +1124,7 @@ class DatasetManager(QMainWindow):
 
         pipe_grp = QGroupBox("🎛 Pipeline & Model Defaults")
         p_form = QFormLayout(pipe_grp)
+        p_form.setContentsMargins(8, 18, 8, 8)
 
         self.prompt_edit = QTextEdit()
         self.prompt_edit.setPlainText(self.config.get("caption_prompt", ""))
@@ -1228,6 +1242,7 @@ class DatasetManager(QMainWindow):
 
         mm_grp = QGroupBox("🧰 Model Manager")
         mm_form = QFormLayout(mm_grp)
+        mm_form.setContentsMargins(8, 18, 8, 8)
 
         self.model_source_combo = QComboBox()
         self.model_source_combo.addItems(["hf (Hugging Face)", "github (my repo)"])
@@ -2397,6 +2412,13 @@ class DatasetManager(QMainWindow):
             }}
         """
         self.setStyleSheet(style)
+
+    def save_all_settings(self):
+        """Persist every settings group (cloud keys, LLM provider, pipeline
+        defaults, model manager) in one click."""
+        self.save_cloud_config()
+        self.save_pipeline_defaults()
+        self.status_label.setText("All settings saved.")
 
     def _browse_stem_dir(self):
         start = self.stem_out_edit.text().strip() or str(Path.home())
