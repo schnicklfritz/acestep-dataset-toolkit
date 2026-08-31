@@ -30,6 +30,7 @@ from workers.rockstar import RockstarLookupWorker
 from workers.embeddings import EmbeddingWorker
 from workers.export import ExportWorker
 from workers.tag_creator import TagCreatorWorker
+from workers.musicbrainz import MusicBrainzWorker
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -514,6 +515,24 @@ class HealthAuditorWorker(QThread):
                     "(same song, different encode/master)."
                 )
 
+            # ---- Exact duplicates (byte-identical files) ----
+            exact_dups = []
+            if total >= 2:
+                try:
+                    from modules.dedup import find_exact_duplicates
+                    self.progress.emit(94, "Checking for exact duplicates...")
+                    groups = find_exact_duplicates([s.get("audio_path", "") for s in self.samples])
+                    name_of = {s.get("audio_path"): s.get("filename", "") for s in self.samples}
+                    exact_dups = [[name_of.get(p, os.path.basename(p)) for p in g] for g in groups]
+                except Exception as e:  # noqa: BLE001
+                    print(f"exact dedup failed: {e}")
+            if exact_dups:
+                pen = min(20, sum(len(g) - 1 for g in exact_dups) * 10)
+                quality_score -= pen
+                reasons.append(
+                    f"Exact Duplicates (-{pen}%): {len(exact_dups)} group(s) of byte-identical files."
+                )
+
             quality_score = max(5, min(100, quality_score))
 
             # ---- Recommendations (actionable, copyright-safe) ----
@@ -530,6 +549,8 @@ class HealthAuditorWorker(QThread):
                 recommendations.append("Run DSP Normalize (EBU R128) to collapse loudness spread.")
             if near_dups:
                 recommendations.append("Remove or replace near-duplicate tracks so the model does not memorize repeated material.")
+            if exact_dups:
+                recommendations.append("Remove exact-duplicate files (identical bytes) to avoid redundant training data.")
             if uncertain_bpm:
                 recommendations.append("Verify BPM/key on the flagged tracks (tagger confidence was low).")
             if total < 10:
@@ -543,6 +564,7 @@ class HealthAuditorWorker(QThread):
                 "reasons": reasons,
                 "recommendations": recommendations,
                 "near_duplicates": near_dups,
+                "exact_duplicates": exact_dups,
                 "total_audited": total,
                 "unique_sample_rates": unique_sr,
                 "unique_channels": unique_ch,
@@ -616,17 +638,34 @@ class HealthAuditorWorker(QThread):
         if dur > 0 and dur < 10:
             issues.append("Short track (< 10s)")
 
+        # Full-decode check — unreadable/corrupt files must not enter the dataset.
+        # Uses ffprobe (fast, never hangs); a decode failure also skips the
+        # tagger's own audio load below.
+        decode_ok = True
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "json", path],
+                capture_output=True, text=True, timeout=20,
+            )
+            decode_ok = probe.returncode == 0
+        except Exception:  # noqa: BLE001
+            decode_ok = True
+        if not decode_ok:
+            issues.append("Unreadable / corrupt audio file")
+
         if not bpm_detected or not key_detected:
             # Compute real BPM/key instead of falling back to placeholders.
             try:
-                from modules.tagger import analyze_audio
-                tags = analyze_audio(path)
-                if not bpm_detected and tags.get("bpm"):
-                    bpm_detected = tags["bpm"]
-                    bpm_confidence = 0.9
-                if not key_detected and tags.get("key"):
-                    key_detected = tags["key"]
-                    key_confidence = 0.9
+                if decode_ok:
+                    from modules.tagger import analyze_audio
+                    tags = analyze_audio(path)
+                    if not bpm_detected and tags.get("bpm"):
+                        bpm_detected = tags["bpm"]
+                        bpm_confidence = 0.9
+                    if not key_detected and tags.get("key"):
+                        key_detected = tags["key"]
+                        key_confidence = 0.9
             except Exception:  # noqa: BLE001 — tagging must never break the audit
                 pass
         if not bpm_detected:
@@ -923,6 +962,10 @@ class DatasetManager(QMainWindow):
         header_bar.addWidget(load_btn)
         header_bar.addWidget(save_btn)
         header_bar.addWidget(export_btn)
+        stats_btn = QPushButton("📊 Stats")
+        stats_btn.setToolTip("Show a one-page statistics report for the dataset.")
+        stats_btn.clicked.connect(self.show_stats_report)
+        header_bar.addWidget(stats_btn)
         header_bar.addWidget(add_btn)
 
         studio_layout.addLayout(header_bar)
@@ -998,6 +1041,11 @@ class DatasetManager(QMainWindow):
         self.tag_creator_btn.setToolTip("Generate the ACE-Step Caption (global) + Lyrics (time-script) tag blocks for the selected track using the tag vocabulary.")
         self.tag_creator_btn.clicked.connect(self.start_structural_tag_creator)
         action_strip.addWidget(self.tag_creator_btn)
+
+        self.musicbrainz_btn = QPushButton("🎵 MusicBrainz")
+        self.musicbrainz_btn.setToolTip("Look up artist/title/year/genre metadata for this track (copyright-safe).")
+        self.musicbrainz_btn.clicked.connect(self.start_musicbrainz_lookup)
+        action_strip.addWidget(self.musicbrainz_btn)
 
         action_strip.addSpacing(15)
 
@@ -4678,6 +4726,87 @@ class DatasetManager(QMainWindow):
         self.tag_creator_btn.setEnabled(True)
         self.status_label.setText("Structural tag creation failed.")
         QMessageBox.warning(self, "Tag Creator Failed", str(err))
+
+    # -----------------------------------------------------------------------
+    # MusicBrainz enrichment + dataset stats
+    # -----------------------------------------------------------------------
+    def start_musicbrainz_lookup(self):
+        selected = self.get_selected_sample()
+        if not selected:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        base = Path(selected.get("filename", "")).stem.replace("_", " ").replace("-", " - ")
+        parts = [p.strip() for p in base.split(" - ", 1)]
+        artist = parts[0] if len(parts) > 1 else ""
+        song = parts[1] if len(parts) > 1 else parts[0]
+        song, ok = QInputDialog.getText(self, "MusicBrainz", "Song:", text=song)
+        if not ok or not song.strip():
+            return
+        artist, ok2 = QInputDialog.getText(self, "MusicBrainz", "Artist:", text=artist)
+        if not ok2:
+            return
+        self.musicbrainz_btn.setEnabled(False)
+        self.status_label.setText(f"Looking up {song.strip()} on MusicBrainz…")
+        self.musicbrainz_worker = MusicBrainzWorker(artist.strip(), song.strip(), parent=self)
+        self.musicbrainz_worker.finished_ok.connect(self.on_musicbrainz_result)
+        self.musicbrainz_worker.failed.connect(self.on_musicbrainz_failed)
+        self.musicbrainz_worker.start()
+
+    def on_musicbrainz_result(self, result):
+        self.musicbrainz_btn.setEnabled(True)
+        sample = self.get_selected_sample()
+        if not result.get("ok"):
+            QMessageBox.information(self, "MusicBrainz", result.get("note", "No match."))
+            return
+        lines = [
+            f"<b>{result.get('artist')} — {result.get('title')}</b>",
+            "Year: " + (result.get("year") or "unknown")
+            + (f" | Country: {result.get('country')}" if result.get("country") else ""),
+        ]
+        if result.get("genres"):
+            lines.append("Genres: " + ", ".join(result["genres"]))
+        lines.append("")
+        lines.append("Apply the genre / year to the selected track?")
+        reply = QMessageBox.question(
+            self, "MusicBrainz", "<br>".join(lines), QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes and sample:
+            self.record_snapshot()
+            if not (sample.get("genre") or "").strip() and result.get("genres"):
+                sample["genre"] = result["genres"][0]
+            sample["year"] = result.get("year", "")
+            sample["country"] = result.get("country", "")
+            self.refresh_table()
+            self.on_table_selection_changed()
+            self.status_label.setText(f"Applied MusicBrainz metadata for {sample.get('filename', '')}.")
+        else:
+            self.status_label.setText("MusicBrainz metadata not applied.")
+
+    def on_musicbrainz_failed(self, err):
+        self.musicbrainz_btn.setEnabled(True)
+        QMessageBox.warning(self, "MusicBrainz Failed", str(err))
+
+    def show_stats_report(self):
+        from modules.stats import build_dataset_report
+
+        report = build_dataset_report(self.dataset)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Dataset Statistics")
+        dialog.resize(560, 420)
+        lay = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setPlainText(report)
+        lay.addWidget(browser, 1)
+        row = QHBoxLayout()
+        copy_btn = QPushButton("Copy")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(report))
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        row.addWidget(copy_btn)
+        row.addStretch()
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+        dialog.exec()
 
     # -----------------------------------------------------------------------
     # Common worker callbacks

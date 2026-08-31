@@ -1,13 +1,9 @@
-"""Near-duplicate audio detection via compact librosa fingerprints.
+"""Near-duplicate + exact-duplicate audio detection.
 
-No heavy model needed: each track is reduced to a small normalized
-mel-spectrogram summary vector, and tracks whose cosine similarity exceeds a
-threshold are flagged as near-duplicates. This catches the same song twice
-(with different encodings/masters) — a silent quality drag on a dataset.
-
-The fingerprint uses a representative middle window so intros/outros don't
-dominate the comparison.
+Near-duplicates use librosa mel fingerprints (catches same-song-different-
+encode). Exact duplicates use file MD5 (identical files). No heavy model.
 """
+import hashlib
 import os
 
 import librosa
@@ -45,6 +41,8 @@ def find_near_duplicates(paths, threshold=0.95, progress_cb=None):
     vecs = {}
     paths = [p for p in paths if p and os.path.exists(p)]
     for i, p in enumerate(paths):
+        if not _probe_ok(p):   # skip corrupt/unreadable files (no hang)
+            continue
         try:
             v = fingerprint(p)
             if v is not None:
@@ -63,3 +61,34 @@ def find_near_duplicates(paths, threshold=0.95, progress_cb=None):
             if sim >= threshold:
                 pairs.append((pa, pb, sim))
     return pairs
+
+
+def find_exact_duplicates(paths):
+    """Return groups of byte-identical files (by MD5). Each group has >= 2 paths."""
+    groups = {}
+    for p in paths:
+        if not p or not os.path.exists(p):
+            continue
+        try:
+            h = hashlib.md5()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            groups.setdefault(h.hexdigest(), []).append(p)
+        except Exception:  # noqa: BLE001
+            continue
+    return [g for g in groups.values() if len(g) > 1]
+
+
+def _probe_ok(path, timeout=10):
+    """Fast, non-hanging check that a file decodes (ffprobe)."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001 — if ffprobe is missing, don't over-flag
+        return True
