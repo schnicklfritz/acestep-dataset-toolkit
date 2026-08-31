@@ -21,6 +21,8 @@ from openai import OpenAI
 
 from config import DEFAULT_CONFIG
 from modules.config_store import load_config, save_config
+from modules.model_manager import load_catalog, leaderboards, find_model, is_downloaded, remove_model
+from workers.model_manager import ModelDownloadWorker
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -1060,6 +1062,60 @@ class DatasetManager(QMainWindow):
         p_form.addRow(save_pipe_btn)
 
         layout.addWidget(pipe_grp)
+
+        mm_grp = QGroupBox("🧰 Model Manager")
+        mm_form = QFormLayout(mm_grp)
+
+        self.model_source_combo = QComboBox()
+        self.model_source_combo.addItems(["hf (Hugging Face)", "github (my repo)"])
+        cur_src = str(self.config.get("model_download_source", "hf") or "hf").lower()
+        self.model_source_combo.setCurrentIndex(1 if cur_src.startswith("git") else 0)
+        mm_form.addRow("Download Source:", self.model_source_combo)
+
+        self.model_pick_combo = QComboBox()
+        self.model_pick_combo.setMinimumWidth(340)
+        self._populate_model_picker()
+        mm_form.addRow("Model:", self.model_pick_combo)
+
+        self.model_status = QLabel("Select a model to see its status.")
+        self.model_status.setWordWrap(True)
+        self.model_status.setStyleSheet("color: #aaa; font-size: 9px;")
+        mm_form.addRow(self.model_status)
+
+        dl_row = QHBoxLayout()
+        download_btn = QPushButton("⬇ Download")
+        download_btn.clicked.connect(self.download_selected_model)
+        remove_btn = QPushButton("🗑 Remove")
+        remove_btn.clicked.connect(self.remove_selected_model)
+        refresh_btn = QPushButton("↻ Status")
+        refresh_btn.clicked.connect(self.refresh_model_status)
+        dl_row.addWidget(download_btn)
+        dl_row.addWidget(remove_btn)
+        dl_row.addWidget(refresh_btn)
+        mm_form.addRow(dl_row)
+
+        self.leaderboard_combo = QComboBox()
+        for item in leaderboards():
+            self.leaderboard_combo.addItem(item["name"], item["url"])
+        open_lb = QPushButton("Open")
+        open_lb.clicked.connect(self.open_selected_leaderboard)
+        lb_row = QHBoxLayout()
+        lb_row.addWidget(self.leaderboard_combo, 1)
+        lb_row.addWidget(open_lb)
+        mm_form.addRow("Leaderboards:", lb_row)
+
+        self.hf_token_edit = QLineEdit(self.config.get("hf_token", ""))
+        self.hf_token_edit.setEchoMode(QLineEdit.Password)
+        mm_form.addRow("Hugging Face Token:", self.hf_token_edit)
+        self.remember_hf = QCheckBox("Remember on this device (encrypted)")
+        self.remember_hf.setChecked(bool(self.config.get("remember_hf_token", True)))
+        mm_form.addRow("", self.remember_hf)
+
+        self.model_dir_edit = QLineEdit(self.config.get("model_dir", "models"))
+        self.model_dir_edit.setToolTip("Folder where downloaded models are stored (gitignored).")
+        mm_form.addRow("Models Folder:", self.model_dir_edit)
+
+        layout.addWidget(mm_grp)
         layout.addStretch()
         scroll.setWidget(inner)
         outer.addWidget(scroll)
@@ -2040,6 +2096,7 @@ class DatasetManager(QMainWindow):
                 ("custom_key", self.remember_custom.isChecked()),
                 ("mvsep_api_key", self.remember_mvsep.isChecked()),
                 ("gemini_api_key", self.remember_gemini.isChecked()),
+                ("hf_token", self.remember_hf.isChecked()),
             ]
             if checked
         }
@@ -2067,6 +2124,12 @@ class DatasetManager(QMainWindow):
         self.config["custom_caption_model"] = self.custom_model_edit.text().strip()
         self.config["custom_caption_audio"] = self.custom_audio_check.isChecked()
         self.config["remember_gemini_key"] = self.remember_gemini.isChecked()
+        self.config["model_download_source"] = (
+            "github" if self.model_source_combo.currentText().startswith("git") else "hf"
+        )
+        self.config["hf_token"] = self.hf_token_edit.text().strip()
+        self.config["remember_hf_token"] = self.remember_hf.isChecked()
+        self.config["model_dir"] = self.model_dir_edit.text().strip() or "models"
         remember = self._remembered_secret_keys()
         try:
             save_config(self.config, remember=remember)
@@ -2104,6 +2167,97 @@ class DatasetManager(QMainWindow):
         except Exception as e:  # noqa: BLE001
             self.status_label.setText("Pipeline defaults kept in memory only.")
             print(f"save_config failed: {e}")
+
+    # -----------------------------------------------------------------------
+    # Model Manager
+    # -----------------------------------------------------------------------
+    def _populate_model_picker(self):
+        self.model_pick_combo.clear()
+        for m in load_catalog().get("models", []):
+            self.model_pick_combo.addItem(f"{m['id']} — {m.get('name', '')}", m["id"])
+
+    def _selected_model_entry(self):
+        model_id = self.model_pick_combo.currentData()
+        return find_model(model_id) if model_id else None
+
+    def refresh_model_status(self):
+        entry = self._selected_model_entry()
+        if not entry:
+            self.model_status.setText("Select a model from the list.")
+            return
+        source = str(self.config.get("model_download_source", "hf") or "hf").lower()
+        if not (entry.get("hf_repo") or entry.get("github_url")):
+            note = entry.get("note", "")
+            self.model_status.setText(
+                f"'{entry['id']}' is API-only (preferred backend: {entry.get('preferred_backend', '?')}). "
+                f"{note}"
+            )
+            return
+        if is_downloaded(self.config, entry):
+            self.model_status.setText(
+                f"✅ Downloaded to {self.config.get('model_dir', 'models')}/{entry['id']}."
+            )
+        else:
+            self.model_status.setText(
+                f"⬇ Not downloaded. Source: {'GitHub' if source.startswith('git') else 'Hugging Face'}. "
+                f"{entry.get('note', '')}"
+            )
+
+    def download_selected_model(self):
+        entry = self._selected_model_entry()
+        if not entry:
+            QMessageBox.information(self, "Model Manager", "Select a model from the list first.")
+            return
+        source = str(self.config.get("model_download_source", "hf") or "hf").lower()
+        if source.startswith("git"):
+            if not entry.get("github_url"):
+                QMessageBox.warning(self, "No GitHub URL", f"'{entry['id']}' has no GitHub URL.")
+                return
+        else:
+            if not entry.get("hf_repo"):
+                QMessageBox.warning(
+                    self,
+                    "No HF Repo",
+                    f"'{entry['id']}' has no Hugging Face repo. Switch the download source to GitHub, "
+                    "or it may be an MVSEP API-only model.",
+                )
+                return
+        self.model_status.setText(f"Downloading {entry['id']}...")
+        self.model_worker = ModelDownloadWorker(self.config, entry["id"], parent=self)
+        self.model_worker.progress.connect(
+            lambda p, m: self.model_status.setText(f"({p}%) {m}")
+        )
+        self.model_worker.finished_ok.connect(self.on_model_downloaded)
+        self.model_worker.failed.connect(self.on_model_download_failed)
+        self.model_worker.start()
+
+    def on_model_downloaded(self, model_id):
+        self.model_status.setText(f"✅ Downloaded {model_id}.")
+        self.refresh_model_status()
+
+    def on_model_download_failed(self, err):
+        self.model_status.setText(f"❌ Download failed: {err}")
+
+    def remove_selected_model(self):
+        entry = self._selected_model_entry()
+        if not entry:
+            return
+        if not is_downloaded(self.config, entry):
+            self.model_status.setText(f"'{entry['id']}' is not downloaded.")
+            return
+        reply = QMessageBox.question(
+            self, "Remove Model",
+            f"Delete the local files for '{entry['id']}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            remove_model(self.config, entry)
+            self.refresh_model_status()
+
+    def open_selected_leaderboard(self):
+        url = self.leaderboard_combo.currentData()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
     def on_font_changed(self, font):
         self.custom_theme["font_family"] = font.family()
