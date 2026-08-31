@@ -977,7 +977,7 @@ class DatasetManager(QMainWindow):
         self.custom_url.setPlaceholderText("https://api.runpod.ai/... or http://localhost:8000/v1")
         self.custom_key = QLineEdit(self.config.get("custom_key", ""))
         self.custom_key.setEchoMode(QLineEdit.Password)
-        c_form.addRow("Custom Auth Token (DeepSeek/MVSEP):", self.custom_key)
+        c_form.addRow("Custom Auth Token (custom endpoints):", self.custom_key)
         self.remember_custom = QCheckBox("Remember on this device (encrypted)")
         self.remember_custom.setToolTip("Save the key in the OS keyring / encrypted store. Uncheck to use it for this session only.")
         self.remember_custom.setChecked(bool(self.config.get("remember_custom_key", True)))
@@ -1070,6 +1070,14 @@ class DatasetManager(QMainWindow):
                 break
         self.llm_provider_combo.currentIndexChanged.connect(self._on_llm_provider_changed)
         llm_form.addRow("Provider:", self.llm_provider_combo)
+
+        self.deepseek_key = QLineEdit(self.config.get("deepseek_key", ""))
+        self.deepseek_key.setEchoMode(QLineEdit.Password)
+        self.deepseek_key.setPlaceholderText("sk-… (platform.deepseek.com/api_keys)")
+        llm_form.addRow("DeepSeek API Key:", self.deepseek_key)
+        self.remember_deepseek = QCheckBox("Remember on this device (encrypted)")
+        self.remember_deepseek.setChecked(bool(self.config.get("remember_deepseek_key", True)))
+        llm_form.addRow("", self.remember_deepseek)
 
         self.llm_model_combo = QComboBox()
         self.llm_model_combo.setEditable(True)
@@ -2408,6 +2416,7 @@ class DatasetManager(QMainWindow):
                 ("hf_token", self.remember_hf.isChecked()),
                 ("openrouter_key", self.remember_openrouter.isChecked()),
                 ("groq_key", self.remember_groq.isChecked()),
+                ("deepseek_key", self.remember_deepseek.isChecked()),
             ]
             if checked
         }
@@ -2473,6 +2482,8 @@ class DatasetManager(QMainWindow):
         self.config["remember_openrouter_key"] = self.remember_openrouter.isChecked()
         self.config["groq_key"] = self.groq_key.text().strip()
         self.config["remember_groq_key"] = self.remember_groq.isChecked()
+        self.config["deepseek_key"] = self.deepseek_key.text().strip()
+        self.config["remember_deepseek_key"] = self.remember_deepseek.isChecked()
         remember = self._remembered_secret_keys()
         try:
             save_config(self.config, remember=remember)

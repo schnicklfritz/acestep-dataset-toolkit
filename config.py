@@ -7,7 +7,7 @@ SETTINGS_PATH = BASE_DIR / "settings.json"
 # Keys whose values are API credentials — stored in the encrypted store
 # (OS keyring / secrets.enc), never in settings.json.
 SECRET_KEYS = {"kaggle_key", "custom_key", "mvsep_api_key", "gemini_api_key", "hf_token",
-               "openrouter_key", "groq_key"}
+               "openrouter_key", "groq_key", "deepseek_key"}
 
 DEFAULT_CONFIG = {
     "kaggle_user": "",
@@ -74,6 +74,8 @@ DEFAULT_CONFIG = {
     "llm_provider": "deepseek",
     "llm_model": "",                  # empty = provider default
     "llm_base_url": "",               # empty = provider default
+    "deepseek_key": "",               # (secret) official DeepSeek API key
+    "remember_deepseek_key": True,
     "openrouter_key": "",             # (secret)
     "groq_key": "",                   # (secret)
     "remember_openrouter_key": True,

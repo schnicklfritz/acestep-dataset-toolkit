@@ -18,7 +18,7 @@ PROVIDERS = {
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
-        "key": "custom_key",
+        "key": "deepseek_key",
         "free": False,
         "label": "DeepSeek",
         "note": "Cheap paid API; needs a DeepSeek API key.",
@@ -71,6 +71,15 @@ def provider_info(config, provider=None):
     return name, info
 
 
+def _key_value(config, info):
+    """Resolve the provider's API key, with a backward-compat fallback for
+    DeepSeek (the old ``custom_key`` field was used before ``deepseek_key``)."""
+    val = (config.get(info.get("key")) or "").strip()
+    if not val and info.get("key") == "deepseek_key":
+        val = (config.get("custom_key") or "").strip()
+    return val
+
+
 def get_client(config, provider=None):
     """Return ``(provider_name, info, OpenAI-compatible client)``.
 
@@ -83,7 +92,7 @@ def get_client(config, provider=None):
             "No LLM endpoint configured — for the 'local' provider set the "
             "Custom Endpoint URL in ⚙ Settings."
         )
-    key = (config.get(info["key"]) or "").strip()
+    key = _key_value(config, info)
     if name != "local" and not key:
         raise ValueError(
             f"{info['label']} needs an API key — set it in ⚙ Settings. "
@@ -99,4 +108,4 @@ def provider_key_present(config, provider=None):
     name, info = provider_info(config, provider)
     if name == "local":
         return bool(info["base_url"])
-    return bool((config.get(info["key"]) or "").strip())
+    return bool(_key_value(config, info))
