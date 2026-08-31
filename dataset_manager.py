@@ -57,6 +57,16 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QFont, QColor, QDesktopServices, QPainter, QPen, QPalette
 
+# Provider -> (key config field, remember flag) — the unified "Provider API Key"
+# field routes to whichever provider/model is selected.
+LLM_KEY_FIELDS = {
+    "deepseek": ("deepseek_key", "remember_deepseek_key"),
+    "gemini": ("gemini_api_key", "remember_gemini_key"),
+    "openrouter": ("openrouter_key", "remember_openrouter_key"),
+    "groq": ("groq_key", "remember_groq_key"),
+    "local": ("custom_key", "remember_custom_key"),
+}
+
 # ============================================================================
 # Waveform preview widget
 # ============================================================================
@@ -213,12 +223,12 @@ class ScatterPlotWidget(QWidget):
 # NEW: DeepSeek Orchestrator
 # ============================================================================
 class DeepSeekMusicOrchestrator:
-    def __init__(self, api_key=None, base_url=None, config=None):
+    def __init__(self, api_key=None, base_url=None, config=None, role="aggregator"):
         """Provider-aware orchestrator (mirrors workers/deepseek.py)."""
         if config is not None:
             from modules.llm_client import get_client
 
-            self.provider, self.info, self.client = get_client(config)
+            self.provider, self.info, self.client = get_client(config, role=role)
             self.api_key = (config.get(self.info["key"]) or "").strip()
             self.model = self.info.get("model") or "deepseek-chat"
         else:
@@ -1228,12 +1238,14 @@ class DatasetManager(QMainWindow):
         form.setContentsMargins(8, 18, 8, 8)
 
         self.font_picker = QFontComboBox()
+        self.font_picker.setToolTip("App font.")
         self.font_picker.setCurrentFont(QFont(self.custom_theme["font_family"]))
         self.font_picker.currentFontChanged.connect(self.on_font_changed)
         form.addRow("Installed System Font:", self.font_picker)
 
         zoom_row = QHBoxLayout()
         self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setToolTip("UI zoom level.")
         self.zoom_slider.setRange(75, 175)
         self.zoom_slider.setValue(100)
         self.zoom_label = QLabel("100%")
@@ -1243,6 +1255,7 @@ class DatasetManager(QMainWindow):
         form.addRow("UI Zoom Factor:", zoom_row)
 
         self.theme_preset_combo = QComboBox()
+        self.theme_preset_combo.setToolTip("Color theme preset.")
         self.theme_preset_combo.addItems(["Dark Modern (Default)", "OLED Pure Black", "Gentoo Purple Slate", "Solarized Dark", "High Contrast Light"])
         self.theme_preset_combo.currentTextChanged.connect(self.on_theme_preset_changed)
         form.addRow("Theme Preset:", self.theme_preset_combo)
@@ -1254,7 +1267,9 @@ class DatasetManager(QMainWindow):
         c_form.setContentsMargins(8, 18, 8, 8)
 
         self.k_user = QLineEdit(self.config.get("kaggle_user", ""))
+        self.k_user.setToolTip("Your Kaggle username (from kaggle.json).")
         self.k_key = QLineEdit(self.config.get("kaggle_key", ""))
+        self.k_key.setToolTip("Your Kaggle API key (from kaggle.json).")
         self.k_key.setEchoMode(QLineEdit.Password)
         c_form.addRow("Kaggle Username:", self.k_user)
         c_form.addRow("Kaggle API Key:", self.k_key)
@@ -1264,6 +1279,7 @@ class DatasetManager(QMainWindow):
         c_form.addRow("", self.remember_kaggle)
 
         self.custom_url = QLineEdit(self.config.get("custom_url", ""))
+        self.custom_url.setToolTip("Base URL for a custom OpenAI-compatible endpoint.")
         self.custom_url.setPlaceholderText("https://api.runpod.ai/... or http://localhost:8000/v1")
         self.custom_key = QLineEdit(self.config.get("custom_key", ""))
         self.custom_key.setEchoMode(QLineEdit.Password)
@@ -1292,6 +1308,7 @@ class DatasetManager(QMainWindow):
 
         # ---- Caption backend (pluggable providers) ----
         self.caption_backend_combo = QComboBox()
+        self.caption_backend_combo.setToolTip("Which model captions the audio.")
         self.caption_backend_combo.addItems([
             "ace_step — ACE-Step captioner (Kaggle GPU, default)",
             "gemini — Google Gemini (audio-native)",
@@ -1314,6 +1331,7 @@ class DatasetManager(QMainWindow):
         c_form.addRow("", self.remember_gemini)
 
         self.gemini_model_combo = QComboBox()
+        self.gemini_model_combo.setToolTip("Gemini model used for audio captioning.")
         self.gemini_model_combo.setEditable(True)
         self.gemini_model_combo.addItems(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"])
         cur_model = (self.config.get("gemini_model") or "gemini-2.5-flash").strip()
@@ -1325,10 +1343,12 @@ class DatasetManager(QMainWindow):
         c_form.addRow("Gemini Model:", self.gemini_model_combo)
 
         self.custom_url_edit = QLineEdit(self.config.get("custom_caption_url", ""))
+        self.custom_url_edit.setToolTip("OpenAI-compatible base URL for the custom caption backend.")
         self.custom_url_edit.setPlaceholderText("e.g. http://localhost:8000/v1 (vLLM/Ollama/runpod)")
         c_form.addRow("Custom Endpoint Base URL:", self.custom_url_edit)
 
         self.custom_model_edit = QLineEdit(self.config.get("custom_caption_model", ""))
+        self.custom_model_edit.setToolTip("Model name served by the custom endpoint.")
         self.custom_model_edit.setPlaceholderText("model name served by the endpoint")
         c_form.addRow("Custom Endpoint Model:", self.custom_model_edit)
 
@@ -1362,13 +1382,15 @@ class DatasetManager(QMainWindow):
         self.llm_provider_combo.currentIndexChanged.connect(self._on_llm_provider_changed)
         llm_form.addRow("Provider:", self.llm_provider_combo)
 
-        self.deepseek_key = QLineEdit(self.config.get("deepseek_key", ""))
-        self.deepseek_key.setEchoMode(QLineEdit.Password)
-        self.deepseek_key.setPlaceholderText("sk-… (platform.deepseek.com/api_keys)")
-        llm_form.addRow("DeepSeek API Key:", self.deepseek_key)
-        self.remember_deepseek = QCheckBox("Remember on this device (encrypted)")
-        self.remember_deepseek.setChecked(bool(self.config.get("remember_deepseek_key", True)))
-        llm_form.addRow("", self.remember_deepseek)
+        self.llm_api_key = QLineEdit(self.config.get("deepseek_key", ""))
+        self.llm_api_key.setEchoMode(QLineEdit.Password)
+        self.llm_api_key.setPlaceholderText("auto-routes to the selected provider/model")
+        self.llm_api_key.setToolTip("One key field that routes to whichever provider is selected (DeepSeek / Gemini / Groq / OpenRouter). The app knows which API from the model chosen.")
+        llm_form.addRow("Provider API Key:", self.llm_api_key)
+        self.remember_llm_api = QCheckBox("Remember this key (encrypted)")
+        self.remember_llm_api.setToolTip("Save the active provider's key in the encrypted store. Uncheck for session-only.")
+        self.remember_llm_api.setChecked(bool(self.config.get("remember_deepseek_key", True)))
+        llm_form.addRow("", self.remember_llm_api)
 
         self.llm_model_combo = QComboBox()
         self.llm_model_combo.setEditable(True)
@@ -1392,6 +1414,33 @@ class DatasetManager(QMainWindow):
         self.remember_groq.setChecked(bool(self.config.get("remember_groq_key", True)))
         llm_form.addRow("", self.remember_groq)
 
+        # ---- Per-role overrides (aggregator / captioner / assistant) ----
+        roles_box = QGroupBox("Per-role overrides (empty = use the global provider/model)")
+        rform = QFormLayout(roles_box)
+        rform.setContentsMargins(8, 14, 8, 8)
+        self.role_provider_combo = {}
+        self.role_model_combo = {}
+        _role_providers = ["default (global)", "deepseek", "gemini", "groq", "openrouter", "local"]
+        for role in ("aggregator", "captioner", "assistant"):
+            row = QHBoxLayout()
+            prov = QComboBox()
+            prov.addItems(_role_providers)
+            cur = (self.config.get(f"llm_provider_{role}") or "").strip()
+            prov.setCurrentText(cur if cur in _role_providers[1:] else "default (global)")
+            prov.setToolTip(f"Provider used by the {role} (the master-caption aggregator, the LLM captioner, or the AI assistant).")
+            mod = QComboBox()
+            mod.setEditable(True)
+            mod.addItems(["", "deepseek-chat", "gemini-2.5-flash", "gemini-3.7-flash",
+                          "llama-3.3-70b-versatile", "meta-llama/llama-3.3-70b-instruct:free"])
+            mod.setCurrentText(self.config.get(f"llm_model_{role}", ""))
+            mod.setToolTip(f"Model used by the {role}; empty = the provider default.")
+            self.role_provider_combo[role] = prov
+            self.role_model_combo[role] = mod
+            row.addWidget(prov, 1)
+            row.addWidget(mod, 2)
+            rform.addRow(f"{role.capitalize()}:", row)
+        llm_form.addRow(roles_box)
+
         self.llm_note = QLabel("")
         self.llm_note.setWordWrap(True)
         self.llm_note.setStyleSheet("color: #aaa; font-size: 9px;")
@@ -1405,12 +1454,14 @@ class DatasetManager(QMainWindow):
         p_form.setContentsMargins(8, 18, 8, 8)
 
         self.prompt_edit = QTextEdit()
+        self.prompt_edit.setToolTip("The instruction given to the caption model for every chunk. Edit to steer descriptions.")
         self.prompt_edit.setPlainText(self.config.get("caption_prompt", ""))
         self.prompt_edit.setMaximumHeight(120)
         self.prompt_edit.setPlaceholderText("Prompt used by the caption backends (ACE-Step / Gemini / custom).")
         p_form.addRow("Caption Prompt:", self.prompt_edit)
 
         self.max_tokens_spin = QSpinBox()
+        self.max_tokens_spin.setToolTip("Maximum tokens the captioner may generate per chunk.")
         self.max_tokens_spin.setRange(32, 2048)
         self.max_tokens_spin.setValue(int(self.config.get("caption_max_tokens", 512)))
         p_form.addRow("Caption Max Tokens:", self.max_tokens_spin)
@@ -1458,6 +1509,7 @@ class DatasetManager(QMainWindow):
         p_form.addRow("Lead/Backing Vocal Split:", self.lead_vocal_combo)
 
         self.min_sec_spin = QDoubleSpinBox()
+        self.min_sec_spin.setToolTip("Minimum section length in seconds (shorter sections are merged).")
         self.min_sec_spin.setRange(1.0, 120.0)
         self.min_sec_spin.setSingleStep(0.5)
         self.min_sec_spin.setDecimals(1)
@@ -1465,6 +1517,7 @@ class DatasetManager(QMainWindow):
         p_form.addRow("Min Section Length (s):", self.min_sec_spin)
 
         self.max_k_spin = QSpinBox()
+        self.max_k_spin.setToolTip("Maximum number of structural sections.")
         self.max_k_spin.setRange(2, 40)
         self.max_k_spin.setValue(int(self.config.get("segment_max_k", 20)))
         p_form.addRow("Max Sections:", self.max_k_spin)
@@ -1483,6 +1536,7 @@ class DatasetManager(QMainWindow):
         p_form.addRow("Structure Backend:", self.structure_backend_combo)
 
         self.stem_model_combo = QComboBox()
+        self.stem_model_combo.setToolTip("Demucs model for Kaggle stem separation (htdemucs_6s adds guitar + piano).")
         self.stem_model_combo.addItems(["htdemucs", "htdemucs_ft", "htdemucs_6s", "mdx_extra"])
         cur_stem = self.config.get("kaggle_stem_model", "htdemucs_ft")
         for i in range(self.stem_model_combo.count()):
@@ -1493,6 +1547,7 @@ class DatasetManager(QMainWindow):
 
         stem_out_row = QHBoxLayout()
         self.stem_out_edit = QLineEdit(self.config.get("stem_output_dir", ""))
+        self.stem_out_edit.setToolTip("Folder where separated stems are written (empty = default ~/mvsep_stems).")
         self.stem_out_edit.setPlaceholderText("Default: ~/mvsep_stems")
         browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self._browse_stem_dir)
@@ -1501,12 +1556,14 @@ class DatasetManager(QMainWindow):
         p_form.addRow("Stem Output Folder:", stem_out_row)
 
         self.lufs_spin = QDoubleSpinBox()
+        self.lufs_spin.setToolTip("Target loudness for DSP normalization (EBU R128).")
         self.lufs_spin.setRange(-30.0, 0.0)
         self.lufs_spin.setDecimals(1)
         self.lufs_spin.setValue(float(self.config.get("dsp_target_lufs", -14.0)))
         p_form.addRow("Normalize Target (LUFS):", self.lufs_spin)
 
         self.sr_spin = QSpinBox()
+        self.sr_spin.setToolTip("Target sample rate for DSP normalization.")
         self.sr_spin.setRange(8000, 192000)
         self.sr_spin.setSingleStep(1000)
         self.sr_spin.setValue(int(self.config.get("dsp_target_sr", 44100)))
@@ -1523,12 +1580,14 @@ class DatasetManager(QMainWindow):
         mm_form.setContentsMargins(8, 18, 8, 8)
 
         self.model_source_combo = QComboBox()
+        self.model_source_combo.setToolTip("Where to download catalog models from.")
         self.model_source_combo.addItems(["hf (Hugging Face)", "github (my repo)"])
         cur_src = str(self.config.get("model_download_source", "hf") or "hf").lower()
         self.model_source_combo.setCurrentIndex(1 if cur_src.startswith("git") else 0)
         mm_form.addRow("Download Source:", self.model_source_combo)
 
         self.model_pick_combo = QComboBox()
+        self.model_pick_combo.setToolTip("The model to download / remove.")
         self.model_pick_combo.setMinimumWidth(340)
         self._populate_model_picker()
         mm_form.addRow("Model:", self.model_pick_combo)
@@ -1561,6 +1620,7 @@ class DatasetManager(QMainWindow):
         mm_form.addRow("Leaderboards:", lb_row)
 
         self.hf_token_edit = QLineEdit(self.config.get("hf_token", ""))
+        self.hf_token_edit.setToolTip("Hugging Face token for gated model downloads.")
         self.hf_token_edit.setEchoMode(QLineEdit.Password)
         mm_form.addRow("Hugging Face Token:", self.hf_token_edit)
         self.remember_hf = QCheckBox("Remember on this device (encrypted)")
@@ -1568,6 +1628,7 @@ class DatasetManager(QMainWindow):
         mm_form.addRow("", self.remember_hf)
 
         self.model_dir_edit = QLineEdit(self.config.get("model_dir", "models"))
+        self.model_dir_edit.setToolTip("Folder for downloaded models.")
         self.model_dir_edit.setToolTip("Folder where downloaded models are stored (gitignored).")
         mm_form.addRow("Models Folder:", self.model_dir_edit)
 
@@ -3169,7 +3230,7 @@ class DatasetManager(QMainWindow):
 
     def _remembered_secret_keys(self):
         """Secret keys the user asked to persist (checked 'Remember' boxes)."""
-        return {
+        remember = {
             key
             for key, checked in [
                 ("kaggle_key", self.remember_kaggle.isChecked()),
@@ -3179,10 +3240,15 @@ class DatasetManager(QMainWindow):
                 ("hf_token", self.remember_hf.isChecked()),
                 ("openrouter_key", self.remember_openrouter.isChecked()),
                 ("groq_key", self.remember_groq.isChecked()),
-                ("deepseek_key", self.remember_deepseek.isChecked()),
             ]
             if checked
         }
+        # The unified Provider API Key routes to whichever provider is active.
+        active = self.llm_provider_combo.currentText().split(" ")[0]
+        key_field, _ = LLM_KEY_FIELDS.get(active, ("deepseek_key", "remember_deepseek_key"))
+        if self.remember_llm_api.isChecked():
+            remember.add(key_field)
+        return remember
 
     def _caption_backend_value(self):
         text = self.caption_backend_combo.currentText()
@@ -3207,6 +3273,11 @@ class DatasetManager(QMainWindow):
         self.llm_base_url_edit.setText(
             (self.config.get("llm_base_url") or "").strip() or info["base_url"]
         )
+        # Sync the unified Provider API Key field to the active provider.
+        key_field, rem_field = LLM_KEY_FIELDS.get(name, ("deepseek_key", "remember_deepseek_key"))
+        self.llm_api_key.setText(self.config.get(key_field, ""))
+        self.llm_api_key.setPlaceholderText(f"API key for {name}")
+        self.remember_llm_api.setChecked(bool(self.config.get(rem_field, True)))
         if info.get("free") is True:
             self.llm_note.setText("💡 Free provider. " + info.get("note", ""))
         elif info.get("free") is False:
@@ -3245,8 +3316,16 @@ class DatasetManager(QMainWindow):
         self.config["remember_openrouter_key"] = self.remember_openrouter.isChecked()
         self.config["groq_key"] = self.groq_key.text().strip()
         self.config["remember_groq_key"] = self.remember_groq.isChecked()
-        self.config["deepseek_key"] = self.deepseek_key.text().strip()
-        self.config["remember_deepseek_key"] = self.remember_deepseek.isChecked()
+        # Unified Provider API Key -> the active provider's stored key.
+        active = self.llm_provider_combo.currentText().split(" ")[0]
+        key_field, rem_field = LLM_KEY_FIELDS.get(active, ("deepseek_key", "remember_deepseek_key"))
+        self.config[key_field] = self.llm_api_key.text().strip()
+        self.config[rem_field] = self.remember_llm_api.isChecked()
+        # Per-role LLM overrides (aggregator / captioner / assistant).
+        for role in ("aggregator", "captioner", "assistant"):
+            prov = self.role_provider_combo[role].currentText()
+            self.config[f"llm_provider_{role}"] = "" if prov == "default (global)" else prov
+            self.config[f"llm_model_{role}"] = self.role_model_combo[role].currentText().strip()
         if hasattr(self, "assistant_remember_check"):
             self.config["assistant_remember"] = self.assistant_remember_check.isChecked()
             self.config["assistant_linear_thinking"] = self.assistant_linear_check.isChecked()

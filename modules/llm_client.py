@@ -58,16 +58,23 @@ PROVIDERS = {
 }
 
 
-def provider_info(config, provider=None):
-    """Return ``(provider_name, info)`` with per-provider defaults + overrides."""
+def provider_info(config, provider=None, role=None):
+    """Return ``(provider_name, info)`` with per-provider defaults + overrides.
+
+    ``role`` (``aggregator``/``captioner``/``assistant``) resolves a per-role
+    provider and model override when ``provider`` isn't given explicitly.
+    """
+    if provider is None and role:
+        provider = (config.get(f"llm_provider_{role}") or "").strip() or None
     name = (provider or config.get("llm_provider") or "deepseek").strip().lower()
     info = dict(PROVIDERS.get(name, PROVIDERS["deepseek"]))
+    model_key = f"llm_model_{role}" if role else "llm_model"
     if name == "local":
         info["base_url"] = (config.get("custom_url") or "").strip()
-        info["model"] = (config.get("llm_model") or "").strip()
+        info["model"] = (config.get(model_key) or "").strip()
     else:
         info["base_url"] = (config.get("llm_base_url") or "").strip() or info["base_url"]
-        info["model"] = (config.get("llm_model") or "").strip() or info["model"]
+        info["model"] = (config.get(model_key) or "").strip() or info["model"]
     return name, info
 
 
@@ -80,13 +87,13 @@ def _key_value(config, info):
     return val
 
 
-def get_client(config, provider=None):
+def get_client(config, provider=None, role=None):
     """Return ``(provider_name, info, OpenAI-compatible client)``.
 
     Raises ``ValueError`` with a clear, actionable message when the provider
     needs configuration the user hasn't provided.
     """
-    name, info = provider_info(config, provider)
+    name, info = provider_info(config, provider, role=role)
     if not info["base_url"]:
         raise ValueError(
             "No LLM endpoint configured — for the 'local' provider set the "
@@ -103,9 +110,15 @@ def get_client(config, provider=None):
     return name, info, OpenAI(api_key=key or "sk-no-key", base_url=info["base_url"])
 
 
-def provider_key_present(config, provider=None):
+def provider_key_present(config, provider=None, role=None):
     """True when the provider's required key is present in config."""
-    name, info = provider_info(config, provider)
+    name, info = provider_info(config, provider, role=role)
     if name == "local":
         return bool(info["base_url"])
     return bool(_key_value(config, info))
+
+
+def effective_provider(config, role=None):
+    """Resolve the provider name in effect (global or per-role) for the UI."""
+    name, _info = provider_info(config, role=role)
+    return name

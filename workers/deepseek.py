@@ -2,17 +2,18 @@ import os
 from openai import OpenAI
 
 class DeepSeekMusicOrchestrator:
-    def __init__(self, api_key=None, base_url=None, config=None):
+    def __init__(self, api_key=None, base_url=None, config=None, role="aggregator"):
         """Provider-aware orchestrator.
 
         Pass ``config`` to use the configured LLM provider (DeepSeek / Gemini /
-        Groq / OpenRouter / local); otherwise falls back to a direct DeepSeek
-        client with ``api_key``.
+        Groq / OpenRouter / local), honouring the per-role override for the
+        given ``role`` (aggregator / captioner / assistant). Otherwise falls
+        back to a direct DeepSeek client with ``api_key``.
         """
         if config is not None:
             from modules.llm_client import get_client
 
-            self.provider, self.info, self.client = get_client(config)
+            self.provider, self.info, self.client = get_client(config, role=role)
             self.api_key = (config.get(self.info["key"]) or "").strip()
             self.model = self.info.get("model") or "deepseek-chat"
         else:

@@ -301,7 +301,7 @@ class RemoteCaptionWorker(QThread):
     def _run_deepseek_orchestration(self, staged_tracks):
         from modules.llm_client import get_client
         try:
-            _name, _info, client = get_client(self.config)
+            _name, _info, client = get_client(self.config, role="captioner")
         except ValueError as e:
             self.error_occurred.emit(str(e))
             return

@@ -218,7 +218,7 @@ class AssistantWorker(QThread):
             if self.config is not None:
                 from modules.llm_client import get_client
 
-                _name, info, client = get_client(self.config)
+                _name, info, client = get_client(self.config, role="assistant")
                 model = info.get("model") or "deepseek-chat"
             else:
                 from openai import OpenAI

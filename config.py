@@ -74,6 +74,14 @@ DEFAULT_CONFIG = {
     "llm_provider": "deepseek",
     "llm_model": "",                  # empty = provider default
     "llm_base_url": "",               # empty = provider default
+    # Per-role overrides (empty = use the global provider/model above):
+    # the aggregator, captioner, and assistant can each use a different model.
+    "llm_provider_aggregator": "",
+    "llm_model_aggregator": "",
+    "llm_provider_captioner": "",
+    "llm_model_captioner": "",
+    "llm_provider_assistant": "",
+    "llm_model_assistant": "",
     "deepseek_key": "",               # (secret) official DeepSeek API key
     "remember_deepseek_key": True,
     "openrouter_key": "",             # (secret)
