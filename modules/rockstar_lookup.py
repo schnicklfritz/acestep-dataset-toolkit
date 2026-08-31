@@ -127,7 +127,7 @@ def lookup_rockstar_track(artist, song, timeout=25):
     try:
         page = fetch_page(
             "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query),
-            use_brightdata=False,
+            timeout=timeout, use_brightdata=False,
         )
     except Exception as e:  # noqa: BLE001
         return {
@@ -165,3 +165,24 @@ def lookup_rockstar_track(artist, song, timeout=25):
         "artist": artist, "song": song, "exists": exists,
         "matches": matches[:8], "scanned": scanned, "note": note,
     }
+
+
+def format_lookup(result):
+    """Render a lookup result as compact text (for the assistant / tools)."""
+    song = result.get("song", "?")
+    artist = result.get("artist", "")
+    exists = result.get("exists")
+    if exists is None:
+        verdict = "UNKNOWN (search failed / offline)"
+    elif exists:
+        verdict = "EXISTS (community multitrack index)"
+    else:
+        verdict = "NOT FOUND in public indices"
+    lines = [f"{artist} - {song}: {verdict}"]
+    note = result.get("note") or ""
+    if note:
+        lines.append(note)
+    for m in (result.get("matches") or [])[:6]:
+        lines.append(f"- {m.get('title', '')} ({m.get('domain', '?')})")
+    lines.append("(Existence only — no files or links provided.)")
+    return "\n".join(lines)

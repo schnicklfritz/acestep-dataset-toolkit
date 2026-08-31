@@ -1468,9 +1468,27 @@ class DatasetManager(QMainWindow):
                     "Suggest specific songs/artists/genres to add, and which gaps to fill "
                     "(instruments, tempo, key, era) so the dataset converges on the target sound."
                 )
+            if name == "rockstar_lookup":
+                return self._rockstar_lookup_tool(args)
             return f"Unknown tool: {name}"
         except Exception as e:  # noqa: BLE001
             return f"Tool error: {e}"
+
+    def _rockstar_lookup_tool(self, args):
+        from modules.rockstar_lookup import lookup_rockstar_track, format_lookup
+
+        song = (args.get("song") or "").strip()
+        artist = (args.get("artist") or "").strip()
+        if not song:
+            return "Provide a 'song' (and optionally 'artist')."
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result = lookup_rockstar_track(artist, song, timeout=15)
+            return format_lookup(result)
+        except Exception as e:  # noqa: BLE001
+            return f"rockstar_lookup error: {e}"
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def on_assistant_error(self, err):
         self._set_assistant_busy(False)
