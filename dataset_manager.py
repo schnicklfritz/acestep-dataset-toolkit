@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import html
 import uuid
 import tempfile
 import subprocess
@@ -32,6 +33,10 @@ from workers.structural import (
     StructuralPipelineWorker,
     StructuralPipelineBatchWorker,
 )
+from workers.assistant import (
+    AssistantWorker, APP_HELP_TEXT, ASSISTANT_TOOLS, build_system_prompt,
+    build_sound_profile, summarize_dataset,
+)
 
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QUrl
 from PySide6.QtWidgets import (
@@ -43,7 +48,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
     QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
     QTabWidget, QFontComboBox, QSlider, QRadioButton, QButtonGroup,
-    QFrame, QListWidget
+    QFrame, QListWidget, QTextBrowser
 )
 from PySide6.QtGui import QFont, QColor, QDesktopServices
 
@@ -662,11 +667,15 @@ class DatasetManager(QMainWindow):
         struct_tab = QWidget()
         self.init_structural_tab(struct_tab)
 
+        assistant_tab = QWidget()
+        self.init_assistant_tab(assistant_tab)
+
         self.tabs.addTab(struct_tab, "🎶 Structural Pipeline")
         self.tabs.addTab(studio_tab, "🎛 Dataset Studio")
         self.tabs.addTab(settings_tab, "🎨 Appearance & Customization")
         self.tabs.addTab(advanced_tab, "🧠 Advanced Tools")
         self.tabs.addTab(spatial_tab, "🌐 Spatial Pipeline")
+        self.tabs.addTab(assistant_tab, "🤖 AI Assistant")
 
         # Set the Dataset Studio tab as the default visible tab
         studio_index = self.tabs.indexOf(studio_tab)
@@ -1269,6 +1278,160 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Advanced Tools Tab
     # -----------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # AI Assistant Tab
+    # -----------------------------------------------------------------------
+    def init_assistant_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        self.assistant_history = QTextBrowser()
+        self.assistant_history.setHtml(
+            "<b>🤖 AI Assistant</b><br>Ask about the app or your dataset. The "
+            "assistant can run tools against it: dataset summary, sound profile, "
+            "<b>curate for a target sound</b>, caption audit, manifest validation, "
+            "health scan, instrument detection.<hr>"
+        )
+        layout.addWidget(self.assistant_history, 1)
+
+        input_row = QHBoxLayout()
+        self.assistant_input = QLineEdit()
+        self.assistant_input.setPlaceholderText(
+            "Ask something… e.g. 'curate my dataset toward a Black Sabbath / doom sound'"
+        )
+        self.assistant_input.returnPressed.connect(self.send_assistant_message)
+        self.assistant_send_btn = QPushButton("Send")
+        self.assistant_send_btn.clicked.connect(self.send_assistant_message)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self.clear_assistant)
+        input_row.addWidget(self.assistant_input, 1)
+        input_row.addWidget(self.assistant_send_btn)
+        input_row.addWidget(clear_btn)
+        layout.addLayout(input_row)
+
+        self.assistant_status = QLabel("Ready.")
+        self.assistant_status.setStyleSheet("color: #aaa;")
+        layout.addWidget(self.assistant_status)
+
+        self._assistant_messages = []
+
+    def send_assistant_message(self):
+        text = self.assistant_input.text().strip()
+        if not text:
+            return
+        self.assistant_history.append(f"<b>You:</b> {html.escape(text)}<br>")
+        self.assistant_input.clear()
+        self._assistant_messages.append({"role": "user", "content": text})
+        self._start_assistant()
+
+    def clear_assistant(self):
+        self._assistant_messages = []
+        self.assistant_history.setHtml("<b>🤖 AI Assistant</b> — conversation cleared.<hr>")
+        self.assistant_status.setText("Ready.")
+
+    def _set_assistant_busy(self, busy):
+        self.assistant_send_btn.setEnabled(not busy)
+        self.assistant_input.setEnabled(not busy)
+        self.assistant_status.setText("Thinking…" if busy else "Ready.")
+
+    def _start_assistant(self):
+        from modules.llm_client import get_client
+
+        try:
+            get_client(self.config)
+        except ValueError as e:
+            QMessageBox.information(
+                self, "LLM Key Needed",
+                f"{e}\n\nSet it in ⚙ Settings → LLM Provider (Gemini's free tier works).",
+            )
+            self._set_assistant_busy(False)
+            return
+        self._set_assistant_busy(True)
+        summary = summarize_dataset(self.dataset, self.health_reports)
+        messages = [
+            {"role": "system", "content": build_system_prompt(APP_HELP_TEXT, summary)}
+        ] + list(self._assistant_messages)
+        self.assistant_worker = AssistantWorker(
+            "", messages, tools=ASSISTANT_TOOLS, parent=self, config=self.config,
+        )
+        self.assistant_worker.answer_ready.connect(self.on_assistant_answer)
+        self.assistant_worker.tool_requested.connect(self.on_assistant_tool)
+        self.assistant_worker.failed.connect(self.on_assistant_error)
+        self.assistant_worker.start()
+
+    def on_assistant_answer(self, answer):
+        self._set_assistant_busy(False)
+        self.assistant_history.append(f"<b>AI:</b><br>{html.escape(answer)}<hr>")
+        self._assistant_messages.append({"role": "assistant", "content": answer})
+
+    def on_assistant_tool(self, name, args_json, call_id):
+        try:
+            args = json.loads(args_json or "{}")
+        except Exception:  # noqa: BLE001
+            args = {}
+        result = self.execute_assistant_tool(name, args)
+        self.assistant_history.append(
+            f"<i>⚙ tool: {html.escape(name)} → {html.escape(result[:200])}</i>"
+        )
+        self._assistant_messages.append({
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": call_id, "type": "function",
+                            "function": {"name": name, "arguments": args_json or "{}"}}],
+        })
+        self._assistant_messages.append({
+            "role": "tool", "tool_call_id": call_id, "content": result,
+        })
+        self._start_assistant()
+
+    def execute_assistant_tool(self, name, args):
+        try:
+            if name == "get_dataset_summary":
+                return summarize_dataset(self.dataset, self.health_reports) or "(dataset empty)"
+            if name == "list_tracks":
+                lines = []
+                for i, s in enumerate(self.dataset.get("samples", []), start=1):
+                    cap = (s.get("caption") or "").strip().replace("\n", " ")[:80]
+                    lines.append(f"{i}. {s.get('filename', '?')} — {cap or '(no caption)'}")
+                return "\n".join(lines) or "(no tracks)"
+            if name == "lookup_instruments":
+                from modules.instruments_db import lookup_instruments
+                found = lookup_instruments(args.get("filename", ""))
+                return ", ".join(found) if found else "(no match)"
+            if name == "audit_captions":
+                from modules.caption_audit import audit_captions
+                return "\n".join(audit_captions(self.dataset))
+            if name == "validate_manifest":
+                from modules.manifest_validation import validate_manifest
+                issues = validate_manifest(self.dataset)
+                return "\n".join(issues) if issues else "Manifest is valid."
+            if name == "scan_health":
+                self.start_health_audit()
+                return "Started the health audit (Scan & Fill). Ask again after it finishes."
+            if name == "detect_instruments":
+                self.detect_instruments_for_separation()
+                return "Started instrument detection on the selected track."
+            if name == "get_dataset_sound_profile":
+                return build_sound_profile(self.dataset)
+            if name == "curate_dataset":
+                target = (args.get("target_sound") or "").strip()
+                if not target:
+                    return "Provide a target_sound (artist/genre/mood) to curate toward."
+                return (
+                    f"TARGET SOUND: {target}\n\n"
+                    f"CURRENT DATASET SOUND PROFILE:\n{build_sound_profile(self.dataset)}\n\n"
+                    "Suggest specific songs/artists/genres to add, and which gaps to fill "
+                    "(instruments, tempo, key, era) so the dataset converges on the target sound."
+                )
+            return f"Unknown tool: {name}"
+        except Exception as e:  # noqa: BLE001
+            return f"Tool error: {e}"
+
+    def on_assistant_error(self, err):
+        self._set_assistant_busy(False)
+        self.assistant_status.setText(f"Error: {err}")
+        QMessageBox.warning(self, "AI Assistant", str(err))
+
     def init_advanced_tab(self, parent):
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(20, 20, 20, 20)
