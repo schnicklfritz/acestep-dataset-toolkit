@@ -1,5 +1,5 @@
 """Main window: DatasetManager (QMainWindow)."""
-import sys, os, json, uuid, tempfile, subprocess, time, math, struct, wave, shutil, zipfile
+import sys, os, json, uuid, tempfile, subprocess, time, math, struct, wave, shutil, zipfile, html, re
 from pathlib import Path
 import librosa
 import numpy as np
@@ -13,23 +13,29 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
     QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
     QTabWidget, QFontComboBox, QSlider, QRadioButton, QButtonGroup,
-    QFrame, QListWidget
+    QFrame, QListWidget, QTextBrowser
 )
 from PySide6.QtGui import QFont, QColor, QDesktopServices
 from stem_separator import StemSeparator
-from config import DEFAULT_CONFIG
+from config import DEFAULT_CONFIG, SETTINGS_PATH
 from workers.deepseek import DeepSeekMusicOrchestrator
 from workers.advanced import AdvancedDatasetOrchestratorWorker
 from workers.spatial import SpatialPipelineWorker
 from workers.health import HealthAuditorWorker
 from workers.dsp import DspNormalizerWorker
-from workers.caption import RemoteCaptionWorker
+from workers.caption import RemoteCaptionWorker, INSTRUMENT_ONLY_PROMPT
+from workers.instrument_detect import InstrumentRecommendThread
 from workers.structural import StructuralPipelineWorker, StructuralPipelineBatchWorker
+from ui.mvsep_tab import MVSepTab
+from workers.assistant import (
+    AssistantWorker, APP_HELP_TEXT, ASSISTANT_TOOLS, build_system_prompt,
+    summarize_dataset,
+)
 
 class DatasetManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ACE-Step Dataset Toolkit (Gentoo Edition)")
+        self.setWindowTitle("ACE-Step Dataset Toolkit")
         self.setMinimumSize(980, 640)
         self.resize(1240, 820)
     
@@ -56,6 +62,7 @@ class DatasetManager(QMainWindow):
             "samples": []
         }
         self.config = dict(DEFAULT_CONFIG)
+        self._load_settings()
         self.health_reports = {}
         self.original_backups = {}
         self.active_worker = None
@@ -63,9 +70,19 @@ class DatasetManager(QMainWindow):
         self.bypass_warnings = False
         self.startup_scan_notice_shown = False
         self.kaggle_notebook_unlocked = False  # NEW
+        self.recommended_instrument_models = []  # DeepSeek picks for instrument extraction
+        self._section_captions = []              # per-section instrument captions
 
         self.init_ui()
         self.apply_custom_theme()
+
+    def _load_settings(self):
+        """Load settings (plain) + secrets (encrypted store)."""
+        try:
+            from modules.config_store import load_config
+            self.config.update(load_config(DEFAULT_CONFIG))
+        except Exception as e:  # noqa: BLE001
+            print(f"Could not load settings: {e}")
 
     # -----------------------------------------------------------------------
     # Undo / Redo
@@ -133,6 +150,13 @@ class DatasetManager(QMainWindow):
         self.tabs.addTab(settings_tab, "🎨 Appearance & Customization")
         self.tabs.addTab(advanced_tab, "🧠 Advanced Tools")
         self.tabs.addTab(spatial_tab, "🌐 Spatial Pipeline")
+        self.mvsep = MVSepTab(self.config, SETTINGS_PATH, parent_window=self)
+        self.mvsep.stems_ready.connect(self.add_stem_files_to_dataset)
+        self.tabs.addTab(self.mvsep, "🔊 MVSEP / Kaggle Separator")
+
+        assistant_tab = QWidget()
+        self.init_assistant_tab(assistant_tab)
+        self.tabs.addTab(assistant_tab, "🤖 AI Assistant")
 
         # Set the Dataset Studio tab as the default visible tab
         studio_index = self.tabs.indexOf(studio_tab)
@@ -215,6 +239,19 @@ class DatasetManager(QMainWindow):
         gen_layout.addWidget(self.radio_all_inst)
         gen_layout.addWidget(self.radio_no_inst)
 
+        gen_layout.addSpacing(12)
+        gen_layout.addWidget(QLabel("Tags↔Captions:"))
+        self.ratio_slider = QSlider(Qt.Horizontal)
+        self.ratio_slider.setRange(0, 100)
+        self.ratio_slider.setValue(int(self.config.get("tag_caption_ratio", 0)))
+        self.ratio_slider.setFixedWidth(140)
+        self.ratio_slider.setToolTip("Percentage of tracks using tag-style prompts vs prose captions. 0% = all captions, 100% = all tags.")
+        self.ratio_slider.valueChanged.connect(self.on_ratio_changed)
+        gen_layout.addWidget(self.ratio_slider)
+        self.ratio_label = QLabel(f"{int(self.config.get('tag_caption_ratio', 0))}% tags")
+        self.ratio_label.setStyleSheet("color: #aaa; font-size: 10px;")
+        gen_layout.addWidget(self.ratio_label)
+
         studio_layout.addWidget(gen_box)
 
         # --- Action Strip ---
@@ -258,12 +295,12 @@ class DatasetManager(QMainWindow):
         # --- Table + Inspector ---
         splitter = QSplitter(Qt.Horizontal)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["Filename", "Health", "Tag", "Genre", "Duration", "Key", "BPM"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["Filename", "Health", "Tag", "Genre", "Duration", "Key", "BPM", "Caption"])
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)   
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 7):
+        for i in range(1, 8):
             self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
         splitter.addWidget(self.table)
@@ -345,6 +382,33 @@ class DatasetManager(QMainWindow):
         tag_row.addWidget(self.tag_lock)
         form.addRow("Track Trigger Tag:", tag_row)
 
+        lang_row = QHBoxLayout()
+        self.language_combo = QComboBox()
+        self.language_combo.setEditable(True)
+        self.language_combo.addItems(["en", "es", "fr", "de", "it", "pt", "ja", "ko", "zh"])
+        self.language_combo.currentTextChanged.connect(self.on_language_edited)
+        self.language_lock = QCheckBox("Lock")
+        lang_row.addWidget(self.language_combo, 1)
+        lang_row.addWidget(self.language_lock)
+        form.addRow("Language:", lang_row)
+
+        ts_row = QHBoxLayout()
+        self.timesig_combo = QComboBox()
+        self.timesig_combo.setEditable(True)
+        self.timesig_combo.addItems(["4/4", "3/4", "6/8", "5/4", "7/8", "12/8", "2/4", "9/8"])
+        self.timesig_combo.currentTextChanged.connect(self.on_timesig_edited)
+        self.timesig_lock = QCheckBox("Lock")
+        ts_row.addWidget(self.timesig_combo, 1)
+        ts_row.addWidget(self.timesig_lock)
+        form.addRow("Time Signature:", ts_row)
+
+        style_row = QHBoxLayout()
+        self.prompt_style_combo = QComboBox()
+        self.prompt_style_combo.addItems(["Use global ratio", "Caption only", "Tag only"])
+        self.prompt_style_combo.currentTextChanged.connect(self.on_prompt_style_edited)
+        style_row.addWidget(self.prompt_style_combo, 1)
+        form.addRow("Prompt Override:", style_row)
+
         self.inst_check = QCheckBox("Instrumental Track (No Vocals)")
         self.inst_check.stateChanged.connect(self.on_inst_edited)
         form.addRow(self.inst_check)
@@ -377,6 +441,146 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Settings Tab
     # -----------------------------------------------------------------------
+    def init_assistant_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(16, 12, 16, 12)
+
+        title = QLabel("🤖 AI Assistant (live help)")
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        layout.addWidget(title)
+
+        note = QLabel(
+            "Ask how to use the app, or about the instruments in your dataset — "
+            "powered by DeepSeek with the app's built-in help file."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #aaa;")
+        layout.addWidget(note)
+
+        self.assistant_history = QTextBrowser()
+        self.assistant_history.setOpenExternalLinks(True)
+        layout.addWidget(self.assistant_history, 1)
+
+        input_row = QHBoxLayout()
+        self.assistant_input = QLineEdit()
+        self.assistant_input.setPlaceholderText(
+            "e.g., How do I run the structural pipeline?  What instruments are in my dataset?"
+        )
+        self.assistant_input.returnPressed.connect(self.on_assistant_send)
+        input_row.addWidget(self.assistant_input, 1)
+        self.assistant_send_btn = QPushButton("Ask")
+        self.assistant_send_btn.clicked.connect(self.on_assistant_send)
+        input_row.addWidget(self.assistant_send_btn)
+        layout.addLayout(input_row)
+
+        self.assistant_status = QLabel("Ready.")
+        self.assistant_status.setStyleSheet("color: #aaa; font-size: 10px;")
+        layout.addWidget(self.assistant_status)
+
+    def on_assistant_send(self):
+        question = self.assistant_input.text().strip()
+        if not question:
+            return
+        api_key = self.config.get("custom_key", "").strip()
+        if not api_key:
+            api_key = self.prompt_for_secret(
+                "custom_key", "DeepSeek API Key",
+                "Enter your DeepSeek API key for the AI assistant:",
+            )
+            if not api_key:
+                return
+
+        summary = summarize_dataset(self.dataset, self.health_reports)
+        self.assistant_history.append(f"<b>You:</b> {html.escape(question)}")
+        self.assistant_input.clear()
+        self._set_assistant_busy(True)
+        self.assistant_status.setText("Asking DeepSeek…")
+
+        self._assistant_messages = [
+            {"role": "system", "content": build_system_prompt(APP_HELP_TEXT, summary)},
+            {"role": "user", "content": question},
+        ]
+        self._start_assistant()
+
+    def _start_assistant(self):
+        api_key = self.config.get("custom_key", "").strip()
+        if not api_key:
+            api_key = self.prompt_for_secret(
+                "custom_key", "DeepSeek API Key",
+                "Enter your DeepSeek API key for the AI assistant:",
+            )
+            if not api_key:
+                self._set_assistant_busy(False)
+                return
+        self.assistant_worker = AssistantWorker(
+            api_key, self._assistant_messages, tools=ASSISTANT_TOOLS, parent=self
+        )
+        self.assistant_worker.answer_ready.connect(self.on_assistant_answer)
+        self.assistant_worker.tool_requested.connect(self.on_assistant_tool)
+        self.assistant_worker.failed.connect(self.on_assistant_error)
+        self.assistant_worker.start()
+
+    def _set_assistant_busy(self, busy):
+        self.assistant_send_btn.setEnabled(not busy)
+        self.assistant_status.setText("Thinking…" if busy else "Ready.")
+
+    def on_assistant_tool(self, name, args_json, call_id):
+        try:
+            args = json.loads(args_json or "{}")
+        except Exception:  # noqa: BLE001
+            args = {}
+        result = self.execute_assistant_tool(name, args)
+        self.assistant_history.append(f"<i>⚙ tool: {html.escape(name)} → {html.escape(result[:200])}</i>")
+        self._assistant_messages.append({
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": call_id, "type": "function",
+                            "function": {"name": name, "arguments": args_json or "{}"}}],
+        })
+        self._assistant_messages.append({
+            "role": "tool", "tool_call_id": call_id, "content": result,
+        })
+        self._start_assistant()
+
+    def execute_assistant_tool(self, name, args):
+        try:
+            if name == "get_dataset_summary":
+                return summarize_dataset(self.dataset, self.health_reports) or "(dataset empty)"
+            if name == "list_tracks":
+                lines = []
+                for i, s in enumerate(self.dataset.get("samples", []), start=1):
+                    cap = (s.get("caption") or "").strip().replace("\n", " ")[:80]
+                    lines.append(f"{i}. {s.get('filename', '?')} — {cap or '(no caption)'}")
+                return "\n".join(lines) or "(no tracks)"
+            if name == "lookup_instruments":
+                from modules.instruments_db import lookup_instruments
+                found = lookup_instruments(args.get("filename", ""))
+                return ", ".join(found) if found else "(no match)"
+            if name == "audit_captions":
+                from modules.caption_audit import audit_captions
+                return "\n".join(audit_captions(self.dataset))
+            if name == "validate_manifest":
+                from modules.manifest_validation import validate_manifest
+                issues = validate_manifest(self.dataset)
+                return "\n".join(issues) if issues else "Manifest is valid."
+            if name == "scan_health":
+                self.start_health_audit()
+                return "Started the health audit (Scan & Fill). Ask again after it finishes."
+            if name == "detect_instruments":
+                self.detect_instruments_for_separation()
+                return "Started instrument detection on the selected track."
+            return f"Unknown tool: {name}"
+        except Exception as e:  # noqa: BLE001
+            return f"Tool error: {e}"
+
+    def on_assistant_answer(self, answer):
+        self._set_assistant_busy(False)
+        self.assistant_history.append(f"<b>AI:</b><br>{html.escape(answer)}<hr>")
+
+    def on_assistant_error(self, err):
+        self._set_assistant_busy(False)
+        self.assistant_status.setText(f"Error: {err}")
+        QMessageBox.warning(self, "AI Assistant", str(err))
+
     def init_settings_tab(self, parent):
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -549,15 +753,16 @@ class DatasetManager(QMainWindow):
 
         group = QGroupBox("🎶 Structural Pipeline (Standard)")
         inner = QVBoxLayout(group)
+        inner.setContentsMargins(8, 22, 8, 8)
 
         info = QLabel(
-            "This pipeline separates stems (import or MVSEP), finds structural boundaries,\n"
-            "captions each section per stem, and aggregates via DeepSeek to produce a\n"
-            "master caption for the whole track.\n"
-            "No spatial L/R processing – suitable for general LoRA training."
+            "This pipeline separates stems (import or MVSEP), finds structural "
+            "boundaries, captions each section per stem, and aggregates via DeepSeek "
+            "to produce a master caption for the whole track. No spatial L/R "
+            "processing – suitable for general LoRA training."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #aaa; padding: 10px;")
+        info.setStyleSheet("color: #aaa; padding: 4px;")
         inner.addWidget(info)
 
         # ---- Scope selection ----
@@ -613,16 +818,16 @@ class DatasetManager(QMainWindow):
         preset_layout = QHBoxLayout()
         preset_layout.addWidget(QLabel("Humanization Preset:"))
         self.humanize_preset_combo = QComboBox()
-        self.humanize_preset_combo.addItems([
-            "None",
-            "Hank Williams",
-            "Kurt Cobain",
-            "Jimi Hendrix",
-            "Janis Joplin",
-            "Bob Dylan",
-            "Pink Floyd (Gilmour)",
-            "Ozzy Osbourne"
-        ])
+        self.humanize_preset_combo.setEditable(True)
+        self.humanize_preset_combo.addItem("None")
+        self.humanize_preset_combo.setInsertPolicy(QComboBox.NoInsert)
+        for preset in self.config.get("humanize_presets", []):
+            if preset and self.humanize_preset_combo.findText(preset) < 0:
+                self.humanize_preset_combo.addItem(preset)
+        self.humanize_preset_combo.setToolTip(
+            "Free-form humanization preset — type any artist/style or pick a "
+            "previously used one. Nothing is hardcoded."
+        )
         preset_layout.addWidget(self.humanize_preset_combo)
         inner.addLayout(preset_layout)
 
@@ -633,15 +838,16 @@ class DatasetManager(QMainWindow):
         # ---- Instrument extraction group ----
         sep_group = QGroupBox("Instrument‑Specific Stem Extraction")
         sep_layout2 = QVBoxLayout(sep_group)
+        sep_layout2.setContentsMargins(8, 22, 8, 8)
 
         self.instrument_extraction_check = QCheckBox("Enable instrument‑specific extraction (recommended)")
         self.instrument_extraction_check.setChecked(True)
         sep_layout2.addWidget(self.instrument_extraction_check)
 
         disclaimer = QLabel(
-            "⚠️ Disclaimer: The song‑specific recommendation may not be perfect.\n"
-            "If instruments are not removed by the recommended options,\n"
-            "you must experiment with other models that may or may not be on the list."
+            "⚠️ Disclaimer: The song‑specific recommendation may not be perfect. "
+            "If instruments are not removed by the recommended options, you must "
+            "experiment with other models that may or may not be on the list."
         )
         disclaimer.setWordWrap(True)
         disclaimer.setStyleSheet("color: #ffcc80; font-size: 10px; padding: 4px;")
@@ -652,13 +858,29 @@ class DatasetManager(QMainWindow):
         self.detect_instruments_btn = QPushButton("Detect via Captioner")
         self.detect_instruments_btn.clicked.connect(self.detect_instruments_for_separation)
         detect_layout.addWidget(self.detect_instruments_btn)
+        self.lookup_instruments_btn = QPushButton("🔍 Lookup")
+        self.lookup_instruments_btn.setToolTip("Look up instruments from the local database (filename match) — no captioner needed.")
+        self.lookup_instruments_btn.clicked.connect(self.on_instruments_lookup)
+        detect_layout.addWidget(self.lookup_instruments_btn)
+        self.audit_captions_btn = QPushButton("🧪 Audit Captions")
+        self.audit_captions_btn.setToolTip("Check caption consistency (instruments + naming) across the dataset.")
+        self.audit_captions_btn.clicked.connect(self.on_audit_captions)
+        detect_layout.addWidget(self.audit_captions_btn)
         detect_layout.addStretch()
         sep_layout2.addLayout(detect_layout)
 
+        self.section_cut_check = QCheckBox(
+            "🔪 Cut at structural tags before instrument detection (recommended — "
+            "short chunks make the captioner name instruments precisely)"
+        )
+        self.section_cut_check.setChecked(True)
+        sep_layout2.addWidget(self.section_cut_check)
+
         self.detected_instruments_list = QTextEdit()
-        self.detected_instruments_list.setPlaceholderText("Run 'Detect' to see instruments...")
+        self.detected_instruments_list.setPlaceholderText(
+            "Instruments / MVSEP models — auto-filled by Detect/Lookup, or type your own."
+        )
         self.detected_instruments_list.setMaximumHeight(80)
-        self.detected_instruments_list.setReadOnly(True)
         sep_layout2.addWidget(self.detected_instruments_list)
 
         model_layout = QHBoxLayout()
@@ -740,32 +962,34 @@ class DatasetManager(QMainWindow):
         stem_source = self.stem_source_combo.currentText()
         if stem_source == "Separate via MVSEP":
             if not self.config.get("mvsep_api_key"):
-                key, ok = QInputDialog.getText(self, "MVSEP API Key", "Enter your MVSEP API key:", QLineEdit.Password)
-                if ok and key.strip():
-                    self.config["mvsep_api_key"] = key.strip()
-                    self.mvsep_key.setText(key.strip())
+                key = self.prompt_for_secret("mvsep_api_key", "MVSEP API Key", "Enter your MVSEP API key:")
+                if key:
+                    self.config["mvsep_api_key"] = key
+                    self.mvsep_key.setText(key)
                 else:
                     return
 
         if self.use_deepseek_check.isChecked() and not self.config.get("custom_key"):
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter your DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
+            key = self.prompt_for_secret("custom_key", "DeepSeek API Key", "Enter your DeepSeek API key:")
+            if key:
+                self.config["custom_key"] = key
+                self.custom_key.setText(key)
             else:
                 return
 
-        if not self.config.get("kaggle_user") or not self.config.get("kaggle_key"):
+        if not self.config.get("kaggle_user"):
             user, ok1 = QInputDialog.getText(self, "Kaggle Username", "Enter Kaggle username:")
-            if ok1:
-                key, ok2 = QInputDialog.getText(self, "Kaggle API Key", "Enter Kaggle API key:", QLineEdit.Password)
-                if ok2:
-                    self.config["kaggle_user"] = user.strip()
-                    self.config["kaggle_key"] = key.strip()
-                    self.k_user.setText(user.strip())
-                    self.k_key.setText(key.strip())
-                else:
-                    return
+            if ok1 and user.strip():
+                self.config["kaggle_user"] = user.strip()
+                self.k_user.setText(user.strip())
+                self._save_settings()
+            else:
+                return
+        if not self.config.get("kaggle_key"):
+            key = self.prompt_for_secret("kaggle_key", "Kaggle API Key", "Enter Kaggle API key:")
+            if key:
+                self.config["kaggle_key"] = key
+                self.k_key.setText(key)
             else:
                 return
 
@@ -843,42 +1067,46 @@ class DatasetManager(QMainWindow):
         stem_source = self.struct_stem_combo.currentText()
         if stem_source == "Separate via MVSEP":
             if not self.config.get("mvsep_api_key"):
-                key, ok = QInputDialog.getText(self, "MVSEP API Key", "Enter your MVSEP API key:", QLineEdit.Password)
-                if ok and key.strip():
-                    self.config["mvsep_api_key"] = key.strip()
-                    self.mvsep_key.setText(key.strip())
+                key = self.prompt_for_secret("mvsep_api_key", "MVSEP API Key", "Enter your MVSEP API key:")
+                if key:
+                    self.config["mvsep_api_key"] = key
+                    self.mvsep_key.setText(key)
                 else:
                     return
 
         if self.struct_deepseek_check.isChecked() and not self.config.get("custom_key"):
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter your DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
+            key = self.prompt_for_secret("custom_key", "DeepSeek API Key", "Enter your DeepSeek API key:")
+            if key:
+                self.config["custom_key"] = key
+                self.custom_key.setText(key)
             else:
                 return
 
-        if not self.config.get("kaggle_user") or not self.config.get("kaggle_key"):
+        if not self.config.get("kaggle_user"):
             user, ok1 = QInputDialog.getText(self, "Kaggle Username", "Enter Kaggle username:")
-            if ok1:
-                key, ok2 = QInputDialog.getText(self, "Kaggle API Key", "Enter Kaggle API key:", QLineEdit.Password)
-                if ok2:
-                    self.config["kaggle_user"] = user.strip()
-                    self.config["kaggle_key"] = key.strip()
-                    self.k_user.setText(user.strip())
-                    self.k_key.setText(key.strip())
-                else:
-                    return
+            if ok1 and user.strip():
+                self.config["kaggle_user"] = user.strip()
+                self.k_user.setText(user.strip())
+                self._save_settings()
+            else:
+                return
+        if not self.config.get("kaggle_key"):
+            key = self.prompt_for_secret("kaggle_key", "Kaggle API Key", "Enter Kaggle API key:")
+            if key:
+                self.config["kaggle_key"] = key
+                self.k_key.setText(key)
             else:
                 return
 
-        # ---- Humanization preset (selected in the Structural tab) ----
-        extra_notes = ""
-        band_context = ""
-        instrument_context = ""
-        production_context = ""
-        vocal_context = ""
-        humanize_preset = self.humanize_preset_combo.currentText()
+        # ---- Humanization preset (user-entered, free-form) ----
+        humanize_preset = self.humanize_preset_combo.currentText().strip()
+        if humanize_preset and self.humanize_preset_combo.findText(humanize_preset) < 0:
+            self.humanize_preset_combo.addItem(humanize_preset)
+        presets = list(self.config.get("humanize_presets", []))
+        if humanize_preset and humanize_preset not in presets:
+            presets.append(humanize_preset)
+            self.config["humanize_presets"] = presets
+            self._save_settings()
 
         # ---- Humanization and stem options ----
         humanize = self.humanize_check.isChecked()
@@ -900,11 +1128,6 @@ class DatasetManager(QMainWindow):
             "use_lyrics": self.struct_seg_combo.currentText() == "Lyrics tags",
             "humanize": humanize,
             "humanize_preset": humanize_preset,
-            "band_context": band_context,
-            "instrument_context": instrument_context,
-            "production_context": production_context,
-            "vocal_context": vocal_context,
-            "extra_notes": extra_notes,
             "stem_options": stem_options
         }
 
@@ -985,42 +1208,46 @@ class DatasetManager(QMainWindow):
         stem_source = self.struct_stem_combo.currentText()
         if stem_source == "Separate via MVSEP":
             if not self.config.get("mvsep_api_key"):
-                key, ok = QInputDialog.getText(self, "MVSEP API Key", "Enter your MVSEP API key:", QLineEdit.Password)
-                if ok and key.strip():
-                    self.config["mvsep_api_key"] = key.strip()
-                    self.mvsep_key.setText(key.strip())
+                key = self.prompt_for_secret("mvsep_api_key", "MVSEP API Key", "Enter your MVSEP API key:")
+                if key:
+                    self.config["mvsep_api_key"] = key
+                    self.mvsep_key.setText(key)
                 else:
                     return
 
         if self.struct_deepseek_check.isChecked() and not self.config.get("custom_key"):
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter your DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
+            key = self.prompt_for_secret("custom_key", "DeepSeek API Key", "Enter your DeepSeek API key:")
+            if key:
+                self.config["custom_key"] = key
+                self.custom_key.setText(key)
             else:
                 return
 
-        if not self.config.get("kaggle_user") or not self.config.get("kaggle_key"):
+        if not self.config.get("kaggle_user"):
             user, ok1 = QInputDialog.getText(self, "Kaggle Username", "Enter Kaggle username:")
-            if ok1:
-                key, ok2 = QInputDialog.getText(self, "Kaggle API Key", "Enter Kaggle API key:", QLineEdit.Password)
-                if ok2:
-                    self.config["kaggle_user"] = user.strip()
-                    self.config["kaggle_key"] = key.strip()
-                    self.k_user.setText(user.strip())
-                    self.k_key.setText(key.strip())
-                else:
-                    return
+            if ok1 and user.strip():
+                self.config["kaggle_user"] = user.strip()
+                self.k_user.setText(user.strip())
+                self._save_settings()
+            else:
+                return
+        if not self.config.get("kaggle_key"):
+            key = self.prompt_for_secret("kaggle_key", "Kaggle API Key", "Enter Kaggle API key:")
+            if key:
+                self.config["kaggle_key"] = key
+                self.k_key.setText(key)
             else:
                 return
 
-        # ---- Humanization preset (selected in the Structural tab) ----
-        extra_notes = ""
-        band_context = ""
-        instrument_context = ""
-        production_context = ""
-        vocal_context = ""
-        humanize_preset = self.humanize_preset_combo.currentText()
+        # ---- Humanization preset (user-entered, free-form) ----
+        humanize_preset = self.humanize_preset_combo.currentText().strip()
+        if humanize_preset and self.humanize_preset_combo.findText(humanize_preset) < 0:
+            self.humanize_preset_combo.addItem(humanize_preset)
+        presets = list(self.config.get("humanize_presets", []))
+        if humanize_preset and humanize_preset not in presets:
+            presets.append(humanize_preset)
+            self.config["humanize_presets"] = presets
+            self._save_settings()
 
         # ---- Humanization and stem options ----
         humanize = self.humanize_check.isChecked()
@@ -1033,8 +1260,21 @@ class DatasetManager(QMainWindow):
                 stem_options['use_caption_recommendation'] = True
                 stem_options['caption_text'] = caption_text
             extra_models = self.extra_models_input.text().strip()
-            if extra_models:
-                models = [m.strip() for m in extra_models.split(',') if m.strip()]
+            models = [m.strip() for m in extra_models.split(',') if m.strip()] if extra_models else []
+            # Prefer the DeepSeek-recommended models from 'Detect via Captioner'.
+            recommended = getattr(self, "recommended_instrument_models", None) or []
+            # Any instruments typed into the box also flow into the pipeline.
+            box_text = self.detected_instruments_list.toPlainText().strip()
+            box_models = [m.strip() for m in re.split(r"[\n,]+", box_text) if m.strip()] if box_text else []
+            models = list(dict.fromkeys(recommended + box_models + models))
+            if not models:
+                QMessageBox.information(
+                    self, "Instruments Not Detected",
+                    "Instrument-specific extraction is enabled but no instruments are "
+                    "listed yet. Run 'Detect via Captioner', '🔍 Lookup', or type "
+                    "instruments/MVSEP models into the box. Continuing with defaults.",
+                )
+            if models:
                 stem_options['instrument_models'] = models
 
         options = {
@@ -1043,11 +1283,6 @@ class DatasetManager(QMainWindow):
             "use_lyrics": self.struct_seg_combo.currentText() == "Lyrics tags",
             "humanize": humanize,
             "humanize_preset": humanize_preset,
-            "band_context": band_context,
-            "instrument_context": instrument_context,
-            "production_context": production_context,
-            "vocal_context": vocal_context,
-            "extra_notes": extra_notes,
             "stem_options": stem_options
         }
 
@@ -1120,56 +1355,183 @@ class DatasetManager(QMainWindow):
         QMessageBox.information(self, "Pipeline Complete", "All selected tracks have been processed.")
 
     def detect_instruments_for_separation(self):
-        """Run captioner on the selected track to detect instruments and update the UI."""
-        # Get the first selected track
+        """Detect instruments for the selected track.
+
+        With "Cut at structural tags" enabled (default), the track is split at
+        its structural boundaries and each section is captioned with the
+        instruments-only prompt — short chunks make the captioner name the
+        instruments precisely. The aggregated instrument list is then sent to
+        DeepSeek, which recommends the instrument-specific MVSEP models to run.
+        """
         selected = self.get_selected_sample()
         if not selected:
             QMessageBox.warning(self, "No Track Selected", "Please select a track first.")
             return
 
-        # We need to get a caption for this track. If it already has a caption, use it.
-        # Otherwise, run the captioner on it.
-        caption = selected.get("caption", "")
-        if not caption:
-            # Run the captioner on this track
-            # We can reuse the existing start_ai_captioning but it's modal and scope-based.
-            # For simplicity, we'll just inform the user to run the captioner first.
-            reply = QMessageBox.question(
-                self,
-                "Caption Needed",
-                "This track does not have a caption yet. Would you like to run the AI captioner on it now?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                # Temporarily set scope to Selected Track and run captioning
-                # We'll need to store the original scope and restore it.
-                # For simplicity, we'll call the existing captioning method with the selected track.
-                # But start_ai_captioning uses a dialog for scope; we could override it.
-                # A simpler approach: just run the captioner on the full track and grab the caption.
-                # We'll implement a quick helper to caption a single track.
-                caption = self._caption_single_track(selected)
-                if not caption:
-                    return
-            else:
-                return
+        self._section_captions = []
 
-        # Now parse the caption for instrument keywords
-        # Use the instrument map from stem_separator
+        if self.section_cut_check.isChecked():
+            self._detect_instruments_by_sections(selected)
+            return
+
+        caption = selected.get("caption", "").strip()
+        if caption:
+            # Whole-track caption already exists — skip straight to DeepSeek.
+            self._recommend_instrument_models(caption)
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Run Captioner First",
+            "This track has no caption yet. Run the AI captioner now with an "
+            "instruments-only prompt to detect the instruments?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._run_instrument_caption([selected])
+
+    def _detect_instruments_by_sections(self, selected):
+        """Cut the track at structural tags, caption each section, aggregate."""
+        audio_path = selected.get("audio_path", "")
+        if not audio_path or not os.path.exists(audio_path):
+            QMessageBox.warning(self, "File Missing", f"Audio file not found:\n{audio_path}")
+            return
+
+        self.detect_instruments_btn.setEnabled(False)
+        self.struct_status.setText("Cutting track at structural tags…")
         try:
-            from stem_separator import StemSeparator
-            separator = StemSeparator(self.config)
-            instrument_map = separator._instrument_to_model_map()
-            detected = []
-            caption_lower = caption.lower()
-            for keyword, model_name in instrument_map.items():
-                if keyword in caption_lower:
-                    detected.append(f"{keyword} → {model_name}")
-            if detected:
-                self.detected_instruments_list.setText("\n".join(detected))
-            else:
-                self.detected_instruments_list.setText("No known instruments detected in caption.")
-        except Exception as e:
-            self.detected_instruments_list.setText(f"Error: {e}")
+            import tempfile
+            from modules.audio_analysis import (
+                find_structural_sections,
+                slice_sections_to_wav,
+            )
+            temp_dir = tempfile.mkdtemp(prefix="ace_sections_")
+            sections = find_structural_sections(audio_path)
+            chunks = slice_sections_to_wav(audio_path, sections, temp_dir)
+        except Exception as e:  # noqa: BLE001
+            self.detect_instruments_btn.setEnabled(True)
+            self.struct_status.setText(f"Section cutting failed: {e}")
+            QMessageBox.warning(self, "Section Cut", str(e))
+            return
+
+        pseudo = []
+        for i, c in enumerate(chunks, start=1):
+            pseudo.append({
+                "id": f"{selected.get('id', 'x')}_sec{i}",
+                "audio_path": c["path"],
+                "filename": os.path.basename(c["path"]),
+            })
+        self.struct_status.setText(
+            f"Captioning {len(pseudo)} section(s) with the instruments-only prompt…"
+        )
+        self._run_instrument_caption(pseudo, aggregate=True)
+
+    def _run_instrument_caption(self, samples, aggregate=False):
+        backend = "Local Rule Engine"
+        if self.config.get("kaggle_user") and self.config.get("kaggle_key"):
+            backend = "Kaggle Cloud (Free GPU)"
+        elif self.config.get("custom_key"):
+            backend = "DeepSeek Cloud"
+
+        worker = RemoteCaptionWorker(
+            samples,
+            backend,
+            "Concise Tags",
+            self.dataset.get("metadata", {}),
+            self.config,
+            caption_prompt=INSTRUMENT_ONLY_PROMPT,
+        )
+        worker.finished_sample.connect(self._on_instrument_caption_done)
+        worker.all_done.connect(lambda: self._maybe_aggregate_sections(aggregate))
+        worker.error_occurred.connect(self._on_instrument_caption_failed)
+        self.detect_worker = worker
+        worker.start()
+
+    def _on_instrument_caption_done(self, sid, caption):
+        self._section_captions.append(caption)
+
+    def _maybe_aggregate_sections(self, aggregate):
+        self.detect_instruments_btn.setEnabled(True)
+        if not self._section_captions:
+            self.struct_status.setText("No instruments found in the caption.")
+            return
+        if aggregate:
+            combined = " | ".join(self._section_captions)
+            self.struct_status.setText(
+                "Sections captioned — asking DeepSeek for model recommendations…"
+            )
+            self._recommend_instrument_models(combined)
+        else:
+            self.struct_status.setText(
+                "Instruments detected — asking DeepSeek for model recommendations…"
+            )
+            self._recommend_instrument_models(self._section_captions[-1])
+
+    def _on_instrument_caption_failed(self, err):
+        self.detect_instruments_btn.setEnabled(True)
+        self.struct_status.setText(f"Instrument detection failed: {err}")
+        QMessageBox.warning(self, "Instrument Detection", str(err))
+
+    def _recommend_instrument_models(self, instruments_text):
+        if not instruments_text.strip():
+            self.struct_status.setText("No instruments found in the caption.")
+            return
+        self.struct_status.setText("DeepSeek is recommending instrument-specific MVSEP models…")
+        self.detect_instruments_btn.setEnabled(False)
+        self.rec_thread = InstrumentRecommendThread(self.config, instruments_text)
+        self.rec_thread.finished_ok.connect(self._on_models_recommended)
+        self.rec_thread.failed.connect(self._on_recommend_failed)
+        self.rec_thread.start()
+
+    def _on_models_recommended(self, recommended):
+        self.detect_instruments_btn.setEnabled(True)
+        self.recommended_instrument_models = recommended
+        self.detected_instruments_list.setPlainText("\n".join(recommended))
+        self.struct_status.setText(
+            f"Recommended {len(recommended)} instrument-specific model(s). "
+            "They will be used by the pipeline."
+        )
+
+    def _on_recommend_failed(self, err):
+        self.detect_instruments_btn.setEnabled(True)
+        self.struct_status.setText(f"Model recommendation failed: {err}")
+        QMessageBox.warning(self, "Model Recommendation", str(err))
+
+    def on_instruments_lookup(self):
+        """Populate the instruments box from the local database (no captioner)."""
+        selected = self.get_selected_sample()
+        if not selected:
+            QMessageBox.warning(self, "No Track Selected", "Please select a track first.")
+            return
+        from modules.instruments_db import lookup_instruments
+        instruments = lookup_instruments(selected.get("filename", ""))
+        if not instruments:
+            self.struct_status.setText(
+                "No database match for this track — type instruments/models manually."
+            )
+            QMessageBox.information(
+                self, "Lookup",
+                "No instrument entry found for this filename in the database. "
+                "You can add one to instruments_db.json, or type instruments/models "
+                "into the box manually.",
+            )
+            return
+        self.recommended_instrument_models = instruments
+        self.detected_instruments_list.setPlainText("\n".join(instruments))
+        self.struct_status.setText(f"Looked up {len(instruments)} instrument(s) from the database.")
+
+    def on_audit_captions(self):
+        """Run the local caption-consistency audit and show the report."""
+        from modules.caption_audit import audit_captions
+        report = audit_captions(self.dataset)
+        QMessageBox.information(
+            self, "Caption Audit",
+            "\n".join(report),
+        )
+        self.struct_status.setText(
+            f"Caption audit: {sum(1 for r in report if 'NO CAPTION' in r)} track(s) missing captions."
+        )
 
     def on_struct_scope_changed(self, scope_text):
         show = scope_text == "Selected Tracks (from list)"
@@ -1227,11 +1589,10 @@ class DatasetManager(QMainWindow):
         use_spatial = self.spatial_module_checkbox.isChecked()
         api_key = self.config.get("custom_key", "").strip()
         if not api_key:
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
-                api_key = key.strip()
+            api_key = self.prompt_for_secret("custom_key", "DeepSeek API Key", "Enter DeepSeek API key:")
+            if api_key:
+                self.config["custom_key"] = api_key
+                self.custom_key.setText(api_key)
             else:
                 self.progress_bar.setVisible(False)
                 return
@@ -1310,7 +1671,70 @@ class DatasetManager(QMainWindow):
         self.config["custom_url"] = self.custom_url.text().strip()
         self.config["custom_key"] = self.custom_key.text().strip()
         self.config["mvsep_api_key"] = self.mvsep_key.text().strip()
+        self._save_settings()
         self.status_label.setText("Cloud credentials saved.")
+
+    def add_stem_files_to_dataset(self, paths):
+        """Add separated stem files (from the MVSEP tab) as new dataset samples."""
+        added = 0
+        for p in paths:
+            if not p or not os.path.exists(p):
+                continue
+            self.dataset["samples"].append({
+                "id": uuid.uuid4().hex[:8],
+                "audio_path": p,
+                "filename": os.path.basename(p),
+                "caption": "",
+                "genre": "",
+                "lyrics": "",
+                "formatted_lyrics": "",
+                "bpm": 0,
+                "keyscale": "",
+                "timesignature": "4/4",
+                "duration": 0,
+                "language": "en",
+                "is_instrumental": False,
+                "custom_tag": "",
+                "prompt_style": "use_global",
+                "locked": True,
+            })
+            added += 1
+        self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
+        if added:
+            self.refresh_table()
+            self.on_table_selection_changed()
+            self.status_label.setText(f"Added {added} stem file(s) to the dataset.")
+        else:
+            self.status_label.setText("No stem files added (paths missing).")
+
+    def _save_settings(self):
+        """Persist settings; secrets go to the encrypted store, never settings.json."""
+        try:
+            from modules.config_store import save_config
+            save_config(self.config)
+        except OSError as e:
+            self.status_label.setText(f"Could not save settings: {e}")
+
+    def prompt_for_secret(self, key, title, label):
+        """Return a secret, prompting the user when it isn't stored.
+
+        Two modes: save securely to the encrypted store, or send it to the API
+        from the popup and never persist it.
+        """
+        from modules.secrets_manager import get_secret, set_secret
+        from ui.secret_prompt import SecretPromptDialog
+
+        val = get_secret(key)
+        if val:
+            return val
+        dlg = SecretPromptDialog(title, label, self)
+        if dlg.exec() != SecretPromptDialog.Accepted:
+            return ""
+        val = dlg.value()
+        if val:
+            self.config[key] = val
+            set_secret(key, val, persist=dlg.persist_choice())
+        return val
 
     def on_font_changed(self, font):
         self.custom_theme["font_family"] = font.family()
@@ -1392,6 +1816,8 @@ class DatasetManager(QMainWindow):
             self.table.setItem(row, 5, QTableWidgetItem(str(s.get("keyscale", ""))))
             bpm = s.get("bpm", 0)
             self.table.setItem(row, 6, QTableWidgetItem(str(bpm) if bpm else ""))
+            cap = (s.get("caption", "") or "").replace("\n", " ")[:60]
+            self.table.setItem(row, 7, QTableWidgetItem(cap))
 
         self.exceptions_view_btn.setText(f"⚠ Exceptions Queue ({exceptions_count})")
 
@@ -1426,6 +1852,9 @@ class DatasetManager(QMainWindow):
             self.key_input.blockSignals(True)
             self.bpm_spin.blockSignals(True)
             self.inst_check.blockSignals(True)
+            self.language_combo.blockSignals(True)
+            self.timesig_combo.blockSignals(True)
+            self.prompt_style_combo.blockSignals(True)
 
             self.caption_text.setPlainText(s.get("caption", ""))
             self.lyrics_text.setPlainText(s.get("formatted_lyrics", s.get("lyrics", "")))
@@ -1434,6 +1863,9 @@ class DatasetManager(QMainWindow):
             self.key_input.setText(str(s.get("keyscale", "")))
             self.bpm_spin.setValue(int(s.get("bpm", 0)))
             self.inst_check.setChecked(bool(s.get("is_instrumental", False)))
+            self.language_combo.setCurrentText(s.get("language", "en") or "en")
+            self.timesig_combo.setCurrentText(s.get("timesignature", "4/4") or "4/4")
+            self.prompt_style_combo.setCurrentText({"use_global": "Use global ratio", "caption": "Caption only", "tag": "Tag only"}.get(s.get("prompt_style", "use_global"), "Use global ratio"))
 
             is_locked = s.get("locked", True)
             self.bpm_lock.setChecked(is_locked)
@@ -1448,6 +1880,9 @@ class DatasetManager(QMainWindow):
             self.key_input.blockSignals(False)
             self.bpm_spin.blockSignals(False)
             self.inst_check.blockSignals(False)
+            self.language_combo.blockSignals(False)
+            self.timesig_combo.blockSignals(False)
+            self.prompt_style_combo.blockSignals(False)
 
     def handle_lock_dropdown(self, idx):
         action = self.lock_action_combo.currentText()
@@ -1484,6 +1919,40 @@ class DatasetManager(QMainWindow):
         s = self.get_selected_sample()
         if s:
             s["caption"] = self.caption_text.toPlainText()
+
+    def on_language_edited(self, text):
+        s = self.get_selected_sample()
+        if s:
+            s["language"] = text.strip() or "en"
+
+    def on_timesig_edited(self, text):
+        s = self.get_selected_sample()
+        if s:
+            s["timesignature"] = text.strip() or "4/4"
+
+    def on_prompt_style_edited(self, text):
+        s = self.get_selected_sample()
+        if s:
+            s["prompt_style"] = {"Use global ratio": "use_global", "Caption only": "caption", "Tag only": "tag"}.get(text, "use_global")
+
+    def on_ratio_changed(self, val):
+        self.config["tag_caption_ratio"] = int(val)
+        self.ratio_label.setText(f"{int(val)}% tags")
+        self._save_settings()
+
+    def resolve_prompt_style(self, sample):
+        """Resolve a track's caption style: per-track override, else global ratio."""
+        override = sample.get("prompt_style", "use_global")
+        if override == "caption":
+            return "caption"
+        if override == "tag":
+            return "tag"
+        ratio = int(self.config.get("tag_caption_ratio", 0))
+        idx = int(sample.get("id", "0") or "0", 16) if sample.get("id") else 0
+        return "tag" if (idx % 100) < ratio else "caption"
+
+    def _caption_complexity_resolver(self, sample):
+        return "Concise Tags" if self.resolve_prompt_style(sample) == "tag" else "Deep Structural Breakdown"
 
     # -----------------------------------------------------------------------
     # Caption history & AI review (unchanged from original)
@@ -1674,6 +2143,9 @@ class DatasetManager(QMainWindow):
         self.dataset_name_input.setText(meta.get("name", ""))
         self.custom_tag_input.setText(meta.get("custom_tag", ""))
         self.tag_pos_combo.setCurrentText(meta.get("tag_position", "prepend"))
+        ratio = int(self.config.get("tag_caption_ratio", 0))
+        self.ratio_slider.setValue(ratio)
+        self.ratio_label.setText(f"{ratio}% tags")
         mode = meta.get("instrumental_mode", "mixed")
         if mode == "all_instrumental":
             self.radio_all_inst.setChecked(True)
@@ -1938,6 +2410,15 @@ class DatasetManager(QMainWindow):
             try:
                 self.on_general_prop_changed()
                 self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
+                from modules.manifest_validation import validate_manifest
+                issues = validate_manifest(self.dataset)
+                if issues and not self.bypass_warnings:
+                    QMessageBox.warning(
+                        self, "Manifest Issues",
+                        "The manifest has issues that may affect training:\n• "
+                        + "\n• ".join(issues[:12]),
+                    )
+                    return
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(self.dataset, f, indent=2)
                 self.status_label.setText(f"Saved dataset to {Path(path).name}")
@@ -1971,6 +2452,7 @@ class DatasetManager(QMainWindow):
                     "language": "en",
                     "is_instrumental": is_all_inst,
                     "custom_tag": global_tag,
+                    "prompt_style": "use_global",
                     "locked": True,
                     # Spatial fields
                     "structural_segments": [],
@@ -2029,7 +2511,7 @@ class DatasetManager(QMainWindow):
         self.active_worker = RemoteCaptionWorker(
             samples,
             backend,
-            "Deep Structural Breakdown",
+            self._caption_complexity_resolver,
             general_meta,
             self.config
         )

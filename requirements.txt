@@ -7,9 +7,12 @@ librosa>=0.10.0
 soundfile>=0.12.1
 pyloudnorm>=0.1.1
 openai>=1.0.0
+# google-genai>=1.0.0   # optional — only needed for the Gemini caption backend (pip install google-genai)
 kaggle>=1.6.0
 pillow>=10.0.0
 requests>=2.31.0
+keyring>=25.0.0
+cryptography>=42.0.0
 
 # ==============================================================================
 # System Dependencies (Must be installed via OS package manager)

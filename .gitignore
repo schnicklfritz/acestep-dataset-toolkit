@@ -17,11 +17,20 @@ Thumbs.db
 *.tmp
 ace_stage_*
 *.mp3_preview.mp3
+spatial_chunks/
+structural_chunks/
+vocal_split/
 
 # Local User Settings & Secrets (Keep your Kaggle keys private)
 settings.json
 kaggle.json
 *.local
+
+# Encrypted secrets store (OS keyring fallback)
+secrets.enc
+
+# Downloaded models (see models.json catalog)
+models/
 
 # Local Backups
 backup/

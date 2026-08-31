@@ -1,4 +1,4 @@
-# ACE-Step Dataset Toolkit (Gentoo Edition)
+# ACE-Step Dataset Toolkit
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PySide6](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt6-green.svg)](https://pypi.org/project/PySide6/)
@@ -10,9 +10,12 @@ A lightweight, outcome-driven desktop utility designed for preparing, auditing, 
 
 ```
 dataset_manager.py        # Entry point — run with: python dataset_manager.py
-config.py                 # Default configuration (API keys live in settings.json, gitignored)
-stem_separator.py         # MVSEP API stem separation
+config.py                 # Default configuration + settings.json path (gitignored)
+stem_separator.py         # MVSEP stem separation (fetches live algorithm list)
+modules/mvsep_api.py      # MVSEP API client — live algorithm list + separation jobs
 modules/homogeneity.py    # DSP homogeneity engine (LUFS, crest factor, spectral centroid)
+kernels/                  # Kaggle GPU kernel scripts
+  stem_separation_kernel.py   # Demucs stem separation (htdemucs_ft / htdemucs_6s)
 workers/                  # Background QThread workers (one per pipeline stage)
   deepseek.py             #   DeepSeek music-prompt orchestrator client
   advanced.py             #   Advanced AI pipeline orchestrator
@@ -21,12 +24,35 @@ workers/                  # Background QThread workers (one per pipeline stage)
   dsp.py                  #   EBU R128 normalization
   caption.py              #   Multi-backend captioning (Kaggle / DeepSeek / custom)
   structural.py           #   Structural pipeline + batch worker
+  kaggle_stems.py         #   Kaggle GPU stem separation (Demucs kernel push/download)
 ui/main_window.py         # DatasetManager QMainWindow (tabs, theming, undo/redo)
+ui/mvsep_tab.py           # 🔊 MVSEP / Kaggle Separator tab (live model list, drag & drop)
 ```
+
+## 🔊 MVSEP / Kaggle Separator Tab
+
+* **MVSEP Cloud API**: loads the separation-type list **live from MVSEP** (`/api/app/algorithms`), so the newest models are always available — no hardcoded IDs. Enter your token, pick a model (with its extra options), drop in an audio file, and the stems are downloaded on completion.
+* **PolarFormer-first chain (default, not hardcoded)**: every full multi-stem run starts with **BS PolarFormer (124-band)** — it separates vocals + instrumental and re-synthesizes the instrumental's frequencies, preventing artifacts and clipping in later stages. The first stage is a dropdown you can change to any algorithm in the live list (and the choice is saved), and the chain can be switched off for a single-algorithm run.
+* **Kaggle GPU (Demucs)**: pushes a private Kaggle GPU kernel running Meta **Demucs** (`htdemucs_ft` — the newest fine-tuned hybrid transformer — or `htdemucs_6s` for 6 stems) on your audio, then pulls the stems back. Requires Kaggle credentials from ⚙ Settings.
+* Finished stems can be added straight into the **Dataset Studio** with one click.
+
+## 🧠 Kaggle Cloud Backends (captioning + stem separation)
+
+* **Captioner kernel** (`kernels/caption_kernel.py`) — the correct Qwen2.5-Omni
+  flow (chat template + `process_mm_info`). The model comes from a **pre-uploaded
+  Kaggle dataset** (`kaggle_model_dataset`, default
+  `michelmoalem9b/acestep-captioner-model`), so no HF token is needed. Audio is
+  **uploaded as a private Kaggle dataset** and attached via `dataset_sources` —
+  this is the only reliable way to feed files to a pushed kernel.
+* **Stem-separation kernel** (`kernels/stem_separation_kernel.py`) — Meta Demucs
+  (`htdemucs_ft` / `htdemucs` / `htdemucs_6s`), same dataset-source flow.
+* **Prerequisites:** the `kaggle` CLI must be installed (`pip install kaggle`)
+  and your Kaggle Username/Key saved in ⚙ Settings. `HF_TOKEN` is only needed as
+  a fallback (run the notebook manually in Kaggle → Add-ons → Secrets).
 
 ---
 
-## 🌟 Philosophy: User Sovereignty (Gentoo-Style)
+## 🌟 Philosophy: Total Configurability (User Sovereignty)
 * **Zero Hardcoded Restrictions**: If any color, font, zoom level, path, or metadata value cannot be customized or overridden by the user, it is treated as a bug.
 * **Non-Destructive Workflows**: Original audio files are never overwritten. Every normalization, bulk edit, or caption update creates automatic snapshots with full **Undo/Redo** and **A/B Fallback** support.
 * **Bypass Gate**: A prominent **"I Know What I'm Doing"** mode allows intentional exports regardless of diagnostic warnings.
