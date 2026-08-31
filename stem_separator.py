@@ -5,6 +5,7 @@ import tempfile
 import shutil
 import requests
 from pathlib import Path
+from modules.mvsep_api import get_algorithms
 import librosa
 import soundfile as sf
 import numpy as np
@@ -23,6 +24,20 @@ class StemSeparator:
         self.progress = progress_callback or (lambda p, m: None)
         self.api_token = config.get("mvsep_api_key", "").strip()
         self.base_url = "https://mvsep.com/api"
+        self._live_algorithms = {}  # populated by refresh_algorithms()
+
+    # ------------------------------------------------------------------
+    # Dynamic algorithm list (keeps the newest models available)
+    # ------------------------------------------------------------------
+    def refresh_algorithms(self):
+        """Fetch the live MVSEP algorithm list so model names resolve to IDs."""
+        try:
+            by_id, _ = get_algorithms()
+            self._live_algorithms = {str(k): v for k, v in by_id.items()}
+        except Exception as e:  # noqa: BLE001
+            self._live_algorithms = {}
+            print(f"MVSEP algorithm list refresh failed: {e}")
+        return self._live_algorithms
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -78,15 +93,37 @@ class StemSeparator:
     # ------------------------------------------------------------------
     def _polarformer_separate(self, audio_path, output_dir):
         """
-        Run BS‑PolarFormer (124 bands) via MVSEP API.
-        Returns dict with 'vocals' and 'instrumental' paths.
+        Run the first separation stage (default BS‑PolarFormer, 124 bands) via
+        MVSEP API. Returns dict with 'vocals' and 'instrumental' paths.
         """
         if not self.api_token:
             raise ValueError("MVSEP API key not set. Please add it in Settings.")
 
-        model_id = 123  # BS PolarFormer (124 bands)
+        model_id = self._resolve_first_stage_id()
         result = self._call_mvsep_api(audio_path, model_id, output_dir)
         return result
+
+    def _resolve_first_stage_id(self):
+        """First stage of a full separation.
+
+        Defaults to BS PolarFormer (124-band) — it re-synthesizes the
+        instrumental and prevents artifacts/clipping — but is not hardcoded:
+        ``config['mvsep_first_stage']`` (a render_id from the live MVSEP list)
+        overrides it when set.
+        """
+        cfg_id = str(self.config.get("mvsep_first_stage", "") or "").strip()
+        if cfg_id.isdigit():
+            return cfg_id
+        return self._resolve_polarformer_id()
+
+    def _resolve_polarformer_id(self):
+        """Resolve BS PolarFormer's render_id from the live list (fallback 123)."""
+        if not self._live_algorithms:
+            self.refresh_algorithms()
+        for rid, name in self._live_algorithms.items():
+            if "polarformer" in name.lower():
+                return rid
+        return 123  # BS PolarFormer (124 bands)
 
     # ------------------------------------------------------------------
     # Stage 2: Multi‑stem separation via MVSEP API
@@ -273,7 +310,7 @@ class StemSeparator:
     # Model name to ID mapping (from MVSEP algorithms page)
     # ------------------------------------------------------------------
     def _model_name_to_id(self):
-        return {
+        base = {
             # Ensembles
             'Ensemble (vocals, instrum)': 26,
             'Ensemble All-In (vocals, bass, drums, piano, guitar, lead/back vocals, other)': 30,
@@ -342,6 +379,10 @@ class StemSeparator:
             'MVSep Choir': 111,
             'MVSep Crowd removal': 34,
         }
+        # Merge the live algorithm list so newest models resolve by name too.
+        for rid, name in getattr(self, "_live_algorithms", {}).items():
+            base.setdefault(name, rid)
+        return base
 
     # ------------------------------------------------------------------
     # Recommendation engine: parse caption and map to MVSEP models
