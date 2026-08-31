@@ -140,9 +140,9 @@ class HealthAuditorWorker(QThread):
         has_lossy_cutoff = False
         lufs_est = -14.0
         bpm_detected = sample_data.get("bpm", 0)
-        bpm_confidence = 0.85
+        bpm_confidence = float(sample_data.get("bpm_confidence", 0.85))
         key_detected = sample_data.get("keyscale", "")
-        key_confidence = 0.80
+        key_confidence = float(sample_data.get("key_confidence", 0.80))
         issues = []
 
         try:
@@ -191,12 +191,25 @@ class HealthAuditorWorker(QThread):
         if dur > 0 and dur < 10:
             issues.append("Short track (< 10s)")
 
-        if not bpm_detected or bpm_detected == 0:
-            bpm_detected = 120
-            bpm_confidence = 0.60
+        if not bpm_detected or not key_detected:
+            # Compute real BPM/key instead of falling back to placeholders.
+            try:
+                from modules.tagger import analyze_audio
+                tags = analyze_audio(path)
+                if not bpm_detected and tags.get("bpm"):
+                    bpm_detected = tags["bpm"]
+                    bpm_confidence = 0.9
+                if not key_detected and tags.get("key"):
+                    key_detected = tags["key"]
+                    key_confidence = 0.9
+            except Exception:  # noqa: BLE001 — tagging must never break the audit
+                pass
+        if not bpm_detected:
+            bpm_detected = 0
+            bpm_confidence = 0.4
         if not key_detected:
-            key_detected = "A minor"
-            key_confidence = 0.65
+            key_detected = ""
+            key_confidence = 0.4
 
         status = "Healthy" if not issues else "Warning"
         return {

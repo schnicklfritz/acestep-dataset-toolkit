@@ -45,6 +45,40 @@ class DeepSeekMusicOrchestrator:
             print(f"DeepSeek error: {e}")
             return ""
 
+    def recommend_instrument_models(self, instruments_text, available_models):
+        """Ask DeepSeek which instrument-specific MVSEP models to run.
+
+        ``available_models`` is the live MVSEP algorithm catalog (names), so
+        DeepSeek can only recommend models that actually exist. Returns a
+        comma-separated string of model names.
+        """
+        system_prompt = (
+            "You are a music production expert and stem-separation specialist. "
+            "Given the instruments detected in a song, recommend which instrument-"
+            "specific stem-separation models should be run, chosen ONLY from the "
+            "provided catalog of available MVSEP models. Return ONLY the model "
+            "names as a comma-separated list — no explanations, no numbering."
+        )
+        user = (
+            f"Detected instruments: {instruments_text}\n\n"
+            f"Available MVSEP models:\n{', '.join(available_models)}\n\n"
+            "Recommended instrument-specific models:"
+        )
+        try:
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+                max_tokens=300,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"DeepSeek instrument recommendation error: {e}")
+            return ""
+
 # ============================================================================
 # NEW: Advanced Structural Pipeline Worker
 # ============================================================================
