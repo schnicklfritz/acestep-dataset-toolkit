@@ -1,6 +1,5 @@
 import os, json, uuid, tempfile, subprocess, shutil, time
 from pathlib import Path
-from openai import OpenAI
 from PySide6.QtCore import QThread, Signal
 from workers.deepseek import DeepSeekMusicOrchestrator
 from workers.caption_backends import GeminiBackend, CustomOpenAICompatBackend
@@ -33,8 +32,8 @@ def resolve_backend(config):
     """Map the configured ``caption_backend`` key to a worker backend string.
 
     Falls back gracefully so the default ``ace_step`` still works for users
-    without Kaggle credentials (DeepSeek if a key exists, else the local rule
-    engine).
+    without Kaggle credentials: the configured LLM provider (DeepSeek / Gemini /
+    Groq / OpenRouter / local) if available, else the local rule engine.
     """
     name = (config.get("caption_backend") or "ace_step").strip().lower()
     if name == "gemini":
@@ -43,11 +42,15 @@ def resolve_backend(config):
         return "DeepSeek Cloud"
     if name == "custom":
         return "Custom Endpoint / Webhook"
-    # ace_step (or anything unknown): prefer Kaggle, then DeepSeek, then local.
+    # ace_step (or anything unknown): prefer Kaggle, then the LLM provider, then local.
     if config.get("kaggle_user") and config.get("kaggle_key"):
         return "Kaggle Cloud (Free GPU)"
-    if config.get("custom_key"):
-        return "DeepSeek Cloud"
+    try:
+        from modules.llm_client import provider_key_present
+        if provider_key_present(config):
+            return "DeepSeek Cloud"
+    except Exception:  # noqa: BLE001
+        pass
     return "Local Rule Engine"
 
 class RemoteCaptionWorker(QThread):

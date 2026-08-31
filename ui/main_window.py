@@ -1903,8 +1903,8 @@ class DatasetManager(QMainWindow):
                 sid = s.get("id", "")
                 rep = self.health_reports.get(sid, {})
                 if rep:
-                    s["bpm"] = rep.get("bpm_detected", 120)
-                    s["keyscale"] = rep.get("key_detected", "A minor")
+                    s["bpm"] = rep.get("bpm_detected", 0)
+                    s["keyscale"] = rep.get("key_detected", "")
                     self.on_table_selection_changed()
                     self.status_label.setText("Restored original detected values.")
         self.lock_action_combo.setCurrentIndex(0)
@@ -2223,9 +2223,9 @@ class DatasetManager(QMainWindow):
         for s in self.dataset["samples"]:
             if s["id"] == sid and not s.get("locked", False):
                 if not s.get("bpm") or s.get("bpm") == 0:
-                    s["bpm"] = rep.get("bpm_detected", 120)
+                    s["bpm"] = rep.get("bpm_detected", 0)
                 if not s.get("keyscale"):
-                    s["keyscale"] = rep.get("key_detected", "A minor")
+                    s["keyscale"] = rep.get("key_detected", "")
                 if not s.get("duration") or s.get("duration") == 0:
                     s["duration"] = int(rep.get("duration", 0))
 

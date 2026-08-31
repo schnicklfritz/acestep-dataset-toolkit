@@ -456,10 +456,9 @@ class StructuralPipelineWorker(QThread):
         if not provider_key_present(self.config):
             return "No LLM API key provided for the selected provider."
 
-        # For now, we use defaults for genre and BPM.
-        # In a future version we can read them from the sample metadata.
+        # Use real detected tags when available (tagger runs pre-stem).
         target_genre = "Alternative Rock"
-        global_bpm = 120
+        global_bpm = int(self.tags.get("bpm") or 120)
 
         # Use the existing orchestrator but with enriched context
         # We'll pass the evidence as a separate parameter.
