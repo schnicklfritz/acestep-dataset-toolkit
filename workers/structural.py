@@ -54,9 +54,9 @@ class StructuralPipelineWorker(QThread):
             # Step 2b: Optional lead/backing vocal split on the vocal stem
             self._split_lead_backing(stem_paths)
 
-            # Step 3: Structural boundaries – now adaptive!
-            self.progress.emit(25, "Finding structural boundaries (adaptive)...")
-            sections = self._find_boundaries(self.file_path)
+            # Step 3: Structural boundaries – SongFormer (functional labels) or librosa
+            self.progress.emit(25, "Finding structural boundaries...")
+            sections = self._find_sections(self.file_path)
             if not sections:
                 self.error_occurred.emit("Could not determine structural boundaries.")
                 return
@@ -203,6 +203,49 @@ class StructuralPipelineWorker(QThread):
     # -----------------------------------------------------------------------
     # Structural boundaries – now adaptive!
     # -----------------------------------------------------------------------
+    def _find_sections(self, audio_path):
+        """Structure segmentation: SongFormer (functional labels) or librosa.
+
+        When ``structure_backend`` is ``songformer`` and Kaggle credentials are
+        present, runs the SongFormer kernel and maps ``[{start, end, label}]``
+        into the pipeline's section format (names like ``Verse_01``). Falls back
+        to the librosa agglomerative method on any failure.
+        """
+        backend = str(self.config.get("structure_backend", "librosa") or "librosa").strip().lower()
+        if backend == "songformer":
+            if not (self.config.get("kaggle_user") and self.config.get("kaggle_key")):
+                self.progress.emit(28, "SongFormer needs Kaggle creds — using librosa boundaries.")
+            else:
+                try:
+                    from workers.structure import run_structure_analysis
+                    self.progress.emit(26, "Running SongFormer structure analysis (Kaggle)...")
+                    segs = run_structure_analysis(
+                        audio_path, self.config,
+                        min_segment_sec=int(float(self.config.get("segment_min_sec", 12))),
+                        progress_cb=lambda p, m: self.progress.emit(26 + int(p * 0.2), m),
+                    )
+                    if segs:
+                        sections = []
+                        counts = {}
+                        for seg in segs:
+                            label = (seg.get("label") or "section").strip().replace(" ", "_")
+                            counts[label] = counts.get(label, 0) + 1
+                            sections.append({
+                                "name": f"{label.capitalize()}_{counts[label]:02d}",
+                                "start": float(seg.get("start", 0.0)),
+                                "end": float(seg.get("end", 0.0)),
+                                "label": label,
+                            })
+                        sections = [s for s in sections if s["end"] > s["start"]]
+                        if sections:
+                            return sections
+                        self.progress.emit(28, "SongFormer returned no segments — using librosa boundaries.")
+                    else:
+                        self.progress.emit(28, "SongFormer returned no segments — using librosa boundaries.")
+                except Exception as e:  # noqa: BLE001
+                    self.progress.emit(28, f"SongFormer failed ({e}) — using librosa boundaries.")
+        return self._find_boundaries(audio_path)
+
     def _find_boundaries(self, audio_path):
         # Load audio and get duration
         y, sr = librosa.load(audio_path, sr=None, mono=False)

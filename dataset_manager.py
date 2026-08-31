@@ -1088,6 +1088,19 @@ class DatasetManager(QMainWindow):
         self.max_k_spin.setValue(int(self.config.get("segment_max_k", 20)))
         p_form.addRow("Max Sections:", self.max_k_spin)
 
+        self.structure_backend_combo = QComboBox()
+        self.structure_backend_combo.addItems([
+            "librosa (default)",
+            "songformer (functional labels, Kaggle)",
+        ])
+        cur_struct = str(self.config.get("structure_backend", "librosa") or "librosa").lower()
+        self.structure_backend_combo.setCurrentIndex(1 if cur_struct.startswith("song") else 0)
+        self.structure_backend_combo.setToolTip(
+            "songformer splits sections into real labels (intro/verse/chorus/bridge/solo/outro) "
+            "via a Kaggle GPU kernel; falls back to librosa automatically."
+        )
+        p_form.addRow("Structure Backend:", self.structure_backend_combo)
+
         self.stem_model_combo = QComboBox()
         self.stem_model_combo.addItems(["htdemucs", "htdemucs_ft", "htdemucs_6s", "mdx_extra"])
         cur_stem = self.config.get("kaggle_stem_model", "htdemucs_ft")
@@ -2252,6 +2265,9 @@ class DatasetManager(QMainWindow):
         }.get(self.lead_vocal_combo.currentText(), "off")
         self.config["segment_min_sec"] = self.min_sec_spin.value()
         self.config["segment_max_k"] = self.max_k_spin.value()
+        self.config["structure_backend"] = (
+            "songformer" if self.structure_backend_combo.currentIndex() == 1 else "librosa"
+        )
         self.config["kaggle_stem_model"] = self.stem_model_combo.currentText()
         self.config["stem_output_dir"] = self.stem_out_edit.text().strip()
         self.config["dsp_target_lufs"] = self.lufs_spin.value()
