@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "download_source_default": "hf",
+  "models": [
+    {
+      "id": "bs-polarformer",
+      "name": "BS PolarFormer 124-band",
+      "role": "vocal/instrumental (Stage 1)",
+      "preferred_backend": "mvsep",
+      "hf_repo": "bgkb/bs_polarformer",
+      "github_url": "",
+      "default": true,
+      "note": "Rebuilds the instrumental stem (anti-artifact). Fast on MVSEP (~2 min); slow on Kaggle (~10-15 min) — prefer MVSEP."
+    },
+    {
+      "id": "bs-roformer",
+      "name": "BS RoFormer SW (6 stems)",
+      "role": "multi-stem (Stage 2)",
+      "preferred_backend": "mvsep",
+      "hf_repo": "",
+      "github_url": "",
+      "default": true,
+      "note": "MVSEP API model (vocals, bass, drums, guitar, piano, other)."
+    },
+    {
+      "id": "htdemucs",
+      "name": "Demucs htdemucs (4 stems)",
+      "role": "multi-stem (Stage 2)",
+      "preferred_backend": "kaggle",
+      "hf_repo": "facebook/demucs",
+      "github_url": "https://github.com/facebookresearch/demucs",
+      "default": false,
+      "note": "Offline OSS baseline (vocals, drums, bass, other)."
+    },
+    {
+      "id": "htdemucs_ft",
+      "name": "Demucs htdemucs_ft (4 stems, fine-tuned)",
+      "role": "multi-stem (Stage 2)",
+      "preferred_backend": "kaggle",
+      "hf_repo": "facebook/demucs",
+      "github_url": "https://github.com/facebookresearch/demucs",
+      "default": true,
+      "note": "Robust offline OSS multi-stem default. Does NOT rebuild the instrumental — run it AFTER PolarFormer."
+    },
+    {
+      "id": "htdemucs_6s",
+      "name": "Demucs htdemucs_6s (guitar + piano stems)",
+      "role": "multi-stem (Stage 2)",
+      "preferred_backend": "kaggle",
+      "hf_repo": "facebook/demucs",
+      "github_url": "https://github.com/facebookresearch/demucs",
+      "default": true,
+      "note": "Adds separate guitar and piano stems — ideal for riff/guitar-isolation use cases."
+    },
+    {
+      "id": "melband-roformer",
+      "name": "MelBand RoFormer",
+      "role": "multi-stem (Stage 2, alternative)",
+      "preferred_backend": "kaggle",
+      "hf_repo": "",
+      "github_url": "https://github.com/eliesern/MelRoFormer",
+      "default": false,
+      "note": "Strong OSS contender for vocals/instrumental quality."
+    },
+    {
+      "id": "scnet",
+      "name": "SCNet (Songbringer)",
+      "role": "multi-stem (Stage 2, alternative)",
+      "preferred_backend": "kaggle",
+      "hf_repo": "",
+      "github_url": "https://github.com/rgcda/songcnet",
+      "default": false,
+      "note": "Vocals/drums/bass/other with clean vocals focus."
+    },
+    {
+      "id": "clap-music",
+      "name": "LAION CLAP (music) — instrument tagger",
+      "role": "instrument tagging (pre-split)",
+      "preferred_backend": "local",
+      "hf_repo": "laion/larger_clap_music",
+      "github_url": "",
+      "default": true,
+      "note": "Zero-shot audio-text tagging. Needs torch + transformers. Drives content-aware model recommendations."
+    },
+    {
+      "id": "songformer",
+      "name": "SongFormer — music structure (functional labels)",
+      "role": "structure segmentation",
+      "preferred_backend": "kaggle",
+      "hf_repo": "ASLP-lab/SongFormer",
+      "github_url": "https://github.com/ASLP-lab/SongFormer",
+      "default": false,
+      "note": "Style-aware sections (intro/verse/chorus/bridge/solo/outro). ~2-4 s/song on GPU."
+    },
+    {
+      "id": "whisperx",
+      "name": "WhisperX — lyrics transcription",
+      "role": "lyrics (word-aligned)",
+      "preferred_backend": "local",
+      "hf_repo": "m-bain/whisperX",
+      "github_url": "https://github.com/m-bain/whisperX",
+      "default": false,
+      "note": "Optional word-aligned lyrics to enrich per-section captions."
+    }
+  ],
+  "leaderboards": [
+    {
+      "name": "Music Demixing Challenge (MDX)",
+      "url": "https://www.aicrowd.com/challenges/music-demixing-challenge-2023"
+    },
+    {
+      "name": "MVSEP — live algorithm list",
+      "url": "https://mvsep.com/"
+    },
+    {
+      "name": "Papers with Code — Music Source Separation",
+      "url": "https://paperswithcode.com/task/music-source-separation"
+    }
+  ]
+}
