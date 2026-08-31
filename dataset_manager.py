@@ -31,6 +31,7 @@ from workers.embeddings import EmbeddingWorker
 from workers.export import ExportWorker
 from workers.tag_creator import TagCreatorWorker
 from workers.musicbrainz import MusicBrainzWorker
+from modules.lyrics_tools import split_long_lines
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -1047,6 +1048,26 @@ class DatasetManager(QMainWindow):
         self.musicbrainz_btn.clicked.connect(self.start_musicbrainz_lookup)
         action_strip.addWidget(self.musicbrainz_btn)
 
+        action_strip.addStretch()
+        studio_layout.addLayout(action_strip)
+
+        # --- Tools row (find/replace, lyrics, A/B, riff, stem A/B) ---
+        tools_strip = QHBoxLayout()
+        fr_btn = QPushButton("🔁 Find/Replace")
+        fr_btn.clicked.connect(self.open_find_replace_dialog)
+        lyr_btn = QPushButton("✎ Lyrics Editor")
+        lyr_btn.clicked.connect(self.open_lyrics_editor)
+        ab_btn = QPushButton("🔀 A/B Captions")
+        ab_btn.clicked.connect(self.open_ab_captions)
+        riff_btn = QPushButton("🎸 Riff/Hook")
+        riff_btn.clicked.connect(self.open_riff_hook_tagger)
+        stemab_btn = QPushButton("🎚 Stem A/B")
+        stemab_btn.clicked.connect(self.open_stem_ab)
+        for b in (fr_btn, lyr_btn, ab_btn, riff_btn, stemab_btn):
+            tools_strip.addWidget(b)
+        tools_strip.addStretch()
+        studio_layout.addLayout(tools_strip)
+
         action_strip.addSpacing(15)
 
         self.all_view_btn = QPushButton("All Tracks")
@@ -1065,9 +1086,6 @@ class DatasetManager(QMainWindow):
         action_strip.addWidget(QLabel("View:"))
         action_strip.addWidget(self.all_view_btn)
         action_strip.addWidget(self.exceptions_view_btn)
-
-        action_strip.addStretch()
-        studio_layout.addLayout(action_strip)
 
         # --- Preview player + waveform ---
         player_bar = QHBoxLayout()
@@ -4807,6 +4825,236 @@ class DatasetManager(QMainWindow):
         row.addWidget(close_btn)
         lay.addLayout(row)
         dialog.exec()
+
+    # -----------------------------------------------------------------------
+    # Dataset tools: find/replace, lyrics editor, A/B captions, riff/hook, stem A/B
+    # -----------------------------------------------------------------------
+    def open_find_replace_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Bulk Find / Replace")
+        dialog.resize(420, 160)
+        lay = QVBoxLayout(dialog)
+        self.fr_find = QLineEdit()
+        self.fr_find.setPlaceholderText("Find…")
+        self.fr_repl = QLineEdit()
+        self.fr_repl.setPlaceholderText("Replace with…")
+        self.fr_scope = QComboBox()
+        self.fr_scope.addItems(["Captions", "Custom tags", "Both"])
+        lay.addWidget(self.fr_find)
+        lay.addWidget(self.fr_repl)
+        lay.addWidget(self.fr_scope)
+        row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        go_btn = QPushButton("Replace All")
+        go_btn.clicked.connect(lambda: self._apply_find_replace(dialog))
+        row.addStretch(); row.addWidget(cancel_btn); row.addWidget(go_btn)
+        lay.addLayout(row)
+        dialog.exec()
+
+    def _apply_find_replace(self, dialog):
+        find = self.fr_find.text()
+        repl = self.fr_repl.text()
+        scope = self.fr_scope.currentText()
+        if not find:
+            QMessageBox.warning(self, "Find/Replace", "Enter some text to find.")
+            return
+        self.record_snapshot()
+        count = 0
+        for s in self.dataset.get("samples", []):
+            if scope in ("Captions", "Both"):
+                c = s.get("caption", "")
+                if find in c:
+                    s["caption"] = c.replace(find, repl)
+                    count += 1
+            if scope in ("Custom tags", "Both"):
+                t = s.get("custom_tag", "")
+                if find in t:
+                    s["custom_tag"] = t.replace(find, repl)
+                    count += 1
+        dialog.accept()
+        self.refresh_table()
+        self.status_label.setText(f"Replaced '{find}' in {count} field(s).")
+        QMessageBox.information(self, "Find/Replace", f"Replaced '{find}' in {count} field(s).")
+
+    def open_lyrics_editor(self):
+        sample = self.get_selected_sample()
+        if not sample:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Lyrics Editor — {sample.get('filename', '')}")
+        dialog.resize(560, 520)
+        lay = QVBoxLayout(dialog)
+        lay.addWidget(QLabel("<b>Lyrics (time-script):</b>"))
+        edit = QTextEdit()
+        edit.setPlainText(sample.get("formatted_lyrics") or sample.get("lyrics") or "")
+        lay.addWidget(edit, 1)
+        row = QHBoxLayout()
+        split_btn = QPushButton("Split Long Lines (≤10 syll)")
+        split_btn.clicked.connect(lambda: edit.setPlainText(
+            split_long_lines(edit.toPlainText())))
+        export_btn = QPushButton("Export .lrc…")
+        export_btn.clicked.connect(lambda: self._export_lyrics(sample, edit.toPlainText()))
+        save_btn = QPushButton("Save to Track")
+        save_btn.clicked.connect(lambda: self._save_lyrics_editor(sample, edit.toPlainText(), dialog))
+        cancel_btn = QPushButton("Close")
+        cancel_btn.clicked.connect(dialog.reject)
+        row.addWidget(split_btn)
+        row.addWidget(export_btn)
+        row.addStretch()
+        row.addWidget(save_btn)
+        row.addWidget(cancel_btn)
+        lay.addLayout(row)
+        dialog.exec()
+
+    def _save_lyrics_editor(self, sample, text, dialog):
+        self.record_snapshot()
+        sample["lyrics"] = text.strip()
+        sample["formatted_lyrics"] = text.strip()
+        dialog.accept()
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.status_label.setText("Lyrics updated.")
+
+    def _export_lyrics(self, sample, text):
+        from modules.lyrics_tools import export_lrc
+        base = Path(sample.get("filename", "lyrics")).stem
+        path, _ = QFileDialog.getSaveFileName(self, "Export Lyrics", f"{base}.lrc", "LRC (*.lrc);;Text (*.txt)")
+        if not path:
+            return
+        export_lrc(text.strip(), sample.get("lyrics_segments") or [], path)
+        self.status_label.setText(f"Lyrics exported to {Path(path).name}.")
+
+    def open_ab_captions(self):
+        sample = self.get_selected_sample()
+        if not sample:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        a = sample.get("caption") or ""
+        b = sample.get("caption_ai_raw") or sample.get("tags_caption") or ""
+        if not b:
+            QMessageBox.information(
+                self, "A/B Captions",
+                "No alternate caption yet — run the AI captioner or the Structural Tag Creator first.",
+            )
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"A/B Captions — {sample.get('filename', '')}")
+        dialog.resize(820, 480)
+        lay = QVBoxLayout(dialog)
+        split = QSplitter(Qt.Horizontal)
+        a_box = QTextBrowser(); a_box.setPlainText(a or "(empty)")
+        b_box = QTextBrowser(); b_box.setPlainText(b)
+        aw = QWidget(); al = QVBoxLayout(aw); al.addWidget(QLabel("<b>A — Current</b>")); al.addWidget(a_box)
+        bw = QWidget(); bl = QVBoxLayout(bw); bl.addWidget(QLabel("<b>B — Alternate</b>")); bl.addWidget(b_box)
+        split.addWidget(aw); split.addWidget(bw)
+        lay.addWidget(split, 1)
+        row = QHBoxLayout()
+        use_a = QPushButton("Use A")
+        use_a.clicked.connect(lambda: self._choose_caption(sample, a, dialog))
+        use_b = QPushButton("Use B")
+        use_b.clicked.connect(lambda: self._choose_caption(sample, b, dialog))
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.reject)
+        row.addStretch(); row.addWidget(use_a); row.addWidget(use_b); row.addWidget(close_btn)
+        lay.addLayout(row)
+        dialog.exec()
+
+    def _choose_caption(self, sample, text, dialog):
+        self.record_snapshot()
+        sample["caption"] = text
+        dialog.accept()
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.status_label.setText("Caption updated.")
+
+    def open_riff_hook_tagger(self):
+        sample = self.get_selected_sample()
+        if not sample:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        segs = sample.get("structural_segments") or []
+        if not segs:
+            QMessageBox.information(self, "Riff/Hook", "No structural sections yet — run the Structural Pipeline first.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Riff / Hook Tags — {sample.get('filename', '')}")
+        dialog.resize(480, 420)
+        lay = QVBoxLayout(dialog)
+        lay.addWidget(QLabel("Mark the recurring riff / hook sections the captioner should emphasize:"))
+        checks = []
+        for seg in segs:
+            cb = QCheckBox(f"{seg.get('name', '?')}  ({seg.get('start', 0)}-{seg.get('end', 0)}s)")
+            cb.setChecked(bool(seg.get("hook")))
+            checks.append((seg, cb))
+            lay.addWidget(cb)
+        note_edit = QLineEdit(sample.get("riff_note", ""))
+        note_edit.setPlaceholderText("Optional riff note, e.g. 'downtuned E minor riff'")
+        lay.addWidget(note_edit)
+        row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(lambda: self._save_riff_hooks(sample, checks, note_edit, dialog))
+        row.addStretch(); row.addWidget(cancel_btn); row.addWidget(save_btn)
+        lay.addLayout(row)
+        dialog.exec()
+
+    def _save_riff_hooks(self, sample, checks, note_edit, dialog):
+        self.record_snapshot()
+        hooks = []
+        for seg, cb in checks:
+            seg["hook"] = cb.isChecked()
+            if cb.isChecked():
+                hooks.append(seg.get("name", "?"))
+        sample["hooks"] = hooks
+        sample["riff_note"] = note_edit.text().strip()
+        dialog.accept()
+        self.status_label.setText(f"Marked {len(hooks)} riff/hook section(s).")
+        self.refresh_table()
+        self.on_table_selection_changed()
+
+    def open_stem_ab(self):
+        sample = self.get_selected_sample()
+        if not sample:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        stems = sample.get("stem_paths") or {}
+        if not stems:
+            QMessageBox.information(self, "Stem A/B", "No stems yet — run stem separation first.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Stem A/B — {sample.get('filename', '')}")
+        dialog.resize(420, 180)
+        lay = QVBoxLayout(dialog)
+        combo = QComboBox()
+        combo.addItem("Full Mix")
+        for name in sorted(stems):
+            combo.addItem(f"Stem: {name}")
+        lay.addWidget(combo)
+        row = QHBoxLayout()
+        play_btn = QPushButton("▶ Play")
+        stop_btn = QPushButton("⏹ Stop")
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.reject)
+        row.addWidget(play_btn); row.addWidget(stop_btn); row.addStretch(); row.addWidget(close_btn)
+        lay.addLayout(row)
+
+        def play():
+            if self.media_player is None:
+                return
+            sel = combo.currentText()
+            path = sample.get("audio_path", "") if sel == "Full Mix" else stems.get(sel.replace("Stem: ", ""), "")
+            if path and os.path.exists(path):
+                self.media_player.stop()
+                self.media_player.setSource(QUrl.fromLocalFile(path))
+                self.media_player.play()
+                self.play_btn.setText("⏸")
+        play_btn.clicked.connect(play)
+        stop_btn.clicked.connect(self.stop_track_playback)
+        dialog.exec()
+
 
     # -----------------------------------------------------------------------
     # Common worker callbacks

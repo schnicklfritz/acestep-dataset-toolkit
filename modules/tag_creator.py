@@ -42,6 +42,10 @@ def build_track_context(sample):
     if segs:
         parts = [f"{seg.get('name', '?')} {seg.get('start', 0)}-{seg.get('end', 0)}s" for seg in segs]
         lines.append("Sections: " + ", ".join(parts))
+    if sample.get("hooks"):
+        lines.append("Hooks/riffs to emphasize: " + ", ".join(sample["hooks"]))
+    if sample.get("riff_note"):
+        lines.append("Riff note: " + sample["riff_note"])
     ly = (sample.get("lyrics") or sample.get("formatted_lyrics") or "").strip()
     if ly:
         lines.append("LYRICS:\n" + ly[:2000])
