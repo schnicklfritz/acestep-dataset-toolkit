@@ -858,8 +858,8 @@ class DatasetManager(QMainWindow):
         embed_tab = QWidget()
         self.init_embedding_map_tab(embed_tab)
 
-        self.tabs.addTab(struct_tab, "🎶 Structural Pipeline")
         self.tabs.addTab(studio_tab, "🎛 Dataset Studio")
+        self.tabs.addTab(struct_tab, "🎶 Structural Pipeline")
         self.tabs.addTab(settings_tab, "⚙ Settings")
         self.tabs.addTab(advanced_tab, "🧠 Advanced Tools")
         self.tabs.addTab(spatial_tab, "🌐 Spatial Pipeline")
@@ -1611,11 +1611,69 @@ class DatasetManager(QMainWindow):
         input_row.addWidget(clear_btn)
         layout.addLayout(input_row)
 
+        # --- Sample questions ---
+        suggest_row = QHBoxLayout()
+        suggest_row.addWidget(QLabel("Try:"))
+        self.assistant_suggest = QComboBox()
+        self.assistant_suggest.addItems([
+            "Curate my dataset toward a Black Sabbath / doom sound.",
+            "What is my dataset's current sound profile?",
+            "Which tracks look like outliers or near-duplicates?",
+            "Check whether 'Paranoid' by Black Sabbath has multitracks.",
+            "Audit my captions for consistency.",
+            "Validate my dataset manifest.",
+            "Help me write a caption for the selected track.",
+            "What tags fit a slow, powerful belted ballad?",
+            "How do I fix the flagged health issues?",
+            "Run the health audit on my dataset.",
+        ])
+        ask_btn = QPushButton("Ask")
+        ask_btn.clicked.connect(self.ask_suggested)
+        suggest_row.addWidget(self.assistant_suggest, 1)
+        suggest_row.addWidget(ask_btn)
+        layout.addLayout(suggest_row)
+
+        # --- Context options ---
+        opts_row = QHBoxLayout()
+        self.assistant_remember_check = QCheckBox("Remember context")
+        self.assistant_remember_check.setChecked(bool(self.config.get("assistant_remember", True)))
+        self.assistant_remember_check.toggled.connect(self._on_assistant_remember_toggled)
+        self.assistant_linear_check = QCheckBox("Step-by-step reasoning")
+        self.assistant_linear_check.setChecked(bool(self.config.get("assistant_linear_thinking", True)))
+        opts_row.addWidget(self.assistant_remember_check)
+        opts_row.addWidget(self.assistant_linear_check)
+        opts_row.addStretch()
+        layout.addLayout(opts_row)
+
         self.assistant_status = QLabel("Ready.")
         self.assistant_status.setStyleSheet("color: #aaa;")
         layout.addWidget(self.assistant_status)
 
-        self._assistant_messages = []
+        # Restore the persistent linear conversation.
+        if self.config.get("assistant_remember", True):
+            from modules.assistant_store import load_context
+            self._assistant_messages = load_context(int(self.config.get("assistant_context_size", 40)))
+            if self._assistant_messages:
+                self.assistant_history.append("<i>… restored previous conversation.</i>")
+        else:
+            self._assistant_messages = []
+
+    def ask_suggested(self):
+        q = self.assistant_suggest.currentText().strip()
+        if q:
+            self.assistant_input.setText(q)
+            self.send_assistant_message()
+
+    def _save_assistant_context(self):
+        if not self.config.get("assistant_remember", True):
+            return
+        from modules.assistant_store import save_context
+        save_context(self._assistant_messages, int(self.config.get("assistant_context_size", 40)))
+
+    def _on_assistant_remember_toggled(self, checked):
+        if not checked:
+            from modules.assistant_store import clear_context
+            clear_context()
 
     def send_assistant_message(self):
         text = self.assistant_input.text().strip()
@@ -1624,12 +1682,16 @@ class DatasetManager(QMainWindow):
         self.assistant_history.append(f"<b>You:</b> {html.escape(text)}<br>")
         self.assistant_input.clear()
         self._assistant_messages.append({"role": "user", "content": text})
+        self._save_assistant_context()
         self._start_assistant()
 
     def clear_assistant(self):
         self._assistant_messages = []
         self.assistant_history.setHtml("<b>🤖 AI Assistant</b> — conversation cleared.<hr>")
         self.assistant_status.setText("Ready.")
+        if self.config.get("assistant_remember", True):
+            from modules.assistant_store import clear_context
+            clear_context()
 
     def _set_assistant_busy(self, busy):
         self.assistant_send_btn.setEnabled(not busy)
@@ -1650,8 +1712,11 @@ class DatasetManager(QMainWindow):
             return
         self._set_assistant_busy(True)
         summary = summarize_dataset(self.dataset, self.health_reports)
+        sys_prompt = build_system_prompt(APP_HELP_TEXT, summary)
+        if self.assistant_linear_check.isChecked():
+            sys_prompt += "\n\nWork through the problem step by step before answering."
         messages = [
-            {"role": "system", "content": build_system_prompt(APP_HELP_TEXT, summary)}
+            {"role": "system", "content": sys_prompt}
         ] + list(self._assistant_messages)
         self.assistant_worker = AssistantWorker(
             "", messages, tools=ASSISTANT_TOOLS, parent=self, config=self.config,
@@ -1665,6 +1730,7 @@ class DatasetManager(QMainWindow):
         self._set_assistant_busy(False)
         self.assistant_history.append(f"<b>AI:</b><br>{html.escape(answer)}<hr>")
         self._assistant_messages.append({"role": "assistant", "content": answer})
+        self._save_assistant_context()
 
     def on_assistant_tool(self, name, args_json, call_id):
         try:
@@ -1683,6 +1749,7 @@ class DatasetManager(QMainWindow):
         self._assistant_messages.append({
             "role": "tool", "tool_call_id": call_id, "content": result,
         })
+        self._save_assistant_context()
         self._start_assistant()
 
     def execute_assistant_tool(self, name, args):
@@ -3180,6 +3247,9 @@ class DatasetManager(QMainWindow):
         self.config["remember_groq_key"] = self.remember_groq.isChecked()
         self.config["deepseek_key"] = self.deepseek_key.text().strip()
         self.config["remember_deepseek_key"] = self.remember_deepseek.isChecked()
+        if hasattr(self, "assistant_remember_check"):
+            self.config["assistant_remember"] = self.assistant_remember_check.isChecked()
+            self.config["assistant_linear_thinking"] = self.assistant_linear_check.isChecked()
         remember = self._remembered_secret_keys()
         try:
             save_config(self.config, remember=remember)

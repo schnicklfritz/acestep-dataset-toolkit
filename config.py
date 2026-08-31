@@ -80,5 +80,9 @@ DEFAULT_CONFIG = {
     "groq_key": "",                   # (secret)
     "remember_openrouter_key": True,
     "remember_groq_key": True,
+    # ---- AI assistant ----
+    "assistant_remember": True,        # persist the conversation across sessions
+    "assistant_context_size": 40,      # max messages kept in context
+    "assistant_linear_thinking": True, # step-by-step reasoning
 }
 

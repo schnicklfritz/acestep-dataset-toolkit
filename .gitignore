@@ -32,5 +32,8 @@ secrets.enc
 # Downloaded models (see models.json catalog)
 models/
 
+# Persistent assistant conversation context
+assistant_context.json
+
 # Local Backups
 backup/
