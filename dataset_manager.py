@@ -39,7 +39,8 @@ from workers.assistant import (
     build_sound_profile, summarize_dataset,
 )
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QUrl, QTime
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QLabel, QLineEdit, QComboBox, QTextEdit, QFileDialog,
     QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
@@ -49,9 +50,72 @@ from PySide6.QtWidgets import (
     QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
     QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
     QTabWidget, QFontComboBox, QSlider, QRadioButton, QButtonGroup,
-    QFrame, QListWidget, QTextBrowser
+    QFrame, QListWidget, QTextBrowser, QSizePolicy
 )
-from PySide6.QtGui import QFont, QColor, QDesktopServices
+from PySide6.QtGui import QFont, QColor, QDesktopServices, QPainter, QPen, QPalette
+
+# ============================================================================
+# Waveform preview widget
+# ============================================================================
+class WaveformWidget(QWidget):
+    """Renders a downsampled waveform for the selected track, with a playhead."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.min_buckets = None
+        self.max_buckets = None
+        self.position_frac = 0.0
+        self.setMinimumHeight(72)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_audio(self, path):
+        self.min_buckets = None
+        self.max_buckets = None
+        self.position_frac = 0.0
+        if path and os.path.exists(path):
+            self._load(path)
+        self.update()
+
+    def _load(self, path):
+        try:
+            y, sr = librosa.load(path, sr=None, mono=True)
+            if len(y) == 0:
+                return
+            n = len(y)
+            buckets = min(1200, max(1, n // 256))
+            trimmed = y[: n - (n % buckets)]
+            arr = trimmed.reshape(buckets, -1)
+            self.min_buckets = arr.min(axis=1)
+            self.max_buckets = arr.max(axis=1)
+        except Exception:  # noqa: BLE001 — unreadable file = blank waveform
+            self.min_buckets = self.max_buckets = None
+
+    def set_position_frac(self, frac):
+        self.position_frac = max(0.0, min(1.0, float(frac)))
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.palette().color(QPalette.Window))
+        w, h = self.width(), self.height()
+        mid = h / 2.0
+        if self.min_buckets is None or len(self.min_buckets) < 2:
+            p.setPen(QColor(150, 150, 150))
+            p.drawText(self.rect(), Qt.AlignCenter, "Select a track to preview the waveform")
+            p.end()
+            return
+        p.setPen(QPen(QColor(14, 99, 156), 1))
+        nb = len(self.min_buckets)
+        for i in range(nb):
+            x0 = i * w / nb
+            x1 = (i + 1) * w / nb
+            lo = mid + self.min_buckets[i] * (h * 0.45)
+            hi = mid + self.max_buckets[i] * (h * 0.45)
+            p.drawLine(int(x0), int(lo), int(x1), int(hi))
+        px = int(self.position_frac * w)
+        p.setPen(QPen(QColor(255, 82, 82), 2))
+        p.drawLine(px, 0, px, h)
+        p.end()
 
 # ============================================================================
 # NEW: DeepSeek Orchestrator
@@ -824,6 +888,39 @@ class DatasetManager(QMainWindow):
 
         action_strip.addStretch()
         studio_layout.addLayout(action_strip)
+
+        # --- Preview player + waveform ---
+        player_bar = QHBoxLayout()
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setToolTip("Play / pause the selected track")
+        self.play_btn.clicked.connect(self.toggle_track_playback)
+        self.stop_btn = QPushButton("⏹")
+        self.stop_btn.setToolTip("Stop playback")
+        self.stop_btn.clicked.connect(self.stop_track_playback)
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider.setRange(0, 1000)
+        self.seek_slider.sliderMoved.connect(self._on_slider_moved)
+        self.time_label = QLabel("0:00 / 0:00")
+        player_bar.addWidget(self.play_btn)
+        player_bar.addWidget(self.stop_btn)
+        player_bar.addWidget(self.seek_slider, 1)
+        player_bar.addWidget(self.time_label)
+        studio_layout.addLayout(player_bar)
+
+        self.waveform = WaveformWidget()
+        self.waveform.set_audio(None)
+        studio_layout.addWidget(self.waveform)
+
+        try:
+            self.media_player = QMediaPlayer(self)
+            self.audio_output = QAudioOutput(self)
+            self.media_player.setAudioOutput(self.audio_output)
+            self.audio_output.setVolume(0.7)
+            self.media_player.positionChanged.connect(self._on_player_position)
+            self.media_player.mediaStatusChanged.connect(self._on_player_status)
+        except Exception as e:  # noqa: BLE001 — playback is best-effort
+            print(f"media player unavailable: {e}")
+            self.media_player = None
 
         # --- Table + Inspector ---
         splitter = QSplitter(Qt.Horizontal)
@@ -2769,6 +2866,7 @@ class DatasetManager(QMainWindow):
 
     def on_table_selection_changed(self):
         s = self.get_selected_sample()
+        self._load_track_preview(s)
         if s:
             sid = s.get("id", "")
             rep = self.health_reports.get(sid, {})
@@ -2814,6 +2912,68 @@ class DatasetManager(QMainWindow):
             self.key_input.blockSignals(False)
             self.bpm_spin.blockSignals(False)
             self.inst_check.blockSignals(False)
+
+    def _load_track_preview(self, sample):
+        path = sample.get("audio_path", "") if sample else ""
+        valid = bool(path) and os.path.exists(path)
+        self.waveform.set_audio(path if valid else None)
+        if self.media_player is not None:
+            self.media_player.stop()
+            if valid:
+                self.media_player.setSource(QUrl.fromLocalFile(path))
+            else:
+                self.seek_slider.setValue(0)
+                self.time_label.setText("0:00 / 0:00")
+                self.waveform.set_position_frac(0.0)
+
+    def toggle_track_playback(self):
+        if self.media_player is None:
+            return
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_player.pause()
+            self.play_btn.setText("▶")
+        else:
+            self.media_player.play()
+            self.play_btn.setText("⏸")
+
+    def stop_track_playback(self):
+        if self.media_player is None:
+            return
+        self.media_player.stop()
+        self.play_btn.setText("▶")
+        self.seek_slider.setValue(0)
+        self.time_label.setText("0:00 / 0:00")
+        self.waveform.set_position_frac(0.0)
+
+    def _on_player_position(self, ms):
+        if self.media_player is None:
+            return
+        total = self.media_player.duration()
+        if total > 0:
+            frac = ms / total
+            self.seek_slider.blockSignals(True)
+            self.seek_slider.setValue(int(frac * 1000))
+            self.seek_slider.blockSignals(False)
+            self.waveform.set_position_frac(frac)
+            self.time_label.setText(f"{self._fmt_ms(ms)} / {self._fmt_ms(total)}")
+
+    def _on_player_status(self, status):
+        if self.media_player is None:
+            return
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.play_btn.setText("▶")
+
+    def _on_slider_moved(self, val):
+        if self.media_player is None:
+            return
+        total = self.media_player.duration()
+        if total > 0:
+            self.media_player.setPosition(int(val / 1000 * total))
+
+    @staticmethod
+    def _fmt_ms(ms):
+        sec = max(0, int(ms // 1000))
+        return f"{sec // 60}:{sec % 60:02d}"
 
     def handle_lock_dropdown(self, idx):
         action = self.lock_action_combo.currentText()
