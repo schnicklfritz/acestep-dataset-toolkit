@@ -28,6 +28,7 @@ from workers.model_manager import ModelDownloadWorker
 from workers.lyrics import TranscribeLyricsWorker
 from workers.rockstar import RockstarLookupWorker
 from workers.embeddings import EmbeddingWorker
+from workers.export import ExportWorker
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -903,11 +904,14 @@ class DatasetManager(QMainWindow):
         load_btn.clicked.connect(self.load_dataset)
         save_btn = QPushButton("💾 Save JSON")
         save_btn.clicked.connect(self.save_dataset)
+        export_btn = QPushButton("📦 Export / Split")
+        export_btn.clicked.connect(self.open_export_dialog)
         add_btn = QPushButton("➕ Add Audio")
         add_btn.clicked.connect(self.add_audio_files)
 
         header_bar.addWidget(load_btn)
         header_bar.addWidget(save_btn)
+        header_bar.addWidget(export_btn)
         header_bar.addWidget(add_btn)
 
         studio_layout.addLayout(header_bar)
@@ -2026,6 +2030,104 @@ class DatasetManager(QMainWindow):
         self.tabs.setCurrentIndex(self.studio_tab_index)
         self.table.setCurrentCell(row, 0)
         self.on_table_selection_changed()
+
+    def open_export_dialog(self):
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.information(self, "Export", "The dataset is empty — add tracks first.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📦 Export / Split Dataset")
+        dialog.resize(520, 420)
+        lay = QVBoxLayout(dialog)
+
+        lay.addWidget(QLabel("<b>Formats:</b>"))
+        self.exp_json = QCheckBox("ACE-Step JSON (dataset.json)")
+        self.exp_csv = QCheckBox("CSV (dataset.csv)")
+        self.exp_jsonl = QCheckBox("JSONL (dataset.jsonl)")
+        self.exp_sidecar = QCheckBox("Sidecar caption .txt files (Kohya/ComfyUI style)")
+        self.exp_folders = QCheckBox("Train/Val folders (copies audio + captions, manifest.json)")
+        for cb in (self.exp_json, self.exp_csv, self.exp_jsonl, self.exp_sidecar, self.exp_folders):
+            lay.addWidget(cb)
+        self.exp_json.setChecked(True)
+
+        split_box = QGroupBox("Train/Val split (for the folders format)")
+        sform = QFormLayout(split_box)
+        self.exp_val_ratio = QDoubleSpinBox()
+        self.exp_val_ratio.setRange(0.05, 0.5)
+        self.exp_val_ratio.setSingleStep(0.05)
+        self.exp_val_ratio.setValue(0.2)
+        self.exp_val_ratio.setDecimals(2)
+        sform.addRow("Validation ratio:", self.exp_val_ratio)
+        self.exp_stratify = QCheckBox("Stratify by genre")
+        self.exp_stratify.setChecked(True)
+        sform.addRow(self.exp_stratify)
+        lay.addWidget(split_box)
+
+        dest_row = QHBoxLayout()
+        self.exp_dest = QLineEdit()
+        self.exp_dest.setPlaceholderText("Choose an output folder…")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_export_dir)
+        dest_row.addWidget(self.exp_dest, 1)
+        dest_row.addWidget(browse)
+        lay.addLayout(dest_row)
+
+        self.exp_status = QLabel(f"{len(samples)} tracks ready to export.")
+        self.exp_status.setStyleSheet("color: #aaa;")
+        lay.addWidget(self.exp_status)
+
+        btn_row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        go_btn = QPushButton("🚀 Export")
+        go_btn.clicked.connect(lambda: self._run_export(dialog))
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(go_btn)
+        lay.addLayout(btn_row)
+
+        dialog.exec()
+
+    def _browse_export_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Choose Export Folder", self.exp_dest.text() or str(Path.home()))
+        if d:
+            self.exp_dest.setText(d)
+
+    def _run_export(self, dialog):
+        dest = self.exp_dest.text().strip()
+        if not dest:
+            QMessageBox.warning(self, "Export", "Choose an output folder first.")
+            return
+        options = {
+            "dest_dir": dest,
+            "json": self.exp_json.isChecked(),
+            "csv": self.exp_csv.isChecked(),
+            "jsonl": self.exp_jsonl.isChecked(),
+            "sidecar": self.exp_sidecar.isChecked(),
+            "folders": self.exp_folders.isChecked(),
+            "val_ratio": self.exp_val_ratio.value(),
+            "stratify": self.exp_stratify.isChecked(),
+            "seed": 42,
+        }
+        if not any(options[k] for k in ("json", "csv", "jsonl", "sidecar", "folders")):
+            QMessageBox.warning(self, "Export", "Select at least one format.")
+            return
+        self.exp_status.setText("Exporting…")
+        self.export_worker = ExportWorker(self.dataset, options, parent=self)
+        self.export_worker.finished_ok.connect(lambda msg: self._on_export_done(msg, dialog))
+        self.export_worker.failed.connect(lambda err: self._on_export_failed(err, dialog))
+        self.export_worker.start()
+
+    def _on_export_done(self, msg, dialog):
+        self.status_label.setText(f"Exported: {msg}")
+        dialog.accept()
+        QMessageBox.information(self, "Export Complete", f"Exported to the chosen folder:\n{msg}")
+
+    def _on_export_failed(self, err, dialog):
+        self.exp_status.setText(f"Export failed: {err}")
+        QMessageBox.warning(self, "Export Failed", str(err))
 
     def init_advanced_tab(self, parent):
         layout = QVBoxLayout(parent)
