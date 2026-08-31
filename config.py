@@ -6,7 +6,8 @@ SETTINGS_PATH = BASE_DIR / "settings.json"
 
 # Keys whose values are API credentials — stored in the encrypted store
 # (OS keyring / secrets.enc), never in settings.json.
-SECRET_KEYS = {"kaggle_key", "custom_key", "mvsep_api_key", "gemini_api_key", "hf_token"}
+SECRET_KEYS = {"kaggle_key", "custom_key", "mvsep_api_key", "gemini_api_key", "hf_token",
+               "openrouter_key", "groq_key"}
 
 DEFAULT_CONFIG = {
     "kaggle_user": "",
@@ -67,5 +68,14 @@ DEFAULT_CONFIG = {
     "model_download_source": "hf",    # hf | github
     "model_dir": "models",            # local dir for downloaded models
     "remember_hf_token": True,
+    # ---- Pluggable LLM provider (aggregation, recommendations, assistant) ----
+    # deepseek (default, paid) | gemini (free) | groq (free) | openrouter (free) | local
+    "llm_provider": "deepseek",
+    "llm_model": "",                  # empty = provider default
+    "llm_base_url": "",               # empty = provider default
+    "openrouter_key": "",             # (secret)
+    "groq_key": "",                   # (secret)
+    "remember_openrouter_key": True,
+    "remember_groq_key": True,
 }
 

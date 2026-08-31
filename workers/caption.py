@@ -296,11 +296,13 @@ class RemoteCaptionWorker(QThread):
             self.msleep(40)
 
     def _run_deepseek_orchestration(self, staged_tracks):
-        api_key = self.config.get("custom_key", "").strip()
-        if not api_key:
-            self.error_occurred.emit("DeepSeek API key missing.")
+        from modules.llm_client import get_client
+        try:
+            _name, _info, client = get_client(self.config)
+        except ValueError as e:
+            self.error_occurred.emit(str(e))
             return
-        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+        model = self.config.get("llm_model", "").strip() or _info.get("model", "deepseek-chat")
         total = len(staged_tracks)
         for idx, (sid, fname, path, complexity) in enumerate(staged_tracks):
             if self._is_cancelled:
@@ -308,7 +310,7 @@ class RemoteCaptionWorker(QThread):
             prompt = f"Generate a detailed music caption for the track '{fname}'."
             try:
                 response = client.chat.completions.create(
-                    model="deepseek-chat",
+                    model=model,
                     messages=[
                         {"role": "system", "content": "You are a prompt engineer for audio models."},
                         {"role": "user", "content": prompt}
@@ -318,10 +320,10 @@ class RemoteCaptionWorker(QThread):
                 )
                 caption = response.choices[0].message.content.strip()
             except Exception as e:
-                caption = f"DeepSeek error: {e}"
+                caption = f"LLM error: {e}"
             self.finished_sample.emit(sid, self._blend(sid, caption))
             pct = int(30 + (70 * (idx + 1) / total))
-            self.progress.emit(pct, f"DeepSeek processed: {fname}")
+            self.progress.emit(pct, f"LLM processed: {fname}")
             self.msleep(40)
 
     def cancel(self):

@@ -513,7 +513,8 @@ class DatasetManager(QMainWindow):
                 self._set_assistant_busy(False)
                 return
         self.assistant_worker = AssistantWorker(
-            api_key, self._assistant_messages, tools=ASSISTANT_TOOLS, parent=self
+            api_key, self._assistant_messages, tools=ASSISTANT_TOOLS, parent=self,
+            config=self.config,
         )
         self.assistant_worker.answer_ready.connect(self.on_assistant_answer)
         self.assistant_worker.tool_requested.connect(self.on_assistant_tool)

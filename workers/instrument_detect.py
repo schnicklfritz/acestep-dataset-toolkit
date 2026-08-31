@@ -50,7 +50,7 @@ class InstrumentRecommendThread(QThread):
             api_key = self.config.get("custom_key", "").strip()
             if not api_key:
                 raise ValueError("DeepSeek API key missing — add it in ⚙ Settings.")
-            orch = DeepSeekMusicOrchestrator(api_key=api_key)
+            orch = DeepSeekMusicOrchestrator(config=self.config)
             raw = orch.recommend_instrument_models(self.instruments_text, self.available)
             recommended = parse_instruments(raw)
             # Keep only names that actually exist in the live MVSEP catalog.

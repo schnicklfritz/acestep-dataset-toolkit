@@ -2,11 +2,28 @@ import os
 from openai import OpenAI
 
 class DeepSeekMusicOrchestrator:
-    def __init__(self, api_key=None, base_url="https://api.deepseek.com/v1"):
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-        if not self.api_key:
-            raise ValueError("DeepSeek API Token missing.")
-        self.client = OpenAI(api_key=self.api_key, base_url=base_url)
+    def __init__(self, api_key=None, base_url=None, config=None):
+        """Provider-aware orchestrator.
+
+        Pass ``config`` to use the configured LLM provider (DeepSeek / Gemini /
+        Groq / OpenRouter / local); otherwise falls back to a direct DeepSeek
+        client with ``api_key``.
+        """
+        if config is not None:
+            from modules.llm_client import get_client
+
+            self.provider, self.info, self.client = get_client(config)
+            self.api_key = (config.get(self.info["key"]) or "").strip()
+            self.model = self.info.get("model") or "deepseek-chat"
+        else:
+            self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+            if not self.api_key:
+                raise ValueError("DeepSeek API Token missing.")
+            self.client = OpenAI(
+                api_key=self.api_key, base_url=base_url or "https://api.deepseek.com/v1"
+            )
+            self.provider = "deepseek"
+            self.model = "deepseek-chat"
 
     def generate_master_dataset_prompt(self, target_genre, global_bpm, segments, spatial_tokens=None, lyrics=None):
         system_prompt = (
@@ -32,7 +49,7 @@ class DeepSeekMusicOrchestrator:
 
         try:
             response = self.client.chat.completions.create(
-                model="deepseek-chat",
+                model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_context}
@@ -42,7 +59,7 @@ class DeepSeekMusicOrchestrator:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"DeepSeek error: {e}")
+            print(f"{self.provider} aggregation error: {e}")
             return ""
 
     def recommend_instrument_models(self, instruments_text, available_models):
@@ -66,7 +83,7 @@ class DeepSeekMusicOrchestrator:
         )
         try:
             response = self.client.chat.completions.create(
-                model="deepseek-chat",
+                model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user},
@@ -76,7 +93,7 @@ class DeepSeekMusicOrchestrator:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"DeepSeek instrument recommendation error: {e}")
+            print(f"{self.provider} instrument recommendation error: {e}")
             return ""
 
 # ============================================================================

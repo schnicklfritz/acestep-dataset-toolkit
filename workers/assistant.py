@@ -186,17 +186,27 @@ class AssistantWorker(QThread):
     tool_requested = Signal(str, str, str)   # name, arguments-json, tool_call_id
     failed = Signal(str)
 
-    def __init__(self, api_key, messages, tools=None, parent=None):
+    def __init__(self, api_key, messages, tools=None, parent=None, config=None):
         super().__init__(parent)
         self.api_key = api_key
+        self.config = config
         self.messages = messages
         self.tools = tools
 
     def run(self):
         try:
-            client = OpenAI(api_key=self.api_key, base_url=DEEPSEEK_BASE_URL)
+            if self.config is not None:
+                from modules.llm_client import get_client
+
+                _name, info, client = get_client(self.config)
+                model = info.get("model") or "deepseek-chat"
+            else:
+                from openai import OpenAI
+
+                client = OpenAI(api_key=self.api_key, base_url=DEEPSEEK_BASE_URL)
+                model = "deepseek-chat"
             kwargs = dict(
-                model="deepseek-chat",
+                model=model,
                 messages=self.messages,
                 temperature=0.4,
                 max_tokens=900,

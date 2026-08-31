@@ -50,11 +50,23 @@ from PySide6.QtGui import QFont, QColor, QDesktopServices
 # NEW: DeepSeek Orchestrator
 # ============================================================================
 class DeepSeekMusicOrchestrator:
-    def __init__(self, api_key=None, base_url="https://api.deepseek.com/v1"):
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-        if not self.api_key:
-            raise ValueError("DeepSeek API Token missing.")
-        self.client = OpenAI(api_key=self.api_key, base_url=base_url)
+    def __init__(self, api_key=None, base_url=None, config=None):
+        """Provider-aware orchestrator (mirrors workers/deepseek.py)."""
+        if config is not None:
+            from modules.llm_client import get_client
+
+            self.provider, self.info, self.client = get_client(config)
+            self.api_key = (config.get(self.info["key"]) or "").strip()
+            self.model = self.info.get("model") or "deepseek-chat"
+        else:
+            self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+            if not self.api_key:
+                raise ValueError("DeepSeek API Token missing.")
+            self.client = OpenAI(
+                api_key=self.api_key, base_url=base_url or "https://api.deepseek.com/v1"
+            )
+            self.provider = "deepseek"
+            self.model = "deepseek-chat"
 
     def generate_master_dataset_prompt(self, target_genre, global_bpm, segments, spatial_tokens=None, lyrics=None):
         system_prompt = (
@@ -80,7 +92,7 @@ class DeepSeekMusicOrchestrator:
 
         try:
             response = self.client.chat.completions.create(
-                model="deepseek-chat",
+                model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_context}
@@ -90,7 +102,7 @@ class DeepSeekMusicOrchestrator:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"DeepSeek error: {e}")
+            print(f"{self.provider} aggregation error: {e}")
             return ""
 
 # ============================================================================
@@ -958,6 +970,55 @@ class DatasetManager(QMainWindow):
         c_form.addRow(save_cloud_btn)
 
         layout.addWidget(cloud_grp)
+
+        llm_grp = QGroupBox("🧠 LLM Provider")
+        llm_form = QFormLayout(llm_grp)
+
+        self.llm_provider_combo = QComboBox()
+        self.llm_provider_combo.addItems([
+            "deepseek (paid, cheap — default)",
+            "gemini (free tier)",
+            "groq (free tier)",
+            "openrouter (free models)",
+            "local (custom endpoint)",
+        ])
+        cur_prov = str(self.config.get("llm_provider", "deepseek") or "deepseek").lower()
+        for i in range(self.llm_provider_combo.count()):
+            if self.llm_provider_combo.itemText(i).startswith(cur_prov):
+                self.llm_provider_combo.setCurrentIndex(i)
+                break
+        self.llm_provider_combo.currentIndexChanged.connect(self._on_llm_provider_changed)
+        llm_form.addRow("Provider:", self.llm_provider_combo)
+
+        self.llm_model_combo = QComboBox()
+        self.llm_model_combo.setEditable(True)
+        llm_form.addRow("Model:", self.llm_model_combo)
+
+        self.llm_base_url_edit = QLineEdit()
+        self.llm_base_url_edit.setPlaceholderText("auto-filled from the provider (editable)")
+        llm_form.addRow("Base URL:", self.llm_base_url_edit)
+
+        self.openrouter_key = QLineEdit(self.config.get("openrouter_key", ""))
+        self.openrouter_key.setEchoMode(QLineEdit.Password)
+        llm_form.addRow("OpenRouter Key:", self.openrouter_key)
+        self.remember_openrouter = QCheckBox("Remember on this device (encrypted)")
+        self.remember_openrouter.setChecked(bool(self.config.get("remember_openrouter_key", True)))
+        llm_form.addRow("", self.remember_openrouter)
+
+        self.groq_key = QLineEdit(self.config.get("groq_key", ""))
+        self.groq_key.setEchoMode(QLineEdit.Password)
+        llm_form.addRow("Groq Key:", self.groq_key)
+        self.remember_groq = QCheckBox("Remember on this device (encrypted)")
+        self.remember_groq.setChecked(bool(self.config.get("remember_groq_key", True)))
+        llm_form.addRow("", self.remember_groq)
+
+        self.llm_note = QLabel("")
+        self.llm_note.setWordWrap(True)
+        self.llm_note.setStyleSheet("color: #aaa; font-size: 9px;")
+        llm_form.addRow(self.llm_note)
+        self._on_llm_provider_changed()
+
+        layout.addWidget(llm_grp)
 
         pipe_grp = QGroupBox("🎛 Pipeline & Model Defaults")
         p_form = QFormLayout(pipe_grp)
@@ -2097,6 +2158,8 @@ class DatasetManager(QMainWindow):
                 ("mvsep_api_key", self.remember_mvsep.isChecked()),
                 ("gemini_api_key", self.remember_gemini.isChecked()),
                 ("hf_token", self.remember_hf.isChecked()),
+                ("openrouter_key", self.remember_openrouter.isChecked()),
+                ("groq_key", self.remember_groq.isChecked()),
             ]
             if checked
         }
@@ -2107,6 +2170,31 @@ class DatasetManager(QMainWindow):
             if text.startswith(key):
                 return key
         return "ace_step"
+
+    def _on_llm_provider_changed(self, *_):
+        """Auto-fill model + base URL + note when the LLM provider changes."""
+        from modules.llm_client import PROVIDERS
+
+        name = self.llm_provider_combo.currentText().split(" ")[0]
+        info = PROVIDERS.get(name, PROVIDERS["deepseek"])
+        self.llm_model_combo.clear()
+        self.llm_model_combo.addItems([
+            info["model"], "deepseek-chat", "gemini-2.5-flash", "gemini-3.7-flash",
+            "llama-3.3-70b-versatile", "meta-llama/llama-3.3-70b-instruct:free",
+        ])
+        cfg_model = (self.config.get("llm_model") or "").strip()
+        self.llm_model_combo.setCurrentText(cfg_model or info["model"])
+        self.llm_base_url_edit.setText(
+            (self.config.get("llm_base_url") or "").strip() or info["base_url"]
+        )
+        if info.get("free") is True:
+            self.llm_note.setText("💡 Free provider. " + info.get("note", ""))
+        elif info.get("free") is False:
+            self.llm_note.setText(info.get("note", ""))
+        else:
+            self.llm_note.setText(
+                "Point the base URL at any OpenAI-compatible server (vLLM / Ollama / llama.cpp / rented GPU)."
+            )
 
     def save_cloud_config(self):
         self.config["kaggle_user"] = self.k_user.text().strip()
@@ -2130,6 +2218,13 @@ class DatasetManager(QMainWindow):
         self.config["hf_token"] = self.hf_token_edit.text().strip()
         self.config["remember_hf_token"] = self.remember_hf.isChecked()
         self.config["model_dir"] = self.model_dir_edit.text().strip() or "models"
+        self.config["llm_provider"] = self.llm_provider_combo.currentText().split(" ")[0]
+        self.config["llm_model"] = self.llm_model_combo.currentText().strip()
+        self.config["llm_base_url"] = self.llm_base_url_edit.text().strip()
+        self.config["openrouter_key"] = self.openrouter_key.text().strip()
+        self.config["remember_openrouter_key"] = self.remember_openrouter.isChecked()
+        self.config["groq_key"] = self.groq_key.text().strip()
+        self.config["remember_groq_key"] = self.remember_groq.isChecked()
         remember = self._remembered_secret_keys()
         try:
             save_config(self.config, remember=remember)

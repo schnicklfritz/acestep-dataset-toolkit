@@ -408,10 +408,10 @@ class StructuralPipelineWorker(QThread):
 
         evidence_text = "\n".join(evidence_lines)
 
-        # Build the DeepSeek prompt
-        api_key = self.config.get("custom_key", "").strip()
-        if not api_key:
-            return "No DeepSeek API key provided."
+        # Build the LLM prompt (provider-aware)
+        from modules.llm_client import provider_key_present
+        if not provider_key_present(self.config):
+            return "No LLM API key provided for the selected provider."
 
         # For now, we use defaults for genre and BPM.
         # In a future version we can read them from the sample metadata.
@@ -440,8 +440,8 @@ class StructuralPipelineWorker(QThread):
                 "evidence": evidence_lines  # we'll pass it separately
             })
 
-        # Instantiate DeepSeek orchestrator
-        orchestrator = DeepSeekMusicOrchestrator(api_key=api_key)
+        # Instantiate the provider-aware LLM orchestrator
+        orchestrator = DeepSeekMusicOrchestrator(config=self.config)
 
         # We'll override the user context building in the orchestrator by
         # calling the method directly and passing the evidence as a string.
