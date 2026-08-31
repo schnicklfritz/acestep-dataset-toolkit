@@ -25,6 +25,7 @@ from modules.config_store import load_config, save_config
 from modules.model_manager import load_catalog, leaderboards, find_model, is_downloaded, remove_model
 from workers.model_manager import ModelDownloadWorker
 from workers.lyrics import TranscribeLyricsWorker
+from workers.rockstar import RockstarLookupWorker
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -796,6 +797,11 @@ class DatasetManager(QMainWindow):
         self.transcribe_btn.setToolTip("Word-aligned lyrics for the selected track. Requires: pip install whisperx")
         self.transcribe_btn.clicked.connect(self.start_lyrics_transcription)
         action_strip.addWidget(self.transcribe_btn)
+
+        self.rockstar_btn = QPushButton("🎸 Rockstar Check")
+        self.rockstar_btn.setToolTip("Check whether multitrack stems are known to exist for this song (metadata only — with a disclaimer).")
+        self.rockstar_btn.clicked.connect(self.start_rockstar_lookup)
+        action_strip.addWidget(self.rockstar_btn)
 
         action_strip.addSpacing(15)
 
@@ -3541,6 +3547,95 @@ class DatasetManager(QMainWindow):
         self.transcribe_btn.setEnabled(True)
         self.status_label.setText("Lyrics transcription failed.")
         QMessageBox.warning(self, "Transcription Failed", str(err))
+
+    # -----------------------------------------------------------------------
+    # Rockstar multitrack-existence lookup (metadata only + disclaimer)
+    # -----------------------------------------------------------------------
+    def start_rockstar_lookup(self):
+        selected = self.get_selected_sample()
+        if not selected:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        base = Path(selected.get("filename", "")).stem.replace("_", " ").replace("-", " - ")
+        parts = [p.strip() for p in base.split(" - ", 1)]
+        artist = parts[0] if len(parts) > 1 else ""
+        song = parts[1] if len(parts) > 1 else parts[0]
+
+        song, ok = QInputDialog.getText(self, "Rockstar Track Check", "Song:", text=song)
+        if not ok or not song.strip():
+            return
+        artist, ok2 = QInputDialog.getText(self, "Rockstar Track Check", "Artist:", text=artist)
+        if not ok2:
+            return
+
+        self.rockstar_btn.setEnabled(False)
+        self.status_label.setText(f"Checking multitrack availability: {song.strip()}…")
+        self.rockstar_worker = RockstarLookupWorker(artist.strip(), song.strip(), parent=self)
+        self.rockstar_worker.finished_ok.connect(self.on_rockstar_result)
+        self.rockstar_worker.failed.connect(self.on_rockstar_failed)
+        self.rockstar_worker.start()
+
+    def on_rockstar_result(self, result):
+        self.rockstar_btn.setEnabled(True)
+        exists = result.get("exists")
+        if exists is None:
+            verdict = "⚠️ Search failed (offline or blocked)"
+        elif exists:
+            verdict = "✅ Multitrack stems appear to EXIST"
+        else:
+            verdict = "❌ No multitrack references surfaced in public indices"
+        lines = [
+            f"<b>{html.escape(result.get('artist', ''))} — {html.escape(result.get('song', ''))}</b>",
+            verdict, "",
+            html.escape(result.get("note", "")),
+        ]
+        matches = result.get("matches") or []
+        if matches:
+            lines.append("")
+            lines.append("References (titles + sites only):")
+            for m in matches:
+                idx = " 📋 index" if m.get("index") else ""
+                lines.append(f"  • {html.escape(m.get('title', ''))} ({html.escape(m.get('domain', '?'))}){idx}")
+        lines.append("")
+        lines.append("This lookup reports existence only — it provides no files and no links.")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Rockstar Track Check")
+        dialog.resize(720, 520)
+        lay = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setHtml("<br>".join(l.replace("\n", "<br>") for l in lines))
+        lay.addWidget(browser, 1)
+        row = QHBoxLayout()
+        disclaim_btn = QPushButton("⚠️ Show Disclaimer (what NOT to do)")
+        disclaim_btn.clicked.connect(self._show_rockstar_disclaimer)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        row.addWidget(disclaim_btn)
+        row.addStretch()
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+        dialog.exec()
+
+    def on_rockstar_failed(self, err):
+        self.rockstar_btn.setEnabled(True)
+        self.status_label.setText("Rockstar check failed.")
+        QMessageBox.warning(self, "Rockstar Check Failed", str(err))
+
+    def _show_rockstar_disclaimer(self):
+        from modules.rockstar_lookup import disclaimer_text
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("⚠️ Disclaimer — What NOT to Do")
+        dialog.resize(760, 620)
+        lay = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setPlainText(disclaimer_text())
+        lay.addWidget(browser, 1)
+        close_btn = QPushButton("I Have Read It and Will Do None of It")
+        close_btn.clicked.connect(dialog.accept)
+        lay.addWidget(close_btn)
+        dialog.exec()
 
     # -----------------------------------------------------------------------
     # Common worker callbacks
