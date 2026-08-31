@@ -29,7 +29,7 @@ from workers.structural import StructuralPipelineWorker, StructuralPipelineBatch
 from ui.mvsep_tab import MVSepTab
 from workers.assistant import (
     AssistantWorker, APP_HELP_TEXT, ASSISTANT_TOOLS, build_system_prompt,
-    summarize_dataset,
+    build_sound_profile, summarize_dataset,
 )
 
 class DatasetManager(QMainWindow):
@@ -569,6 +569,18 @@ class DatasetManager(QMainWindow):
             if name == "detect_instruments":
                 self.detect_instruments_for_separation()
                 return "Started instrument detection on the selected track."
+            if name == "get_dataset_sound_profile":
+                return build_sound_profile(self.dataset)
+            if name == "curate_dataset":
+                target = (args.get("target_sound") or "").strip()
+                if not target:
+                    return "Provide a target_sound (artist/genre/mood) to curate toward."
+                return (
+                    f"TARGET SOUND: {target}\n\n"
+                    f"CURRENT DATASET SOUND PROFILE:\n{build_sound_profile(self.dataset)}\n\n"
+                    "Suggest specific songs/artists/genres to add, and which gaps to fill "
+                    "(instruments, tempo, key, era) so the dataset converges on the target sound."
+                )
             return f"Unknown tool: {name}"
         except Exception as e:  # noqa: BLE001
             return f"Tool error: {e}"

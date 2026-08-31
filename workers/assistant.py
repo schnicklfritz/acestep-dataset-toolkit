@@ -145,6 +145,10 @@ def summarize_dataset(dataset, health_reports=None):
     return "\n".join(lines)
 
 
+# Shared with the MCP server (kept headless — no Qt dependency here).
+from modules.sound_profile import build_sound_profile  # noqa: E402
+
+
 # ---------------------------------------------------------------------------
 # Assistant tools (OpenAI function-calling) — the "plugin interface" that lets
 # the assistant trigger app actions instead of only advising.
@@ -178,6 +182,15 @@ ASSISTANT_TOOLS = [
         "name": "detect_instruments",
         "description": "Start instrument detection for the selected track.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "get_dataset_sound_profile",
+        "description": "Summarize the dataset's current sound (genres, BPM range, keys, instruments, vocal/instrumental mix, caption coverage).",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "curate_dataset",
+        "description": "Recommend what to add so the dataset converges on a target sound. Pass a target_sound (artist/genre/mood); the tool returns the current sound profile + gap hints and you compose the curation plan.",
+        "parameters": {"type": "object", "properties": {
+            "target_sound": {"type": "string", "description": "e.g. 'Black Sabbath / doom blues, downtuned, slow'"}}, "required": ["target_sound"]}}},
 ]
 
 
