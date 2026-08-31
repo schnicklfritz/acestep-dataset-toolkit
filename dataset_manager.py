@@ -664,6 +664,15 @@ class DatasetManager(QMainWindow):
         self.active_worker = None
         self.filter_exceptions_only = False
         self.bypass_warnings = False
+        # Filter/search state (Dataset Studio table)
+        self._table_sample_indices = []
+        self.filter_query = ""
+        self.filter_genre = ""
+        self.filter_key = ""
+        self.filter_bpm_min = 0
+        self.filter_bpm_max = 0
+        self.filter_inst = "all"
+        self.filter_captioned = False
         self.startup_scan_notice_shown = False
         self.kaggle_notebook_unlocked = False  # NEW
 
@@ -921,6 +930,49 @@ class DatasetManager(QMainWindow):
         except Exception as e:  # noqa: BLE001 — playback is best-effort
             print(f"media player unavailable: {e}")
             self.media_player = None
+
+        # --- Filter / search bar ---
+        filter_bar = QHBoxLayout()
+        self.filter_search = QLineEdit()
+        self.filter_search.setPlaceholderText("🔍 Search filename / caption / tag…")
+        self.filter_search.setClearButtonEnabled(True)
+        self.filter_search.textChanged.connect(self.on_filters_changed)
+        self.filter_genre_edit = QLineEdit()
+        self.filter_genre_edit.setPlaceholderText("genre")
+        self.filter_genre_edit.setMaximumWidth(100)
+        self.filter_genre_edit.textChanged.connect(self.on_filters_changed)
+        self.filter_key_edit = QLineEdit()
+        self.filter_key_edit.setPlaceholderText("key")
+        self.filter_key_edit.setMaximumWidth(80)
+        self.filter_key_edit.textChanged.connect(self.on_filters_changed)
+        self.filter_bpm_min_spin = QSpinBox()
+        self.filter_bpm_min_spin.setRange(0, 300)
+        self.filter_bpm_min_spin.setSpecialValueText("min")
+        self.filter_bpm_min_spin.valueChanged.connect(self.on_filters_changed)
+        self.filter_bpm_max_spin = QSpinBox()
+        self.filter_bpm_max_spin.setRange(0, 300)
+        self.filter_bpm_max_spin.setSpecialValueText("max")
+        self.filter_bpm_max_spin.valueChanged.connect(self.on_filters_changed)
+        self.filter_inst_combo = QComboBox()
+        self.filter_inst_combo.addItems(["All", "Instrumental", "Vocal"])
+        self.filter_inst_combo.currentIndexChanged.connect(self.on_filters_changed)
+        self.filter_captioned_check = QCheckBox("Captioned")
+        self.filter_captioned_check.toggled.connect(self.on_filters_changed)
+        clear_filters = QPushButton("✕ Clear")
+        clear_filters.clicked.connect(self.clear_filters)
+        self.filter_count_label = QLabel("")
+        self.filter_count_label.setStyleSheet("color: #aaa;")
+        filter_bar.addWidget(self.filter_search, 1)
+        filter_bar.addWidget(self.filter_genre_edit)
+        filter_bar.addWidget(self.filter_key_edit)
+        filter_bar.addWidget(QLabel("BPM:"))
+        filter_bar.addWidget(self.filter_bpm_min_spin)
+        filter_bar.addWidget(self.filter_bpm_max_spin)
+        filter_bar.addWidget(self.filter_inst_combo)
+        filter_bar.addWidget(self.filter_captioned_check)
+        filter_bar.addWidget(clear_filters)
+        filter_bar.addWidget(self.filter_count_label)
+        studio_layout.addLayout(filter_bar)
 
         # --- Table + Inspector ---
         splitter = QSplitter(Qt.Horizontal)
@@ -2821,9 +2873,11 @@ class DatasetManager(QMainWindow):
 
     def refresh_table(self):
         self.table.setRowCount(0)
+        self._table_sample_indices = []
         exceptions_count = 0
+        shown = 0
 
-        for s in self.dataset["samples"]:
+        for idx, s in enumerate(self.dataset["samples"]):
             sid = s.get("id", "")
             rep = self.health_reports.get(sid, {})
             status = rep.get("status", "Not Audited")
@@ -2834,7 +2888,11 @@ class DatasetManager(QMainWindow):
 
             if self.filter_exceptions_only and not is_exception:
                 continue
+            if not self._matches_filters(s):
+                continue
 
+            shown += 1
+            self._table_sample_indices.append(idx)
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(s.get("filename", "")))
@@ -2857,11 +2915,62 @@ class DatasetManager(QMainWindow):
             self.table.setItem(row, 6, QTableWidgetItem(str(bpm) if bpm else ""))
 
         self.exceptions_view_btn.setText(f"⚠ Exceptions Queue ({exceptions_count})")
+        if hasattr(self, "filter_count_label"):
+            total = len(self.dataset["samples"])
+            self.filter_count_label.setText(f"{shown} of {total} tracks")
+
+    def _matches_filters(self, s):
+        """Apply the search/filter state to a single sample dict."""
+        q = self.filter_query.lower()
+        if q:
+            hay = " ".join([
+                s.get("filename", ""), s.get("caption", ""),
+                s.get("custom_tag", ""), s.get("genre", ""),
+                s.get("keyscale", ""), s.get("lyrics", ""),
+                s.get("formatted_lyrics", ""),
+            ]).lower()
+            if q not in hay:
+                return False
+        if self.filter_genre and self.filter_genre.lower() not in (s.get("genre") or "").lower():
+            return False
+        if self.filter_key and self.filter_key.lower() not in (s.get("keyscale") or "").lower():
+            return False
+        bpm = s.get("bpm") or 0
+        if self.filter_bpm_min and bpm < self.filter_bpm_min:
+            return False
+        if self.filter_bpm_max and bpm > self.filter_bpm_max:
+            return False
+        if self.filter_inst == "instrumental" and not s.get("is_instrumental"):
+            return False
+        if self.filter_inst == "vocal" and s.get("is_instrumental"):
+            return False
+        if self.filter_captioned and not (s.get("caption") or "").strip():
+            return False
+        return True
+
+    def on_filters_changed(self, *_):
+        self.filter_query = self.filter_search.text().strip()
+        self.filter_genre = self.filter_genre_edit.text().strip()
+        self.filter_key = self.filter_key_edit.text().strip()
+        self.filter_bpm_min = self.filter_bpm_min_spin.value()
+        self.filter_bpm_max = self.filter_bpm_max_spin.value()
+        self.filter_inst = self.filter_inst_combo.currentText().lower()
+        self.filter_captioned = self.filter_captioned_check.isChecked()
+        self.refresh_table()
+
+    def clear_filters(self):
+        self.filter_search.clear()
+        self.filter_genre_edit.clear()
+        self.filter_key_edit.clear()
+        self.filter_bpm_min_spin.setValue(0)
+        self.filter_bpm_max_spin.setValue(0)
+        self.filter_inst_combo.setCurrentIndex(0)
+        self.filter_captioned_check.setChecked(False)
 
     def get_selected_sample(self):
         row = self.table.currentRow()
-        if 0 <= row < len(self.dataset["samples"]):
-            return self.dataset["samples"][row]
+        if 0 <= row < len(self._table_sample_indices):
+            return self.dataset["samples"][self._table_sample_indices[row]]
         return None
 
     def on_table_selection_changed(self):
