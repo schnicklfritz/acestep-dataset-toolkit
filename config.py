@@ -46,6 +46,10 @@ DEFAULT_CONFIG = {
     "stem_output_dir": "",               # empty = default location
     "dsp_target_lufs": -14.0,
     "dsp_target_sr": 44100,
+    # ---- Lyrics transcription ----
+    "lyrics_engine": "whisperx",      # whisperx | gemini | acestep_transcriber (experimental)
+    "lyrics_language": "",            # empty = auto-detect
+    "lyrics_initial_prompt": "",      # e.g. "1970s hard rock by Black Sabbath"
     # ---- Caption backend (pluggable providers) ----
     #   ace_step  = ACE-Step captioner (Qwen2.5-Omni) on a Kaggle GPU  [default]
     #   gemini    = Google Gemini (audio-native)

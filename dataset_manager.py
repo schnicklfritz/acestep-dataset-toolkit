@@ -29,6 +29,7 @@ from workers.lyrics import TranscribeLyricsWorker
 from workers.rockstar import RockstarLookupWorker
 from workers.embeddings import EmbeddingWorker
 from workers.export import ExportWorker
+from workers.tag_creator import TagCreatorWorker
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -993,6 +994,11 @@ class DatasetManager(QMainWindow):
         self.rockstar_btn.clicked.connect(self.start_rockstar_lookup)
         action_strip.addWidget(self.rockstar_btn)
 
+        self.tag_creator_btn = QPushButton("🏷 Structural Tag Creator")
+        self.tag_creator_btn.setToolTip("Generate the ACE-Step Caption (global) + Lyrics (time-script) tag blocks for the selected track using the tag vocabulary.")
+        self.tag_creator_btn.clicked.connect(self.start_structural_tag_creator)
+        action_strip.addWidget(self.tag_creator_btn)
+
         action_strip.addSpacing(15)
 
         self.all_view_btn = QPushButton("All Tracks")
@@ -1574,6 +1580,30 @@ class DatasetManager(QMainWindow):
         p_form.addRow(save_pipe_btn)
 
         layout.addWidget(pipe_grp)
+
+        lyrics_grp = QGroupBox("🎤 Lyrics Transcription")
+        lf = QFormLayout(lyrics_grp)
+        lf.setContentsMargins(8, 18, 8, 8)
+        self.lyrics_engine_combo = QComboBox()
+        self.lyrics_engine_combo.addItems([
+            "whisperx (default)", "gemini", "acestep-transcriber (experimental)",
+        ])
+        cur_eng = str(self.config.get("lyrics_engine", "whisperx") or "whisperx").lower()
+        for i in range(self.lyrics_engine_combo.count()):
+            if self.lyrics_engine_combo.itemText(i).lower().startswith(cur_eng):
+                self.lyrics_engine_combo.setCurrentIndex(i)
+                break
+        self.lyrics_engine_combo.setToolTip("Which engine transcribes lyrics. Gemini uses the audio-native Gemini backend; ace-step-transcriber is experimental.")
+        lf.addRow("Engine:", self.lyrics_engine_combo)
+        self.lyrics_language_edit = QLineEdit(self.config.get("lyrics_language", ""))
+        self.lyrics_language_edit.setPlaceholderText("e.g. en (empty = auto-detect)")
+        self.lyrics_language_edit.setToolTip("Force the transcription language (ISO code) or leave empty to auto-detect.")
+        lf.addRow("Language:", self.lyrics_language_edit)
+        self.lyrics_prompt_edit = QLineEdit(self.config.get("lyrics_initial_prompt", ""))
+        self.lyrics_prompt_edit.setPlaceholderText("e.g. 1970s hard rock by Black Sabbath")
+        self.lyrics_prompt_edit.setToolTip("Biases the transcriber toward context: artist, genre, known words (improves accuracy).")
+        lf.addRow("Initial Prompt:", self.lyrics_prompt_edit)
+        layout.addWidget(lyrics_grp)
 
         mm_grp = QGroupBox("🧰 Model Manager")
         mm_form = QFormLayout(mm_grp)
@@ -3363,6 +3393,14 @@ class DatasetManager(QMainWindow):
         self.config["stem_output_dir"] = self.stem_out_edit.text().strip()
         self.config["dsp_target_lufs"] = self.lufs_spin.value()
         self.config["dsp_target_sr"] = self.sr_spin.value()
+        if hasattr(self, "lyrics_engine_combo"):
+            self.config["lyrics_engine"] = {
+                "whisperx (default)": "whisperx",
+                "gemini": "gemini",
+                "acestep-transcriber (experimental)": "acestep_transcriber",
+            }.get(self.lyrics_engine_combo.currentText(), "whisperx")
+            self.config["lyrics_language"] = self.lyrics_language_edit.text().strip()
+            self.config["lyrics_initial_prompt"] = self.lyrics_prompt_edit.text().strip()
         try:
             save_config(self.config, remember=self._remembered_secret_keys())
             self.status_label.setText("Pipeline defaults saved.")
@@ -4344,17 +4382,25 @@ class DatasetManager(QMainWindow):
         if not audio_path or not os.path.exists(audio_path):
             QMessageBox.warning(self, "Missing Audio", "The selected track's audio file is missing on disk.")
             return
-        from modules.lyrics import transcribe_available
-        if not transcribe_available():
-            QMessageBox.information(
-                self, "WhisperX Required",
-                "WhisperX is not installed.\n\n  pip install whisperx\n\n"
-                "(requires torch + transformers.)"
-            )
-            return
+        engine = (self.config.get("lyrics_engine") or "whisperx").strip().lower()
+        if engine == "whisperx":
+            from modules.lyrics import transcribe_available
+            if not transcribe_available():
+                QMessageBox.information(
+                    self, "WhisperX Required",
+                    "WhisperX is not installed.\n\n  pip install whisperx\n\n"
+                    "(requires torch + transformers.)\n\n"
+                    "Or switch the Lyrics Transcription engine to 'gemini' in ⚙ Settings.",
+                )
+                return
+        language = (self.config.get("lyrics_language") or "").strip() or None
+        initial_prompt = (self.config.get("lyrics_initial_prompt") or "").strip() or None
         self.transcribe_btn.setEnabled(False)
         self.status_label.setText(f"Transcribing lyrics for {selected.get('filename', '')}...")
-        self.lyrics_worker = TranscribeLyricsWorker(audio_path, model_size="small", parent=self)
+        self.lyrics_worker = TranscribeLyricsWorker(
+            audio_path, engine=engine, language=language, initial_prompt=initial_prompt,
+            config=self.config, parent=self,
+        )
         self.lyrics_worker.finished_ok.connect(self.on_lyrics_done)
         self.lyrics_worker.failed.connect(self.on_lyrics_failed)
         self.lyrics_worker.start()
@@ -4557,6 +4603,81 @@ class DatasetManager(QMainWindow):
         close_btn.clicked.connect(dialog.accept)
         lay.addWidget(close_btn)
         dialog.exec()
+
+    # -----------------------------------------------------------------------
+    # Structural Tag Creator
+    # -----------------------------------------------------------------------
+    def start_structural_tag_creator(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._table_sample_indices)):
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        index = self._table_sample_indices[row]
+        sample = self.dataset["samples"][index]
+        from modules.llm_client import get_client
+        try:
+            get_client(self.config, role="aggregator")
+        except ValueError as e:
+            QMessageBox.information(
+                self, "LLM Key Needed",
+                f"{e}\n\nSet it in ⚙ Settings → LLM Provider.",
+            )
+            return
+        self.tag_creator_btn.setEnabled(False)
+        self.status_label.setText(f"Generating structural tags for {sample.get('filename', '')}…")
+        self.tag_creator_worker = TagCreatorWorker(index, sample, self.config, parent=self)
+        self.tag_creator_worker.finished_ok.connect(self.on_tag_creator_done)
+        self.tag_creator_worker.failed.connect(self.on_tag_creator_failed)
+        self.tag_creator_worker.start()
+
+    def on_tag_creator_done(self, index, caption, lyrics):
+        self.tag_creator_btn.setEnabled(True)
+        if not (0 <= index < len(self.dataset.get("samples", []))):
+            return
+        sample = self.dataset["samples"][index]
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Structural Tag Creator — {sample.get('filename', '')}")
+        dialog.resize(780, 640)
+        lay = QVBoxLayout(dialog)
+        lay.addWidget(QLabel("<b>Generated Caption (global tags):</b>"))
+        cap_edit = QTextEdit()
+        cap_edit.setPlainText(caption or "(no caption block)")
+        lay.addWidget(cap_edit, 1)
+        lay.addWidget(QLabel("<b>Generated Lyrics (time-script):</b>"))
+        lyr_edit = QTextEdit()
+        lyr_edit.setPlainText(lyrics or "(no lyrics block)")
+        lay.addWidget(lyr_edit, 2)
+        row_btns = QHBoxLayout()
+        cancel_btn = QPushButton("Keep Existing")
+        cancel_btn.clicked.connect(dialog.reject)
+        apply_btn = QPushButton("Apply to Track")
+        apply_btn.clicked.connect(lambda: self._apply_tag_creator_result(sample, cap_edit, lyr_edit, dialog))
+        row_btns.addStretch()
+        row_btns.addWidget(cancel_btn)
+        row_btns.addWidget(apply_btn)
+        lay.addLayout(row_btns)
+        dialog.exec()
+
+    def _apply_tag_creator_result(self, sample, cap_edit, lyr_edit, dialog):
+        caption = cap_edit.toPlainText().strip()
+        lyrics = lyr_edit.toPlainText().strip()
+        self.record_snapshot()
+        if caption:
+            sample["caption"] = caption
+        if lyrics:
+            sample["lyrics"] = lyrics
+            sample["formatted_lyrics"] = lyrics
+        sample["tags_caption"] = caption
+        sample["tags_lyrics"] = lyrics
+        self.status_label.setText("Structural tags applied to the track.")
+        dialog.accept()
+        self.refresh_table()
+        self.on_table_selection_changed()
+
+    def on_tag_creator_failed(self, err):
+        self.tag_creator_btn.setEnabled(True)
+        self.status_label.setText("Structural tag creation failed.")
+        QMessageBox.warning(self, "Tag Creator Failed", str(err))
 
     # -----------------------------------------------------------------------
     # Common worker callbacks
