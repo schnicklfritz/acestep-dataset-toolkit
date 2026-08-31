@@ -5,7 +5,7 @@ from modules.rockstar_lookup import lookup_rockstar_track
 
 
 class RockstarLookupWorker(QThread):
-    finished_ok = Signal(dict)   # lookup result dict
+    finished_ok = Signal(object)   # lookup result dict
     failed = Signal(str)
 
     def __init__(self, artist, song, parent=None):

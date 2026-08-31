@@ -27,6 +27,7 @@ from modules.model_manager import load_catalog, leaderboards, find_model, is_dow
 from workers.model_manager import ModelDownloadWorker
 from workers.lyrics import TranscribeLyricsWorker
 from workers.rockstar import RockstarLookupWorker
+from workers.embeddings import EmbeddingWorker
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -116,6 +117,95 @@ class WaveformWidget(QWidget):
         px = int(self.position_frac * w)
         p.setPen(QPen(QColor(255, 82, 82), 2))
         p.drawLine(px, 0, px, h)
+        p.end()
+
+# ============================================================================
+# Embedding scatter widget
+# ============================================================================
+class ScatterPlotWidget(QWidget):
+    """Renders a 2-D embedding scatter colored by genre, with hover/click."""
+
+    point_clicked = Signal(int)   # sample index
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.points = {}   # index -> (x, y)
+        self.meta = {}     # index -> {"filename", "genre"}
+        self._hover = None
+        self.setMinimumSize(420, 300)
+        self.setMouseTracking(True)
+
+    def set_data(self, coords, meta):
+        self.points = {int(k): (float(x), float(y)) for k, (x, y) in coords.items()}
+        self.meta = {int(k): v for k, v in meta.items()}
+        self._hover = None
+        self.update()
+
+    def _normalize(self):
+        xs = [p[0] for p in self.points.values()] or [0.0]
+        ys = [p[1] for p in self.points.values()] or [0.0]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        rx = (xmax - xmin) or 1.0
+        ry = (ymax - ymin) or 1.0
+        w = max(1, self.width() - 24)
+        h = max(1, self.height() - 24)
+        return {
+            k: (12 + (x - xmin) / rx * w, 12 + (ymax - y) / ry * h)
+            for k, (x, y) in self.points.items()
+        }
+
+    def _find_near(self, pos, tol=12.0):
+        best, bd = None, tol
+        for k, (x, y) in self._normalize().items():
+            d = ((x - pos.x()) ** 2 + (y - pos.y()) ** 2) ** 0.5
+            if d < bd:
+                best, bd = k, d
+        return best
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        k = self._find_near(e.pos())
+        if k is not None and k != self._hover:
+            self._hover = k
+            self.setToolTip(self.meta.get(k, {}).get("filename", str(k)))
+            self.update()
+
+    def mousePressEvent(self, e):  # noqa: N802
+        k = self._find_near(e.pos(), 16)
+        if k is not None:
+            self.point_clicked.emit(k)
+
+    def paintEvent(self, event):  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.palette().color(QPalette.Window))
+        if not self.points:
+            p.setPen(QColor(150, 150, 150))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "Compute embeddings to see the map (similar songs cluster together)")
+            p.end()
+            return
+        palette = [
+            QColor(231, 76, 60), QColor(46, 204, 113), QColor(241, 196, 15),
+            QColor(52, 152, 219), QColor(155, 89, 182), QColor(26, 188, 156),
+            QColor(243, 156, 18), QColor(127, 140, 141),
+        ]
+        genre_color = {}
+        i = 0
+        for m in self.meta.values():
+            g = (m.get("genre") or "").strip() or "?"
+            if g not in genre_color:
+                genre_color[g] = palette[i % len(palette)]
+                i += 1
+        norm = self._normalize()
+        for k, (x, y) in norm.items():
+            g = (self.meta.get(k, {}).get("genre") or "").strip() or "?"
+            p.setPen(Qt.NoPen)
+            p.setBrush(genre_color.get(g, QColor(150, 150, 150)))
+            r = 6 if k != self._hover else 8
+            p.drawEllipse(int(x) - r, int(y) - r, r * 2, r * 2)
+        p.setPen(QColor(150, 150, 150))
+        legend = "  •  ".join(f"<{g}>" for g in genre_color)
+        p.drawText(8, self.height() - 4, legend)
         p.end()
 
 # ============================================================================
@@ -764,6 +854,9 @@ class DatasetManager(QMainWindow):
         tag_tab = QWidget()
         self.init_tag_manager_tab(tag_tab)
 
+        embed_tab = QWidget()
+        self.init_embedding_map_tab(embed_tab)
+
         self.tabs.addTab(struct_tab, "🎶 Structural Pipeline")
         self.tabs.addTab(studio_tab, "🎛 Dataset Studio")
         self.tabs.addTab(settings_tab, "⚙ Settings")
@@ -771,11 +864,14 @@ class DatasetManager(QMainWindow):
         self.tabs.addTab(spatial_tab, "🌐 Spatial Pipeline")
         self.tabs.addTab(assistant_tab, "🤖 AI Assistant")
         self.tabs.addTab(tag_tab, "🏷️ Tag Manager")
+        self.tabs.addTab(embed_tab, "🗺️ Embedding Map")
         self.tag_tab_index = self.tabs.indexOf(tag_tab)
+        self.embed_tab_index = self.tabs.indexOf(embed_tab)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # Set the Dataset Studio tab as the default visible tab
         studio_index = self.tabs.indexOf(studio_tab)
+        self.studio_tab_index = studio_index
         if studio_index != -1:
             self.tabs.setCurrentIndex(studio_index)
 
@@ -1847,6 +1943,89 @@ class DatasetManager(QMainWindow):
                     changed += 1
         self.refresh_tag_manager()
         self.status_label.setText(f"Normalized tag synonyms across {changed} track(s).")
+
+    # -----------------------------------------------------------------------
+    # Embedding Map Tab
+    # -----------------------------------------------------------------------
+    def init_embedding_map_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        controls = QHBoxLayout()
+        self.embed_compute_btn = QPushButton("🧮 Compute Embeddings")
+        self.embed_compute_btn.clicked.connect(self.compute_embeddings)
+        self.embed_backend_label = QLabel("")
+        self.embed_backend_label.setStyleSheet("color: #aaa;")
+        controls.addWidget(self.embed_compute_btn)
+        controls.addWidget(self.embed_backend_label, 1)
+        layout.addLayout(controls)
+
+        self.embed_progress = QProgressBar()
+        self.embed_progress.setVisible(False)
+        layout.addWidget(self.embed_progress)
+
+        self.scatter = ScatterPlotWidget()
+        self.scatter.point_clicked.connect(self._jump_to_track)
+        layout.addWidget(self.scatter, 1)
+
+        self.embed_status = QLabel(
+            "Hover a point for the filename; click to jump to the track in Dataset Studio. "
+            "Similar songs cluster together — outliers and near-duplicates stand out."
+        )
+        self.embed_status.setWordWrap(True)
+        self.embed_status.setStyleSheet("color: #aaa;")
+        layout.addWidget(self.embed_status)
+
+    def compute_embeddings(self):
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.information(self, "Embedding Map", "The dataset is empty — add tracks first.")
+            return
+        from modules.embeddings import backend_label
+
+        self.embed_backend_label.setText(f"Backend: {backend_label()}")
+        self.embed_compute_btn.setEnabled(False)
+        self.embed_progress.setVisible(True)
+        self.embed_progress.setValue(0)
+        self.embed_worker = EmbeddingWorker(samples, parent=self)
+        self.embed_worker.progress.connect(self._on_embed_progress)
+        self.embed_worker.finished_ok.connect(self.on_embeddings_done)
+        self.embed_worker.failed.connect(self.on_embeddings_failed)
+        self.embed_worker.start()
+
+    def _on_embed_progress(self, pct, msg):
+        self.embed_progress.setValue(pct)
+        self.embed_status.setText(msg)
+
+    def on_embeddings_done(self, coords, meta):
+        self.embed_compute_btn.setEnabled(True)
+        self.embed_progress.setVisible(False)
+        self.scatter.set_data(coords, meta)
+        self.embed_status.setText(
+            f"Plotted {len(coords)} track(s). Hover for filename, click to jump to the track."
+        )
+
+    def on_embeddings_failed(self, err):
+        self.embed_compute_btn.setEnabled(True)
+        self.embed_progress.setVisible(False)
+        self.embed_status.setText(f"Embedding failed: {err}")
+
+    def _jump_to_track(self, index):
+        if not (0 <= index < len(self.dataset.get("samples", []))):
+            return
+        try:
+            row = self._table_sample_indices.index(index)
+        except ValueError:
+            self.clear_filters()
+            self.refresh_table()
+            try:
+                row = self._table_sample_indices.index(index)
+            except ValueError:
+                return
+        self.tabs.setCurrentIndex(self.studio_tab_index)
+        self.table.setCurrentCell(row, 0)
+        self.on_table_selection_changed()
 
     def init_advanced_tab(self, parent):
         layout = QVBoxLayout(parent)
