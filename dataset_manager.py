@@ -617,6 +617,22 @@ class DatasetManager(QMainWindow):
         self.redo_stack.clear()
         self.update_undo_redo_buttons()
 
+    def _backup_file(self, path):
+        """Back up any existing file before it is changed or replaced.
+
+        Returns the backup path, or ``None`` if there was nothing to back up.
+        The backup keeps the original untouched (``<name>.bak-<timestamp>``).
+        """
+        if not path or not os.path.exists(path):
+            return None
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = f"{path}.bak-{stamp}"
+        try:
+            shutil.copy2(path, backup)
+            return backup
+        except OSError:
+            return None
+
     def undo(self):
         if self.undo_stack:
             self.redo_stack.append(json.dumps(self.dataset))
@@ -3272,9 +3288,13 @@ class DatasetManager(QMainWindow):
             try:
                 self.on_general_prop_changed()
                 self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
+                backup = self._backup_file(path)  # never replace an existing file silently
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(self.dataset, f, indent=2)
-                self.status_label.setText(f"Saved dataset to {Path(path).name}")
+                msg = f"Saved dataset to {Path(path).name}"
+                if backup:
+                    msg += " (previous file backed up)"
+                self.status_label.setText(msg)
             except Exception as e:
                 QMessageBox.critical(self, "Save Error", str(e))
 
@@ -3414,17 +3434,108 @@ class DatasetManager(QMainWindow):
 
     def on_lyrics_done(self, result):
         self.transcribe_btn.setEnabled(True)
-        lyrics = (result.get("lyrics") or "").strip()
+        new_lyrics = (result.get("lyrics") or "").strip()
         sample = self.get_selected_sample()
-        if sample and lyrics:
-            self.record_snapshot()
-            sample["lyrics"] = lyrics
-            sample["formatted_lyrics"] = lyrics
-            self.status_label.setText("Lyrics transcribed.")
-            self.refresh_table()
-            self.on_table_selection_changed()
-        else:
+        if not sample or not new_lyrics:
             self.status_label.setText("Lyrics transcription returned no text.")
+            return
+        old_lyrics = (sample.get("lyrics") or "").strip()
+        # Never clobber hand-edited lyrics: keep the old value, store the new one.
+        sample["lyrics_transcribed"] = new_lyrics
+        self._write_lyrics_text_files(sample, old_lyrics, new_lyrics)
+        self._review_lyrics_dialog(sample, old_lyrics, new_lyrics)
+        self.refresh_table()
+        self.on_table_selection_changed()
+
+    def _write_lyrics_text_files(self, sample, old_lyrics, new_lyrics):
+        """Write old + new lyrics to sibling .txt files (backing up any that
+        already exist) so the user can diff them externally if they prefer."""
+        audio_path = sample.get("audio_path", "")
+        if audio_path:
+            folder = Path(audio_path).parent
+            base = Path(audio_path).stem
+        else:
+            folder = Path.cwd()
+            base = sample.get("id", "track")
+        old_path = folder / f"{base}_lyrics_old.txt"
+        new_path = folder / f"{base}_lyrics_new.txt"
+        self._backup_file(str(old_path))
+        self._backup_file(str(new_path))
+        try:
+            old_path.write_text(old_lyrics or "(no previous lyrics)", encoding="utf-8")
+            new_path.write_text(new_lyrics, encoding="utf-8")
+        except OSError as e:  # noqa: BLE001
+            print(f"lyrics text files not written: {e}")
+
+    def _review_lyrics_dialog(self, sample, old_lyrics, new_lyrics):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Review Lyrics: {sample.get('filename', '')}")
+        dialog.resize(900, 620)
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "The transcription never overwrites your lyrics. Compare below and choose. "
+            "Existing + transcribed are also saved as .txt files next to the audio."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        split = QSplitter(Qt.Horizontal)
+        old_widget = QWidget(); old_col = QVBoxLayout(old_widget)
+        old_col.addWidget(QLabel("<b>Existing (kept)</b>"))
+        old_box = QTextBrowser(); old_box.setPlainText(old_lyrics or "(no previous lyrics)")
+        old_col.addWidget(old_box)
+        new_widget = QWidget(); new_col = QVBoxLayout(new_widget)
+        new_col.addWidget(QLabel("<b>Transcribed</b>"))
+        new_box = QTextBrowser(); new_box.setPlainText(new_lyrics)
+        new_col.addWidget(new_box)
+        split.addWidget(old_widget)
+        split.addWidget(new_widget)
+        layout.addWidget(split, 1)
+
+        row = QHBoxLayout()
+        diff_btn = QPushButton("Run Diff")
+        diff_btn.clicked.connect(lambda: self._show_lyrics_diff(old_lyrics, new_lyrics))
+        keep_btn = QPushButton("Keep Existing")
+        keep_btn.clicked.connect(dialog.reject)
+        use_btn = QPushButton("Use Transcribed")
+        use_btn.clicked.connect(lambda: self._accept_transcribed_lyrics(sample, new_lyrics, dialog))
+        row.addWidget(diff_btn)
+        row.addStretch()
+        row.addWidget(keep_btn)
+        row.addWidget(use_btn)
+        layout.addLayout(row)
+
+        dialog.exec()
+
+    def _accept_transcribed_lyrics(self, sample, new_lyrics, dialog):
+        self.record_snapshot()
+        sample["lyrics"] = new_lyrics
+        sample["formatted_lyrics"] = new_lyrics
+        self.status_label.setText("Lyrics updated from transcription.")
+        dialog.accept()
+
+    def _show_lyrics_diff(self, old_lyrics, new_lyrics):
+        import difflib
+
+        diff_lines = list(difflib.unified_diff(
+            (old_lyrics or "").splitlines(),
+            (new_lyrics or "").splitlines(),
+            fromfile="existing", tofile="transcribed", lineterm="",
+        ))
+        diff_text = "\n".join(diff_lines) if diff_lines else "(identical)"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Lyrics Diff (unified)")
+        dialog.resize(780, 540)
+        lay = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setPlainText(diff_text)
+        lay.addWidget(browser, 1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        lay.addWidget(close_btn)
+        dialog.exec()
 
     def on_lyrics_failed(self, err):
         self.transcribe_btn.setEnabled(True)
