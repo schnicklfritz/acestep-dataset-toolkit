@@ -40,3 +40,9 @@ dataset_versions/
 
 # Local Backups
 backup/
+
+# Manual legacy snapshots: use Git history/branches instead
+*.old
+
+# Manual legacy snapshots: use Git history/branches instead
+*.old
