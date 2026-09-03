@@ -3145,7 +3145,12 @@ class DatasetManager(QMainWindow):
         Callback handler when the lightweight integrity scan finishes.
         🛡️ Bulletproof Value Check: Uses a strict non-None gate to shield boot timing races.
         """
-        # 🚀 THE CRITICAL FIX: Only call methods if the button has been fully drawn as a PySide6 object
+        notice = getattr(self, "rescan_notice", None)
+        if notice is not None:
+            notice.close()
+            notice.deleteLater()
+            self.rescan_notice = None        
+
         if getattr(self, "scan_btn", None) is not None:
             self.scan_btn.setEnabled(True)
             
@@ -4845,6 +4850,12 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(msg)
 
     def on_worker_error(self, err_msg):
+        notice = getattr(self, "rescan_notice", None)
+        if notice is not None:
+            notice.close()
+            notice.deleteLater()
+            self.rescan_notice = None
+
         self.run_ai_btn.setEnabled(True)
         self.scan_btn.setEnabled(True)
         self.normalize_btn.setEnabled(True)
