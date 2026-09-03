@@ -1,0 +1,117 @@
+"""Kaggle kernel script template for GPU lyrics transcription.
+
+This file is never run directly on your machine — ``workers/kaggle_lyrics.py``
+reads it, string-replaces the {{...}} placeholders below, and pushes the
+result to a private Kaggle GPU kernel. Keep the placeholder names in sync
+with ``run_kaggle_lyrics()``.
+
+Audio-only (no video/moviepy path) since the app only ever hands this
+kernel .wav/.flac/.mp3/.ogg/.m4a files.
+
+Placeholders:
+    {{MODE}}                whisperx | acestep
+    {{LANGUAGE}}             ISO language code, e.g. "en"
+    {{INITIAL_PROMPT}}       optional biasing prompt (may be empty)
+    {{AUDIO_DATASET_PATH}}   /kaggle/input/<slug> — the uploaded audio dataset
+"""
+import json
+import os
+import subprocess
+import sys
+
+MODE = "{{MODE}}"
+LANGUAGE = "{{LANGUAGE}}"
+INITIAL_PROMPT = "{{INITIAL_PROMPT}}"
+AUDIO_DATASET_PATH = "{{AUDIO_DATASET_PATH}}"
+
+OUTPUT_PATH = "/kaggle/working/lyrics_output.json"
+
+
+def _sh(cmd):
+    print(f"LOG: running: {cmd}")
+    subprocess.run(cmd, shell=True, check=True)
+
+
+def _find_audio_file():
+    for name in os.listdir(AUDIO_DATASET_PATH):
+        if name.lower().endswith((".wav", ".flac", ".mp3", ".ogg", ".m4a")):
+            return os.path.join(AUDIO_DATASET_PATH, name)
+    raise FileNotFoundError(f"No audio file found in {AUDIO_DATASET_PATH}")
+
+
+def transcribe_whisperx(audio_file):
+    print("LOG: Installing WhisperX (PyTorch/CUDA already provided by the Kaggle image)...")
+    _sh("apt-get install -y ffmpeg")
+    # Pin to the official upstream repo directly — avoids relying on the
+    # PyPI release lagging behind, matches the confirmed-working install
+    # command from the reference notebook.
+    _sh(f"{sys.executable} -m pip install -q git+https://github.com/m-bain/whisperx.git")
+
+    import torch
+    import whisperx
+    from whisperx.utils import get_writer
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    compute_type = "float16" if device == "cuda" else "int8"
+
+    print(f"LOG: Loading WhisperX large-v3 on {device} ({compute_type})...")
+    model = whisperx.load_model(
+        "large-v3", device, compute_type=compute_type,
+        asr_options={"initial_prompt": INITIAL_PROMPT} if INITIAL_PROMPT else None,
+    )
+
+    audio = whisperx.load_audio(audio_file)
+    result = model.transcribe(audio, batch_size=16, language=LANGUAGE or None)
+
+    # Word-level alignment for cleaner line breaks (skips diarization —
+    # not needed for solo song lyrics, and it avoids a Hugging Face token
+    # dependency).
+    try:
+        align_model, align_metadata = whisperx.load_align_model(
+            language_code=result.get("language", LANGUAGE or "en"), device=device,
+        )
+        result = whisperx.align(
+            result["segments"], align_model, align_metadata, audio, device,
+            return_char_alignments=False,
+        )
+    except Exception as e:  # noqa: BLE001 — alignment is best-effort
+        print(f"LOG: word-level alignment skipped ({e}); using raw segments.")
+
+    # Use WhisperX's own writer for the plain-text dump (matches how the
+    # reference notebook exports), then read it back so we can also emit
+    # our own unified JSON shape for the app to consume.
+    txt_writer = get_writer("txt", "/kaggle/working")
+    txt_writer(result, audio_file, {"max_line_width": None, "max_line_count": None, "highlight_words": False})
+
+    lines = [seg["text"].strip() for seg in result.get("segments", []) if seg.get("text", "").strip()]
+    return "\n".join(lines)
+
+
+def transcribe_acestep(audio_file):
+    # NOTE: fill in the real package/repo for your ACE-Step transcriber here.
+    # This is intentionally left explicit rather than guessed, since the
+    # earlier generated version silently pointed at an empty/incomplete
+    # install URL.
+    raise NotImplementedError(
+        "ACE-Step transcriber install/import is not wired up yet. "
+        "Set the correct pip/git source in transcribe_acestep() before "
+        "selecting the 'acestep' mode."
+    )
+
+
+def main():
+    audio_file = _find_audio_file()
+    print(f"LOG: transcribing {audio_file} with engine={MODE}")
+
+    if MODE == "acestep":
+        lyrics = transcribe_acestep(audio_file)
+    else:
+        lyrics = transcribe_whisperx(audio_file)
+
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+        json.dump({"lyrics": lyrics}, f)
+    print("LOG: Processing completed successfully.")
+
+
+if __name__ == "__main__":
+    main()

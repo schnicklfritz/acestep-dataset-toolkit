@@ -21,7 +21,9 @@ python dataset_manager.py
 
 ## 🚀 The workflow (from scratch)
 
-1. **Dataset Studio** → *Add Audio* (files or a folder). Tracks land in the table.
+1. **Dataset Studio** → *Add Single Song* (one or more files) or *Add Audio
+   Folder* (recursive — every track in a folder and its subfolders, deduped
+   against what's already loaded). Tracks land in the table.
 2. **🔍 Scan & Fill** — health audit: sample rates, channels, clipping, lossy
    cutoffs, **real BPM/key** (librosa + Krumhansl-Schmuckler), loudness spread,
    **near-duplicate detection**, and a quality score with **actionable
@@ -108,6 +110,23 @@ clipping, mono, LUFS outliers, low-confidence BPM/key, small dataset size,
 and **near-duplicate pairs** (librosa fingerprints) — then gives you
 **actionable, copyright-safe recommendations** (e.g. "find a lossless
 master", "remove the duplicate").
+
+The audit is the same "🔍 Scan Audio & Fill Metadata" action (there is no
+separate second audit) — pick **Local (fast)** or **Kaggle GPU** as the audit
+backend. It auto-fills and **locks** **duration / key / BPM / time signature**
+next to each filename; unlock a row with the 🔓 button to edit those values
+inline in the table.
+
+### Dataset Studio tools — bulk rename & non-destructive delete
+* **✏️ Bulk Rename** — rename any scope (all / filtered / selected tracks).
+  Default mode keeps **only the song name with spaces → `_`**
+  (`03 - Artist - Cold Cold Heart.wav` → `Cold_Cold_Heart.wav`); Find &
+  Replace, Prefix, Suffix, and Number-sequence modes are also available, with a
+  live preview. On-disk renames are optional and **always back up the original
+  file first**.
+* **🗑 per-track delete** — removes a track from the dataset after confirmation;
+  the audio file is **backed up to `project_backups/deleted/`**, never
+  destroyed. Every file the toolkit changes or removes is backed up first.
 
 ### AI assistant skills
 The built-in assistant (DeepSeek or any LLM provider) exposes **tools** it can

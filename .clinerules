@@ -1,0 +1,6 @@
+# Context Optimization Rules for DeepSeek Coder
+- NEVER read entire binary or data files like wav, mp3, flac, or zip.
+- You are strictly forbidden from running recursive global searches across 'project_backups/' or 'structural_slices/'. 
+- Do not read any code files in the repository unless explicitly asked by the user or required by the immediate task.
+- If you need to view code structure, always use specific structural tools (like reading only 'widgets.py' or 'orchestrator.py') instead of executing generic shell 'cat' commands on random files.
+- When generating or editing PySide6 UI structures, do not read digital signal processing logic files (e.g., dsp_normalizer, stem_separator) unless actively compiling data hooks between them.

@@ -35,5 +35,8 @@ models/
 # Persistent assistant conversation context
 assistant_context.json
 
+# Dataset version snapshots
+dataset_versions/
+
 # Local Backups
 backup/

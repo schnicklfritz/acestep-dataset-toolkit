@@ -70,6 +70,54 @@ def detect_key(y, sr):
         return ""
 
 
+def detect_timesig(y, sr):
+    """Return a time-signature estimate ('3/4', '4/4') or '' when uncertain.
+
+    Beat-tracks the audio, samples the onset envelope at each beat frame, then
+    measures how "peaked" the downbeat pattern is when the beats are grouped
+    into bars of 3 vs 4. The grouping with the stronger per-position contrast
+    wins. Shift-invariant (doesn't need to know which beat is the downbeat).
+    Returns '' when the clip is too short or neither grouping shows a clear
+    meter — so we never assert a meter we can't hear.
+    """
+    try:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        tempo, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
+        bpm = float(np.atleast_1d(tempo)[0])
+        if bpm <= 0 or len(beats) < 16:
+            return ""
+        beat_env = np.array([
+            onset_env[int(b)] for b in beats
+            if 0 <= int(b) < len(onset_env)
+        ])
+        # Use a multiple of 12 beats so both 3- and 4-beat grouping is exact.
+        n = len(beat_env)
+        m = 12 * (n // 12)
+        if m < 24:
+            return ""
+        seq = beat_env[:m]
+
+        def _salience(k):
+            bars = seq.reshape(-1, k)
+            means = bars.mean(axis=0)
+            denom = float(means.mean()) + 1e-9
+            return float(means.std() / denom)
+
+        s3 = _salience(3)
+        s4 = _salience(4)
+        # Both the absolute contrast and a clear margin over the loser are
+        # required, so we never guess on flat/unclear grooves.
+        if max(s3, s4) < 0.08:
+            return ""
+        if s3 > s4 * 1.15:
+            return "3/4"
+        if s4 > s3 * 1.15:
+            return "4/4"
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def detect_instruments(y, sr, llm_instruments=None):
     """Spectral instrument estimate, merged with the LLM instrument list.
 
@@ -128,7 +176,7 @@ def analyze_audio(audio_path, llm_instruments=None, use_clap=True):
     tags = {
         "bpm": 0,
         "key": "",
-        "timesig": "4/4",
+        "timesig": "",
         "instruments": [],
         "instrumental": False,
     }
@@ -137,6 +185,7 @@ def analyze_audio(audio_path, llm_instruments=None, use_clap=True):
         y_w = _window(y, sr)
         tags["bpm"] = detect_tempo(y_w, sr)
         tags["key"] = detect_key(y_w, sr)
+        tags["timesig"] = detect_timesig(y_w, sr)
         source_names = list(llm_instruments) if llm_instruments else []
         if use_clap:
             hits = tag_instruments_clap(audio_path)

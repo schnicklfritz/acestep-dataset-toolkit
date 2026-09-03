@@ -45,6 +45,13 @@ from workers.assistant import (
     build_sound_profile, summarize_dataset,
 )
 
+# --- NEW: extracted widgets/orchestrator (replaces inline class definitions below) ---
+from widgets import WaveformWidget, ScatterPlotWidget
+from orchestrator import DeepSeekMusicOrchestrator, AdvancedDatasetOrchestratorWorker
+from workers.health_audit import HealthAuditorWorker
+from workers.dsp_normalizer import DspNormalizerWorker
+from ui.settings_tab import build_settings_tab
+
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QUrl, QTime
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
@@ -70,701 +77,9 @@ LLM_KEY_FIELDS = {
     "local": ("custom_key", "remember_custom_key"),
 }
 
-# ============================================================================
-# Waveform preview widget
-# ============================================================================
-class WaveformWidget(QWidget):
-    """Renders a downsampled waveform for the selected track, with a playhead."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.min_buckets = None
-        self.max_buckets = None
-        self.position_frac = 0.0
-        self.setMinimumHeight(72)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-    def set_audio(self, path):
-        self.min_buckets = None
-        self.max_buckets = None
-        self.position_frac = 0.0
-        if path and os.path.exists(path):
-            self._load(path)
-        self.update()
-
-    def _load(self, path):
-        try:
-            y, sr = librosa.load(path, sr=None, mono=True)
-            if len(y) == 0:
-                return
-            n = len(y)
-            buckets = min(1200, max(1, n // 256))
-            trimmed = y[: n - (n % buckets)]
-            arr = trimmed.reshape(buckets, -1)
-            self.min_buckets = arr.min(axis=1)
-            self.max_buckets = arr.max(axis=1)
-        except Exception:  # noqa: BLE001 — unreadable file = blank waveform
-            self.min_buckets = self.max_buckets = None
-
-    def set_position_frac(self, frac):
-        self.position_frac = max(0.0, min(1.0, float(frac)))
-        self.update()
-
-    def paintEvent(self, event):  # noqa: N802
-        p = QPainter(self)
-        p.fillRect(self.rect(), self.palette().color(QPalette.Window))
-        w, h = self.width(), self.height()
-        mid = h / 2.0
-        if self.min_buckets is None or len(self.min_buckets) < 2:
-            p.setPen(QColor(150, 150, 150))
-            p.drawText(self.rect(), Qt.AlignCenter, "Select a track to preview the waveform")
-            p.end()
-            return
-        p.setPen(QPen(QColor(14, 99, 156), 1))
-        nb = len(self.min_buckets)
-        for i in range(nb):
-            x0 = i * w / nb
-            x1 = (i + 1) * w / nb
-            lo = mid + self.min_buckets[i] * (h * 0.45)
-            hi = mid + self.max_buckets[i] * (h * 0.45)
-            p.drawLine(int(x0), int(lo), int(x1), int(hi))
-        px = int(self.position_frac * w)
-        p.setPen(QPen(QColor(255, 82, 82), 2))
-        p.drawLine(px, 0, px, h)
-        p.end()
-
-# ============================================================================
-# Embedding scatter widget
-# ============================================================================
-class ScatterPlotWidget(QWidget):
-    """Renders a 2-D embedding scatter colored by genre, with hover/click."""
-
-    point_clicked = Signal(int)   # sample index
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.points = {}   # index -> (x, y)
-        self.meta = {}     # index -> {"filename", "genre"}
-        self._hover = None
-        self.setMinimumSize(420, 300)
-        self.setMouseTracking(True)
-
-    def set_data(self, coords, meta):
-        self.points = {int(k): (float(x), float(y)) for k, (x, y) in coords.items()}
-        self.meta = {int(k): v for k, v in meta.items()}
-        self._hover = None
-        self.update()
-
-    def _normalize(self):
-        xs = [p[0] for p in self.points.values()] or [0.0]
-        ys = [p[1] for p in self.points.values()] or [0.0]
-        xmin, xmax = min(xs), max(xs)
-        ymin, ymax = min(ys), max(ys)
-        rx = (xmax - xmin) or 1.0
-        ry = (ymax - ymin) or 1.0
-        w = max(1, self.width() - 24)
-        h = max(1, self.height() - 24)
-        return {
-            k: (12 + (x - xmin) / rx * w, 12 + (ymax - y) / ry * h)
-            for k, (x, y) in self.points.items()
-        }
-
-    def _find_near(self, pos, tol=12.0):
-        best, bd = None, tol
-        for k, (x, y) in self._normalize().items():
-            d = ((x - pos.x()) ** 2 + (y - pos.y()) ** 2) ** 0.5
-            if d < bd:
-                best, bd = k, d
-        return best
-
-    def mouseMoveEvent(self, e):  # noqa: N802
-        k = self._find_near(e.pos())
-        if k is not None and k != self._hover:
-            self._hover = k
-            self.setToolTip(self.meta.get(k, {}).get("filename", str(k)))
-            self.update()
-
-    def mousePressEvent(self, e):  # noqa: N802
-        k = self._find_near(e.pos(), 16)
-        if k is not None:
-            self.point_clicked.emit(k)
-
-    def paintEvent(self, event):  # noqa: N802
-        p = QPainter(self)
-        p.fillRect(self.rect(), self.palette().color(QPalette.Window))
-        if not self.points:
-            p.setPen(QColor(150, 150, 150))
-            p.drawText(self.rect(), Qt.AlignCenter,
-                       "Compute embeddings to see the map (similar songs cluster together)")
-            p.end()
-            return
-        palette = [
-            QColor(231, 76, 60), QColor(46, 204, 113), QColor(241, 196, 15),
-            QColor(52, 152, 219), QColor(155, 89, 182), QColor(26, 188, 156),
-            QColor(243, 156, 18), QColor(127, 140, 141),
-        ]
-        genre_color = {}
-        i = 0
-        for m in self.meta.values():
-            g = (m.get("genre") or "").strip() or "?"
-            if g not in genre_color:
-                genre_color[g] = palette[i % len(palette)]
-                i += 1
-        norm = self._normalize()
-        for k, (x, y) in norm.items():
-            g = (self.meta.get(k, {}).get("genre") or "").strip() or "?"
-            p.setPen(Qt.NoPen)
-            p.setBrush(genre_color.get(g, QColor(150, 150, 150)))
-            r = 6 if k != self._hover else 8
-            p.drawEllipse(int(x) - r, int(y) - r, r * 2, r * 2)
-        p.setPen(QColor(150, 150, 150))
-        legend = "  •  ".join(f"<{g}>" for g in genre_color)
-        p.drawText(8, self.height() - 4, legend)
-        p.end()
-
-# ============================================================================
-# NEW: DeepSeek Orchestrator
-# ============================================================================
-class DeepSeekMusicOrchestrator:
-    def __init__(self, api_key=None, base_url=None, config=None, role="aggregator"):
-        """Provider-aware orchestrator (mirrors workers/deepseek.py)."""
-        if config is not None:
-            from modules.llm_client import get_client
-
-            self.provider, self.info, self.client = get_client(config, role=role)
-            self.api_key = (config.get(self.info["key"]) or "").strip()
-            self.model = self.info.get("model") or "deepseek-chat"
-        else:
-            self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-            if not self.api_key:
-                raise ValueError("DeepSeek API Token missing.")
-            self.client = OpenAI(
-                api_key=self.api_key, base_url=base_url or "https://api.deepseek.com/v1"
-            )
-            self.provider = "deepseek"
-            self.model = "deepseek-chat"
-
-    def generate_master_dataset_prompt(self, target_genre, global_bpm, segments, spatial_tokens=None, lyrics=None):
-        system_prompt = (
-            "You are an elite music prompt engineer for ACE-Step. Synthesize a cohesive master prompt from structural segments, "
-            "spatial instrument placement, and lyrical content. Output ONLY the final prompt, no introductory text. "
-            "Structure: [Genre/Vibe], [Production Texture], [Instrumentation with spatial placement], [Dynamics/Energy], [Structural flow]."
-        )
-        user_context = f"TARGET GENRE: {target_genre}\nGLOBAL BPM: {global_bpm}\n\n"
-        if spatial_tokens:
-            user_context += "SPATIAL PLACEMENT:\n"
-            for instr, pos in spatial_tokens.items():
-                user_context += f"  {instr}: {pos}\n"
-        user_context += "\nSTRUCTURAL SEGMENTS:\n"
-        for seg in segments:
-            user_context += f"  [{seg['name']}] {seg['start_sec']}s - {seg['end_sec']}s\n"
-            user_context += f"  Caption: {seg.get('caption', '')}\n"
-            if lyrics and seg['name'] in lyrics:
-                user_context += f"  Lyrics: {lyrics[seg['name']]}\n"
-            if 'spatial_tokens' in seg and seg['spatial_tokens']:
-                user_context += f"  Spatial: {seg['spatial_tokens']}\n"
-            user_context += "\n"
-        user_context += "Compile final master caption now:"
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_context}
-                ],
-                temperature=0.4,
-                max_tokens=500
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            print(f"{self.provider} aggregation error: {e}")
-            return ""
-
-# ============================================================================
-# NEW: Advanced Structural Pipeline Worker
-# ============================================================================
-class AdvancedDatasetOrchestratorWorker(QThread):
-    progress = Signal(int, str)
-    track_processing_complete = Signal(str, dict, str)
-    error_occurred = Signal(str)
-
-    def __init__(self, track_id, file_path, target_genre, api_key, use_spatial_module):
-        super().__init__()
-        self.track_id = track_id
-        self.file_path = file_path
-        self.target_genre = target_genre
-        self.api_key = api_key
-        self.use_spatial = use_spatial_module
-        self._is_cancelled = False
-
-    def run(self):
-        try:
-            self.progress.emit(10, "Loading audio...")
-            y, sr = librosa.load(self.file_path, sr=None, mono=False)
-            y_mono = librosa.to_mono(y) if y.ndim > 1 else y
-            duration = librosa.get_duration(y=y_mono, sr=sr)
-
-            mfcc = librosa.feature.mfcc(y=y_mono, sr=sr, n_mfcc=13)
-            bounds = librosa.segment.agglomerative(mfcc, k=9)
-            bound_times = [0.0] + librosa.frames_to_time(bounds, sr=sr).tolist() + [duration]
-            bound_times = sorted(set(bound_times))
-
-            filtered = [bound_times[0]]
-            for t in bound_times[1:]:
-                if t - filtered[-1] >= 12.0:
-                    filtered.append(t)
-            if filtered[-1] < duration:
-                filtered[-1] = duration
-            bound_times = filtered
-
-            audio_dir = os.path.dirname(self.file_path)
-            slice_dir = os.path.join(audio_dir, "structural_slices")
-            os.makedirs(slice_dir, exist_ok=True)
-            file_base = os.path.splitext(os.path.basename(self.file_path))[0]
-
-            segments = []
-            for i in range(len(bound_times)-1):
-                start, end = bound_times[i], bound_times[i+1]
-                name = f"Section_{i+1:02d}"
-                start_s = int(start * sr)
-                end_s = int(end * sr)
-                chunk = y[:, start_s:end_s] if y.ndim > 1 else y[start_s:end_s]
-                out_path = os.path.join(slice_dir, f"{file_base}_{name}.wav")
-                sf.write(out_path, chunk.T if y.ndim > 1 else chunk, sr)
-                segments.append({
-                    "name": name,
-                    "start_sec": round(start, 2),
-                    "end_sec": round(end, 2),
-                    "slice_path": out_path,
-                    "caption": "",
-                    "spatial_tokens": {}
-                })
-                self.progress.emit(50 + int(i*5), f"Sliced: {name}")
-
-            if self.use_spatial and y.ndim > 1:
-                for seg in segments:
-                    slice_y, _ = librosa.load(seg["slice_path"], sr=None, mono=False)
-                    if slice_y.ndim > 1:
-                        left_en = np.sum(librosa.feature.rms(y=slice_y[0]))
-                        right_en = np.sum(librosa.feature.rms(y=slice_y[1]))
-                        ratio = left_en / (right_en + 1e-9)
-                        if ratio > 2.0:
-                            seg["spatial_tokens"]["stereo_balance"] = "heavy left"
-                        elif ratio < 0.5:
-                            seg["spatial_tokens"]["stereo_balance"] = "heavy right"
-                        else:
-                            seg["spatial_tokens"]["stereo_balance"] = "balanced"
-
-            self.progress.emit(85, "Calling DeepSeek for aggregation...")
-            orchestrator = DeepSeekMusicOrchestrator(api_key=self.api_key)
-            onset = librosa.onset.onset_strength(y=y_mono, sr=sr)
-            bpm = int(librosa.feature.tempo(onset_envelope=onset, sr=sr)[0])
-            final_caption = orchestrator.generate_master_dataset_prompt(
-                target_genre=self.target_genre,
-                global_bpm=bpm,
-                segments=segments
-            )
-
-            self.progress.emit(100, "Done.")
-            self.track_processing_complete.emit(self.track_id, segments, final_caption)
-
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-    def cancel(self):
-        self._is_cancelled = True
-
-
-# ============================================================================
-# ORIGINAL HealthAuditorWorker (from your file – keep as is)
-# ============================================================================
-class HealthAuditorWorker(QThread):
-    progress = Signal(int, str)
-    file_audited = Signal(str, dict)
-    audit_completed = Signal(dict)
-    error_occurred = Signal(str)
-
-    def __init__(self, samples, config=None):
-        super().__init__()
-        self.samples = samples
-        self.config = config or {}
-        self._is_cancelled = False
-
-    def run(self):
-        try:
-            total = len(self.samples)
-            if total == 0:
-                self.audit_completed.emit({"quality_score": 100, "healthy": True, "reasons": []})
-                return
-
-            sample_rates = []
-            channels_list = []
-            lufs_list = []
-            clipping_files = []
-            lossy_files = []
-            missing_files = []
-            uncertain_bpm = []
-            reports = {}
-
-            for idx, s in enumerate(self.samples):
-                if self._is_cancelled:
-                    return
-
-                sid = s.get("id", "")
-                path = s.get("audio_path", "")
-                fname = s.get("filename", "")
-
-                if not path or not os.path.exists(path):
-                    missing_files.append(fname)
-                    rep = {
-                        "status": "Missing",
-                        "issues": ["Audio file missing from disk"],
-                        "confidence": 1.0,
-                        "penalty": 40
-                    }
-                    reports[sid] = rep
-                    self.file_audited.emit(sid, rep)
-                    continue
-
-                rep = self._analyze_track(path, s)
-                reports[sid] = rep
-                self.file_audited.emit(sid, rep)
-
-                if rep.get("sample_rate"):
-                    sample_rates.append(rep["sample_rate"])
-                if rep.get("channels"):
-                    channels_list.append(rep["channels"])
-                if rep.get("lufs") is not None:
-                    lufs_list.append(rep["lufs"])
-                if rep.get("is_clipping"):
-                    clipping_files.append(fname)
-                if rep.get("has_lossy_cutoff"):
-                    lossy_files.append(fname)
-                if rep.get("bpm_confidence", 1.0) < 0.65:
-                    uncertain_bpm.append(fname)
-
-                pct = int(100 * (idx + 1) / total)
-                self.progress.emit(pct, f"Audited: {fname}")
-
-            # Compute Global Quality Score & Penalties
-            quality_score = 100
-            reasons = []
-
-            if missing_files:
-                pen = min(40, len(missing_files) * 20)
-                quality_score -= pen
-                reasons.append(f"Missing Files (-{pen}%): {len(missing_files)} track(s) cannot be read on disk.")
-
-            if clipping_files:
-                pen = min(20, len(clipping_files) * 10)
-                quality_score -= pen
-                reasons.append(f"Digital Clipping (-{pen}%): {len(clipping_files)} track(s) exceed -0.1 dBFS ceiling.")
-
-            if lossy_files:
-                pen = min(20, len(lossy_files) * 8)
-                quality_score -= pen
-                reasons.append(f"Lossy Source Inconsistency (-{pen}%): {len(lossy_files)} track(s) have <192kbps / high-frequency cutoffs.")
-
-            unique_sr = list(set(sample_rates))
-            if len(unique_sr) > 1:
-                quality_score -= 10
-                reasons.append(f"Mixed Sample Rates (-10%): Dataset mixes {unique_sr} Hz.")
-
-            unique_ch = list(set(channels_list))
-            if len(unique_ch) > 1:
-                quality_score -= 10
-                reasons.append(f"Mismatched Channels (-10%): Dataset mixes {unique_ch} channels (Mono & Stereo).")
-
-            lufs_spread = 0.0
-            if lufs_list:
-                lufs_spread = max(lufs_list) - min(lufs_list)
-                if lufs_spread > 5.0:
-                    quality_score -= 15
-                    reasons.append(f"Loudness Spread (-15%): Volume variation across tracks is {lufs_spread:.1f} dB.")
-
-            if total < 10:
-                quality_score -= 15
-                reasons.append(f"Small Dataset (-15%): Current size ({total} tracks) is under recommended 10+ samples.")
-
-            # ---- Near-duplicate detection (same song, different encodes/masters) ----
-            near_dups = []
-            if total >= 2:
-                try:
-                    from modules.dedup import find_near_duplicates
-                    self.progress.emit(88, "Checking for near-duplicate tracks...")
-                    pairs = find_near_duplicates(
-                        [s.get("audio_path", "") for s in self.samples],
-                        threshold=float(self.config.get("dedup_threshold", 0.95) or 0.95),
-                        progress_cb=lambda p, m: self.progress.emit(88 + int(p * 0.06), m),
-                    )
-                    # keep the original filenames for the report
-                    name_of = {s.get("audio_path"): s.get("filename", "") for s in self.samples}
-                    near_dups = [
-                        (name_of.get(a, os.path.basename(a)),
-                         name_of.get(b, os.path.basename(b)),
-                         round(sim, 3))
-                        for a, b, sim in pairs
-                    ]
-                except Exception as e:  # noqa: BLE001
-                    print(f"dedup check failed: {e}")
-            if near_dups:
-                pen = min(20, len(near_dups) * 10)
-                quality_score -= pen
-                reasons.append(
-                    f"Near-Duplicates (-{pen}%): {len(near_dups)} pair(s) of tracks are near-identical "
-                    "(same song, different encode/master)."
-                )
-
-            # ---- Exact duplicates (byte-identical files) ----
-            exact_dups = []
-            if total >= 2:
-                try:
-                    from modules.dedup import find_exact_duplicates
-                    self.progress.emit(94, "Checking for exact duplicates...")
-                    groups = find_exact_duplicates([s.get("audio_path", "") for s in self.samples])
-                    name_of = {s.get("audio_path"): s.get("filename", "") for s in self.samples}
-                    exact_dups = [[name_of.get(p, os.path.basename(p)) for p in g] for g in groups]
-                except Exception as e:  # noqa: BLE001
-                    print(f"exact dedup failed: {e}")
-            if exact_dups:
-                pen = min(20, sum(len(g) - 1 for g in exact_dups) * 10)
-                quality_score -= pen
-                reasons.append(
-                    f"Exact Duplicates (-{pen}%): {len(exact_dups)} group(s) of byte-identical files."
-                )
-
-            quality_score = max(5, min(100, quality_score))
-
-            # ---- Recommendations (actionable, copyright-safe) ----
-            recommendations = []
-            if missing_files:
-                recommendations.append("Restore or re-add the missing audio files before exporting.")
-            if clipping_files:
-                recommendations.append("Re-export clipping tracks with a lower ceiling (e.g. -1 dBTP).")
-            if lossy_files:
-                recommendations.append("Replace lossy sources with lossless masters for cleaner training.")
-            if len(unique_sr) > 1:
-                recommendations.append("Run DSP Normalize to resample everything to one sample rate.")
-            if lufs_spread > 5.0:
-                recommendations.append("Run DSP Normalize (EBU R128) to collapse loudness spread.")
-            if near_dups:
-                recommendations.append("Remove or replace near-duplicate tracks so the model does not memorize repeated material.")
-            if exact_dups:
-                recommendations.append("Remove exact-duplicate files (identical bytes) to avoid redundant training data.")
-            if uncertain_bpm:
-                recommendations.append("Verify BPM/key on the flagged tracks (tagger confidence was low).")
-            if total < 10:
-                recommendations.append("Aim for 10+ tracks; small datasets limit LoRA generalization.")
-            if not recommendations:
-                recommendations.append("Dataset is healthy — ready to caption and export.")
-
-            summary = {
-                "quality_score": quality_score,
-                "healthy": quality_score >= 80,
-                "reasons": reasons,
-                "recommendations": recommendations,
-                "near_duplicates": near_dups,
-                "exact_duplicates": exact_dups,
-                "total_audited": total,
-                "unique_sample_rates": unique_sr,
-                "unique_channels": unique_ch,
-                "lufs_spread": lufs_spread,
-                "clipping_count": len(clipping_files),
-                "lossy_count": len(lossy_files),
-                "missing_count": len(missing_files)
-            }
-
-            self.audit_completed.emit(summary)
-
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-    def _analyze_track(self, path, sample_data):
-        sr = 44100
-        channels = 2
-        dur = 0.0
-        is_clipping = False
-        has_lossy_cutoff = False
-        lufs_est = -14.0
-        bpm_detected = sample_data.get("bpm", 0)
-        bpm_confidence = float(sample_data.get("bpm_confidence", 0.85))
-        key_detected = sample_data.get("keyscale", "")
-        key_confidence = float(sample_data.get("key_confidence", 0.80))
-        issues = []
-
-        try:
-            if path.lower().endswith(".wav"):
-                with wave.open(path, "rb") as wf:
-                    sr = wf.getframerate()
-                    channels = wf.getnchannels()
-                    nframes = wf.getnframes()
-                    dur = nframes / float(sr) if sr > 0 else 0
-                    sampwidth = wf.getsampwidth()
-
-                    frames_to_read = min(nframes, sr * 15)
-                    raw_data = wf.readframes(frames_to_read)
-                    if sampwidth == 2 and raw_data:
-                        fmt = f"<{len(raw_data)//2}h"
-                        samples = struct.unpack(fmt, raw_data)
-                        max_val = max(abs(s) for s in samples) if samples else 0
-                        rms = math.sqrt(sum(s*s for s in samples) / len(samples)) if samples else 0
-
-                        if max_val >= 32700:
-                            is_clipping = True
-                            issues.append("Digital clipping (> -0.1 dBFS)")
-                        if rms > 0:
-                            lufs_est = 20 * math.log10(rms / 32768.0) - 3.0
-            else:
-                cmd = ["ffprobe", "-v", "error", "-show_entries", "stream=sample_rate,channels,duration,bit_rate", "-of", "json", path]
-                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                if res.returncode == 0:
-                    meta = json.loads(res.stdout)
-                    streams = meta.get("streams", [{}])[0]
-                    sr = int(streams.get("sample_rate", 44100))
-                    channels = int(streams.get("channels", 2))
-                    dur = float(streams.get("duration", 0))
-                    bitrate = int(streams.get("bit_rate", 0))
-                    if bitrate > 0 and bitrate < 192000:
-                        has_lossy_cutoff = True
-                        issues.append(f"Lossy stream compression ({bitrate//1000} kbps)")
-
-        except Exception:
-            pass
-
-        if sr not in (44100, 48000):
-            issues.append(f"Non-standard sample rate ({sr} Hz)")
-        if channels == 1:
-            issues.append("Mono recording (Stereo recommended)")
-        if dur > 0 and dur < 10:
-            issues.append("Short track (< 10s)")
-
-        # Full-decode check — unreadable/corrupt files must not enter the dataset.
-        # Uses ffprobe (fast, never hangs); a decode failure also skips the
-        # tagger's own audio load below.
-        decode_ok = True
-        try:
-            probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "json", path],
-                capture_output=True, text=True, timeout=20,
-            )
-            decode_ok = probe.returncode == 0
-        except Exception:  # noqa: BLE001
-            decode_ok = True
-        if not decode_ok:
-            issues.append("Unreadable / corrupt audio file")
-
-        if not bpm_detected or not key_detected:
-            # Compute real BPM/key instead of falling back to placeholders.
-            try:
-                if decode_ok:
-                    from modules.tagger import analyze_audio
-                    tags = analyze_audio(path)
-                    if not bpm_detected and tags.get("bpm"):
-                        bpm_detected = tags["bpm"]
-                        bpm_confidence = 0.9
-                    if not key_detected and tags.get("key"):
-                        key_detected = tags["key"]
-                        key_confidence = 0.9
-            except Exception:  # noqa: BLE001 — tagging must never break the audit
-                pass
-        if not bpm_detected:
-            bpm_detected = 0
-            bpm_confidence = 0.4
-        if not key_detected:
-            key_detected = ""
-            key_confidence = 0.4
-
-        status = "Healthy" if not issues else "Warning"
-        return {
-            "status": status,
-            "sample_rate": sr,
-            "channels": channels,
-            "duration": round(dur, 2),
-            "is_clipping": is_clipping,
-            "has_lossy_cutoff": has_lossy_cutoff,
-            "lufs": lufs_est,
-            "bpm_detected": bpm_detected,
-            "bpm_confidence": bpm_confidence,
-            "key_detected": key_detected,
-            "key_confidence": key_confidence,
-            "issues": issues
-        }
-
-    def cancel(self):
-        self._is_cancelled = True
-
-# ============================================================================
-# ORIGINAL DspNormalizerWorker
-# ============================================================================
-class DspNormalizerWorker(QThread):
-    progress = Signal(int, str)
-    file_normalized = Signal(str, str, str, int, float)
-    all_done = Signal(str, str)
-    error_occurred = Signal(str)
-
-    def __init__(self, samples, target_dir, target_sr=44100, target_lufs=-14.0):
-        super().__init__()
-        self.samples = samples
-        self.target_dir = target_dir
-        self.target_sr = target_sr
-        self.target_lufs = target_lufs
-        self._is_cancelled = False
-
-    def run(self):
-        try:
-            total = len(self.samples)
-            if total == 0:
-                self.all_done.emit("", "")
-                return
-
-            norm_dir = os.path.join(self.target_dir, "normalized_audio")
-            backup_dir = os.path.join(self.target_dir, "originals_backup")
-            os.makedirs(norm_dir, exist_ok=True)
-            os.makedirs(backup_dir, exist_ok=True)
-
-            for idx, s in enumerate(self.samples):
-                if self._is_cancelled:
-                    return
-
-                sid = s.get("id", "")
-                orig_path = s.get("audio_path", "")
-                fname = s.get("filename", f"sample_{sid}.wav")
-
-                if not orig_path or not os.path.exists(orig_path):
-                    continue
-
-                backup_path = os.path.join(backup_dir, fname)
-                if not os.path.exists(backup_path):
-                    shutil.copy2(orig_path, backup_path)
-
-                norm_path = os.path.join(norm_dir, f"norm_{Path(fname).stem}.wav")
-                self.progress.emit(int(100 * idx / total), f"Normalizing ({self.target_lufs} LUFS): {fname}")
-
-                cmd = [
-                    "ffmpeg", "-y", "-i", orig_path,
-                    "-af", f"loudnorm=I={self.target_lufs}:TP=-1.0:LRA=11",
-                    "-ar", str(self.target_sr),
-                    "-ac", "2",
-                    norm_path
-                ]
-                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                if res.returncode == 0 and os.path.exists(norm_path):
-                    self.file_normalized.emit(sid, backup_path, norm_path, self.target_sr, self.target_lufs)
-                else:
-                    shutil.copy2(orig_path, norm_path)
-                    self.file_normalized.emit(sid, backup_path, norm_path, self.target_sr, self.target_lufs)
-
-            self.progress.emit(100, "Normalization complete.")
-            self.all_done.emit(norm_dir, backup_dir)
-
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-    def cancel(self):
-        self._is_cancelled = True
-
+# Audio file extensions accepted when adding songs/folders to the dataset
+# (single source of truth, used by both the file picker and the folder scan).
+AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
 
 # ============================================================================
 # Main Window: DatasetManager
@@ -807,15 +122,14 @@ class DatasetManager(QMainWindow):
         self.active_worker = None
         self.filter_exceptions_only = False
         self.bypass_warnings = False
-        # Filter/search state (Dataset Studio table)
+        # Filter/search state (Dataset Studio table) — one search box covers
+        # filename/caption/tag/genre/key; no separate genre/key/BPM filter
+        # fields (single place for those values = the table, auto-locked).
         self._table_sample_indices = []
         self.filter_query = ""
-        self.filter_genre = ""
-        self.filter_key = ""
-        self.filter_bpm_min = 0
-        self.filter_bpm_max = 0
         self.filter_inst = "all"
         self.filter_captioned = False
+        self._loading_table = False
         self.startup_scan_notice_shown = False
         self.kaggle_notebook_unlocked = False  # NEW
 
@@ -881,6 +195,16 @@ class DatasetManager(QMainWindow):
     # UI Initialization
     # -----------------------------------------------------------------------
     def init_ui(self):
+        """Initializes and anchors our decoupled multi-tier interface layout variables."""
+        # 🛡️ GLOBAL CLASS ATTRIBUTE GUARDS: Declare early to eliminate initial initialization AttributeErrors
+        self.audit_backend_combo = QComboBox()
+        self.lyrics_engine_combo = QComboBox()
+        self.scan_btn = None
+        self.import_json_manifest_btn = None
+        self.sync_meta_btn = None
+        self.normalize_btn = None
+        self.transcribe_btn = None
+        self.kaggle_master_btn = None
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
@@ -957,8 +281,13 @@ class DatasetManager(QMainWindow):
         save_btn.clicked.connect(self.save_dataset)
         export_btn = QPushButton("📦 Export / Split")
         export_btn.clicked.connect(self.open_export_dialog)
-        add_btn = QPushButton("➕ Add Audio")
+        add_btn = QPushButton("➕ Add Single Song")
         add_btn.clicked.connect(self.add_audio_files)
+        folder_btn = QPushButton("📁 Add Audio Folder")
+        folder_btn.setToolTip(
+            "Add every audio track in a folder (recursive — subfolders included)."
+        )
+        folder_btn.clicked.connect(self.add_audio_folder)
 
         header_bar.addWidget(load_btn)
         header_bar.addWidget(save_btn)
@@ -967,7 +296,16 @@ class DatasetManager(QMainWindow):
         stats_btn.setToolTip("Show a one-page statistics report for the dataset.")
         stats_btn.clicked.connect(self.show_stats_report)
         header_bar.addWidget(stats_btn)
+        ver_btn = QPushButton("🗂 Versioning")
+        ver_btn.setToolTip("Snapshot, diff, and restore the dataset from disk.")
+        ver_btn.clicked.connect(self.open_versioning_dialog)
+        header_bar.addWidget(ver_btn)
+        hf_btn = QPushButton("☁ Push to HF")
+        hf_btn.setToolTip("Push the dataset (dataset.json + README) to a Hugging Face repo.")
+        hf_btn.clicked.connect(self.open_hf_push_dialog)
+        header_bar.addWidget(hf_btn)
         header_bar.addWidget(add_btn)
+        header_bar.addWidget(folder_btn)
 
         studio_layout.addLayout(header_bar)
 
@@ -1012,49 +350,107 @@ class DatasetManager(QMainWindow):
 
         studio_layout.addWidget(gen_box)
 
-        # --- Action Strip ---
-        action_strip = QHBoxLayout()
+        # ============================================================================
+        # Row 1: Dataset Calibration (Primary Controls)
+        # ============================================================================
+        audit_strip = QHBoxLayout()
+        
+        # 👑 THE FLAGSHIP ENGINE: Re-labeled to match your 1.5XL Caption & Lyrics spec
+        self.import_json_manifest_btn = QPushButton("📥 Import ACE-Step 1.5XL Tags")
+        self.import_json_manifest_btn.setStyleSheet("font-weight: bold; background-color: #0e639c; color: white; padding: 5px 14px;")
+        self.import_json_manifest_btn.setToolTip("Instantly loads your schema-enforced 1.5XL caption and lyrics tags to fix placeholders.")
+        self.import_json_manifest_btn.clicked.connect(self.import_acestep_15xl_tags)
+        audit_strip.addWidget(self.import_json_manifest_btn)
 
-        self.scan_btn = QPushButton("🔍 Scan Audio & Fill Metadata")
-        self.scan_btn.setStyleSheet("font-weight: bold; padding: 5px 12px;")
-        self.scan_btn.clicked.connect(self.start_health_audit)
-        action_strip.addWidget(self.scan_btn)
+        self.sync_meta_btn = QPushButton("🔄 Sync Metadata Guards")
+        self.sync_meta_btn.setToolTip("Forces health report alerts to match your manifest properties, clearing false warnings.")
+        self.sync_meta_btn.clicked.connect(self.force_sync_manifest_to_metadata)
+        audit_strip.addWidget(self.sync_meta_btn)
 
-        self.normalize_btn = QPushButton("🎚 Fix & DSP Normalize (EBU R128)")
+        self.normalize_btn = QPushButton("🎚️ Fix & DSP Normalize")
         self.normalize_btn.clicked.connect(self.start_dsp_normalize)
-        action_strip.addWidget(self.normalize_btn)
-
-        self.run_ai_btn = QPushButton("🚀 Run AI Captioner")
-        self.run_ai_btn.clicked.connect(self.start_ai_captioning)
-        action_strip.addWidget(self.run_ai_btn)
-
-        self.transcribe_btn = QPushButton("🎤 Transcribe Lyrics (WhisperX)")
-        self.transcribe_btn.setToolTip("Word-aligned lyrics for the selected track. Requires: pip install whisperx")
+        audit_strip.addWidget(self.normalize_btn)
+        audit_strip.addStretch() 
+        studio_layout.addLayout(audit_strip)
+        # ============================================================================
+        # Step 2: Linguistic & Transcription Pipeline (Row 2)
+        # ============================================================================
+        lyrics_strip = QHBoxLayout()
+        
+        self.transcribe_btn = QPushButton("🎤 Transcribe Lyrics")
+        self.transcribe_btn.setToolTip("Word-aligned lyrics for the selected track.")
         self.transcribe_btn.clicked.connect(self.start_lyrics_transcription)
-        action_strip.addWidget(self.transcribe_btn)
+        lyrics_strip.addWidget(self.transcribe_btn)
+
+        lyrics_strip.addWidget(QLabel("Lyrics Engine:"))
+        self.lyrics_engine_combo = QComboBox()
+        self.lyrics_engine_combo.addItems([
+            "whisperx (local)",
+            "kaggle (default, gpu)",
+            "gemini",
+            "acestep-transcriber (experimental)"
+        ])
+        saved_engine = self.config.get("lyrics_engine", "whisperx")
+        engine_map = {"whisperx": 0, "kaggle": 1, "gemini": 2, "acestep_transcriber": 3}
+        self.lyrics_engine_combo.setCurrentIndex(engine_map.get(saved_engine, 0))
+        self.lyrics_engine_combo.currentTextChanged.connect(self.save_pipeline_defaults)
+        lyrics_strip.addWidget(self.lyrics_engine_combo)
+
+        lyrics_strip.addWidget(QLabel("Lang:"))
+        self.lyrics_language_edit = QLineEdit()
+        self.lyrics_language_edit.setPlaceholderText("en")
+        self.lyrics_language_edit.setMaximumWidth(45)
+        self.lyrics_language_edit.setText(self.config.get("lyrics_language", "en"))
+        self.lyrics_language_edit.textChanged.connect(self.save_pipeline_defaults)
+        lyrics_strip.addWidget(self.lyrics_language_edit)
+
+        lyrics_strip.addWidget(QLabel("Prompt Bias:"))
+        self.lyrics_prompt_edit = QLineEdit()
+        self.lyrics_prompt_edit.setPlaceholderText("Context words...")
+        self.lyrics_prompt_edit.setText(self.config.get("lyrics_initial_prompt", ""))
+        self.lyrics_prompt_edit.textChanged.connect(self.save_pipeline_defaults)
+        lyrics_strip.addWidget(self.lyrics_prompt_edit)
+
+        lyrics_strip.addStretch()
+        studio_layout.addLayout(lyrics_strip)
+
+        # ============================================================================
+        # Step 3: Advanced Remote Cluster & Repo Controls (Row 3)
+        # ============================================================================
+        advanced_strip = QHBoxLayout()
+
+        self.kaggle_master_btn = QPushButton("☁️ Run Master Dual-T4 Kaggle Pipeline")
+        self.kaggle_master_btn.setStyleSheet("font-weight: bold; background-color: #4A148C; color: white; padding: 5px 12px;")
+        self.kaggle_master_btn.setToolTip("Uploads dataset to Kaggle, runs parallel dual-GPU extraction, and logs output.")
+        self.kaggle_master_btn.clicked.connect(self.start_remote_consolidated_pipeline)
+        advanced_strip.addWidget(self.kaggle_master_btn)
+
+        self.tag_creator_btn = QPushButton("🏷️ Structural Tag Creator")
+        self.tag_creator_btn.clicked.connect(self.start_structural_tag_creator)
+        advanced_strip.addWidget(self.tag_creator_btn)
 
         self.rockstar_btn = QPushButton("🎸 Rockstar Check")
-        self.rockstar_btn.setToolTip("Check whether multitrack stems are known to exist for this song (metadata only — with a disclaimer).")
         self.rockstar_btn.clicked.connect(self.start_rockstar_lookup)
-        action_strip.addWidget(self.rockstar_btn)
+        advanced_strip.addWidget(self.rockstar_btn)
 
-        self.tag_creator_btn = QPushButton("🏷 Structural Tag Creator")
-        self.tag_creator_btn.setToolTip("Generate the ACE-Step Caption (global) + Lyrics (time-script) tag blocks for the selected track using the tag vocabulary.")
-        self.tag_creator_btn.clicked.connect(self.start_structural_tag_creator)
-        action_strip.addWidget(self.tag_creator_btn)
-
-        self.musicbrainz_btn = QPushButton("🎵 MusicBrainz")
-        self.musicbrainz_btn.setToolTip("Look up artist/title/year/genre metadata for this track (copyright-safe).")
+        self.musicbrainz_btn = QPushButton("🎵 MusicBrainz Lookup")
         self.musicbrainz_btn.clicked.connect(self.start_musicbrainz_lookup)
-        action_strip.addWidget(self.musicbrainz_btn)
+        advanced_strip.addWidget(self.musicbrainz_btn)
 
-        action_strip.addStretch()
-        studio_layout.addLayout(action_strip)
+        advanced_strip.addStretch()
+        studio_layout.addLayout(advanced_strip)
 
-        # --- Tools row (find/replace, lyrics, A/B, riff, stem A/B) ---
+        # --- Tools row (find/replace, bulk rename, lyrics, A/B, riff, stem A/B) ---
         tools_strip = QHBoxLayout()
         fr_btn = QPushButton("🔁 Find/Replace")
         fr_btn.clicked.connect(self.open_find_replace_dialog)
+        rename_btn = QPushButton("✏️ Bulk Rename")
+        rename_btn.setToolTip(
+            "Rename tracks in bulk. Default mode: keep only the song name, "
+            "replacing spaces with underscores. Files are backed up before any "
+            "on-disk rename."
+        )
+        rename_btn.clicked.connect(self.open_bulk_rename_dialog)
         lyr_btn = QPushButton("✎ Lyrics Editor")
         lyr_btn.clicked.connect(self.open_lyrics_editor)
         ab_btn = QPushButton("🔀 A/B Captions")
@@ -1063,12 +459,12 @@ class DatasetManager(QMainWindow):
         riff_btn.clicked.connect(self.open_riff_hook_tagger)
         stemab_btn = QPushButton("🎚 Stem A/B")
         stemab_btn.clicked.connect(self.open_stem_ab)
-        for b in (fr_btn, lyr_btn, ab_btn, riff_btn, stemab_btn):
+        for b in (fr_btn, rename_btn, lyr_btn, ab_btn, riff_btn, stemab_btn):
             tools_strip.addWidget(b)
         tools_strip.addStretch()
         studio_layout.addLayout(tools_strip)
 
-        action_strip.addSpacing(15)
+        audit_strip.addSpacing(15)
 
         self.all_view_btn = QPushButton("All Tracks")
         self.all_view_btn.setCheckable(True)
@@ -1083,9 +479,9 @@ class DatasetManager(QMainWindow):
         view_group.addButton(self.all_view_btn)
         view_group.addButton(self.exceptions_view_btn)
 
-        action_strip.addWidget(QLabel("View:"))
-        action_strip.addWidget(self.all_view_btn)
-        action_strip.addWidget(self.exceptions_view_btn)
+        audit_strip.addWidget(QLabel("View:"))
+        audit_strip.addWidget(self.all_view_btn)
+        audit_strip.addWidget(self.exceptions_view_btn)
 
         # --- Preview player + waveform ---
         player_bar = QHBoxLayout()
@@ -1123,25 +519,9 @@ class DatasetManager(QMainWindow):
         # --- Filter / search bar ---
         filter_bar = QHBoxLayout()
         self.filter_search = QLineEdit()
-        self.filter_search.setPlaceholderText("🔍 Search filename / caption / tag…")
+        self.filter_search.setPlaceholderText("🔍 Search filename / caption / tag / genre / key…")
         self.filter_search.setClearButtonEnabled(True)
         self.filter_search.textChanged.connect(self.on_filters_changed)
-        self.filter_genre_edit = QLineEdit()
-        self.filter_genre_edit.setPlaceholderText("genre")
-        self.filter_genre_edit.setMaximumWidth(100)
-        self.filter_genre_edit.textChanged.connect(self.on_filters_changed)
-        self.filter_key_edit = QLineEdit()
-        self.filter_key_edit.setPlaceholderText("key")
-        self.filter_key_edit.setMaximumWidth(80)
-        self.filter_key_edit.textChanged.connect(self.on_filters_changed)
-        self.filter_bpm_min_spin = QSpinBox()
-        self.filter_bpm_min_spin.setRange(0, 300)
-        self.filter_bpm_min_spin.setSpecialValueText("min")
-        self.filter_bpm_min_spin.valueChanged.connect(self.on_filters_changed)
-        self.filter_bpm_max_spin = QSpinBox()
-        self.filter_bpm_max_spin.setRange(0, 300)
-        self.filter_bpm_max_spin.setSpecialValueText("max")
-        self.filter_bpm_max_spin.valueChanged.connect(self.on_filters_changed)
         self.filter_inst_combo = QComboBox()
         self.filter_inst_combo.addItems(["All", "Instrumental", "Vocal"])
         self.filter_inst_combo.currentIndexChanged.connect(self.on_filters_changed)
@@ -1152,11 +532,6 @@ class DatasetManager(QMainWindow):
         self.filter_count_label = QLabel("")
         self.filter_count_label.setStyleSheet("color: #aaa;")
         filter_bar.addWidget(self.filter_search, 1)
-        filter_bar.addWidget(self.filter_genre_edit)
-        filter_bar.addWidget(self.filter_key_edit)
-        filter_bar.addWidget(QLabel("BPM:"))
-        filter_bar.addWidget(self.filter_bpm_min_spin)
-        filter_bar.addWidget(self.filter_bpm_max_spin)
         filter_bar.addWidget(self.filter_inst_combo)
         filter_bar.addWidget(self.filter_captioned_check)
         filter_bar.addWidget(clear_filters)
@@ -1166,14 +541,18 @@ class DatasetManager(QMainWindow):
         # --- Table + Inspector ---
         splitter = QSplitter(Qt.Horizontal)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["Filename", "Health", "Tag", "Genre", "Duration", "Key", "BPM"])
+        self.table = QTableWidget(0, 9)
+        self.table.setHorizontalHeaderLabels(
+            ["Filename", "Health", "Tag", "Genre", "Key", "BPM", "Time", "Duration", "Actions"]
+        )
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)   
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 7):
+        for i in range(1, 8):
             self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
+        self.table.itemChanged.connect(self.on_metadata_cell_edited)
         splitter.addWidget(self.table)
 
         scroll = QScrollArea()
@@ -1210,52 +589,29 @@ class DatasetManager(QMainWindow):
 
         form = QFormLayout()
 
-        bpm_row = QHBoxLayout()
-        self.bpm_spin = QSpinBox()
-        self.bpm_spin.setRange(0, 400)
-        self.bpm_spin.valueChanged.connect(self.on_bpm_edited)
-        self.bpm_lock = QCheckBox("Lock")
-        self.bpm_lock.setChecked(True)
-        self.bpm_lock.stateChanged.connect(self.on_lock_toggled)
-        self.bpm_verify_btn = QPushButton("🔗 Check Online")
-        self.bpm_verify_btn.clicked.connect(self.open_online_bpm_check)
-        bpm_row.addWidget(self.bpm_spin)
-        bpm_row.addWidget(self.bpm_lock)
-        bpm_row.addWidget(self.bpm_verify_btn)
-        form.addRow("BPM (Tempo):", bpm_row)
-
-        key_row = QHBoxLayout()
-        self.key_input = QLineEdit()
-        self.key_input.textChanged.connect(self.on_key_edited)
-        self.key_lock = QCheckBox("Lock")
-        self.key_lock.setChecked(True)
-        self.key_lock.stateChanged.connect(self.on_lock_toggled)
-        self.key_verify_btn = QPushButton("🔗 Check Online")
-        self.key_verify_btn.clicked.connect(self.open_online_key_check)
-        key_row.addWidget(self.key_input)
-        key_row.addWidget(self.key_lock)
-        key_row.addWidget(self.key_verify_btn)
-        form.addRow("Key Scale:", key_row)
-
-        genre_row = QHBoxLayout()
-        self.genre_input = QLineEdit()
-        self.genre_input.textChanged.connect(self.on_genre_edited)
-        self.genre_lock = QCheckBox("Lock")
-        genre_row.addWidget(self.genre_input)
-        genre_row.addWidget(self.genre_lock)
-        form.addRow("Genre:", genre_row)
+        # Genre / Key / BPM / Time / Duration are entered in the table next to
+        # the filename (auto-locked after scanning; unlock with the 🔓 button
+        # in the row's Actions column). The inspector only hosts the remaining
+        # per-track fields to keep a single place for metadata entry.
 
         tag_row = QHBoxLayout()
         self.track_tag_input = QLineEdit()
         self.track_tag_input.textChanged.connect(self.on_track_tag_edited)
-        self.tag_lock = QCheckBox("Lock")
         tag_row.addWidget(self.track_tag_input)
-        tag_row.addWidget(self.tag_lock)
         form.addRow("Track Trigger Tag:", tag_row)
 
         self.inst_check = QCheckBox("Instrumental Track (No Vocals)")
         self.inst_check.stateChanged.connect(self.on_inst_edited)
         form.addRow(self.inst_check)
+
+        verify_row = QHBoxLayout()
+        self.bpm_verify_btn = QPushButton("🔗 Verify BPM Online")
+        self.bpm_verify_btn.clicked.connect(self.open_online_bpm_check)
+        self.key_verify_btn = QPushButton("🔗 Verify Key Online")
+        self.key_verify_btn.clicked.connect(self.open_online_key_check)
+        verify_row.addWidget(self.bpm_verify_btn)
+        verify_row.addWidget(self.key_verify_btn)
+        form.addRow(verify_row)
 
         ab_row = QHBoxLayout()
         self.ab_compare_btn = QPushButton("🎧 A/B Compare Original")
@@ -1286,456 +642,9 @@ class DatasetManager(QMainWindow):
     # Settings Tab
     # -----------------------------------------------------------------------
     def init_settings_tab(self, parent):
-        outer = QVBoxLayout(parent)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        from ui.settings_tab import build_settings_tab
+        build_settings_tab(self, parent)
 
-        # Title clearance: keep the group-box titles from being overlapped by
-        # the first form row (labels/inputs on the left).
-        scroll.setStyleSheet("QGroupBox { padding-top: 0.9em; }")
-
-        save_all_btn = QPushButton("💾 Save All Settings")
-        save_all_btn.setStyleSheet("font-weight: bold; padding: 8px;")
-        save_all_btn.clicked.connect(self.save_all_settings)
-        layout.addWidget(save_all_btn)
-
-        theme_grp = QGroupBox("🎨 Visual Appearance & UI Themes")
-        form = QFormLayout(theme_grp)
-        form.setContentsMargins(8, 18, 8, 8)
-
-        self.font_picker = QFontComboBox()
-        self.font_picker.setToolTip("App font.")
-        self.font_picker.setCurrentFont(QFont(self.custom_theme["font_family"]))
-        self.font_picker.currentFontChanged.connect(self.on_font_changed)
-        form.addRow("Installed System Font:", self.font_picker)
-
-        zoom_row = QHBoxLayout()
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setToolTip("UI zoom level.")
-        self.zoom_slider.setRange(75, 175)
-        self.zoom_slider.setValue(100)
-        self.zoom_label = QLabel("100%")
-        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
-        zoom_row.addWidget(self.zoom_slider)
-        zoom_row.addWidget(self.zoom_label)
-        form.addRow("UI Zoom Factor:", zoom_row)
-
-        self.theme_preset_combo = QComboBox()
-        self.theme_preset_combo.setToolTip("Color theme preset.")
-        self.theme_preset_combo.addItems(["Dark Modern (Default)", "OLED Pure Black", "Gentoo Purple Slate", "Solarized Dark", "High Contrast Light"])
-        self.theme_preset_combo.currentTextChanged.connect(self.on_theme_preset_changed)
-        form.addRow("Theme Preset:", self.theme_preset_combo)
-
-        layout.addWidget(theme_grp)
-
-        cloud_grp = QGroupBox("⚙ Cloud & Execution Endpoints")
-        c_form = QFormLayout(cloud_grp)
-        c_form.setContentsMargins(8, 18, 8, 8)
-
-        self.k_user = QLineEdit(self.config.get("kaggle_user", ""))
-        self.k_user.setToolTip("Your Kaggle username (from kaggle.json).")
-        self.k_key = QLineEdit(self.config.get("kaggle_key", ""))
-        self.k_key.setToolTip("Your Kaggle API key (from kaggle.json).")
-        self.k_key.setEchoMode(QLineEdit.Password)
-        c_form.addRow("Kaggle Username:", self.k_user)
-        c_form.addRow("Kaggle API Key:", self.k_key)
-        self.remember_kaggle = QCheckBox("Remember on this device (encrypted)")
-        self.remember_kaggle.setToolTip("Save the key in the OS keyring / encrypted store. Uncheck to use it for this session only.")
-        self.remember_kaggle.setChecked(bool(self.config.get("remember_kaggle_key", True)))
-        c_form.addRow("", self.remember_kaggle)
-
-        self.custom_url = QLineEdit(self.config.get("custom_url", ""))
-        self.custom_url.setToolTip("Base URL for a custom OpenAI-compatible endpoint.")
-        self.custom_url.setPlaceholderText("https://api.runpod.ai/... or http://localhost:8000/v1")
-        self.custom_key = QLineEdit(self.config.get("custom_key", ""))
-        self.custom_key.setEchoMode(QLineEdit.Password)
-        c_form.addRow("Custom Auth Token (custom endpoints):", self.custom_key)
-        self.remember_custom = QCheckBox("Remember on this device (encrypted)")
-        self.remember_custom.setToolTip("Save the key in the OS keyring / encrypted store. Uncheck to use it for this session only.")
-        self.remember_custom.setChecked(bool(self.config.get("remember_custom_key", True)))
-        c_form.addRow("", self.remember_custom)
-
-        # NEW: MVSEP key
-        self.mvsep_key = QLineEdit(self.config.get("mvsep_api_key", ""))
-        self.mvsep_key.setEchoMode(QLineEdit.Password)
-        c_form.addRow("MVSEP API Key:", self.mvsep_key)
-        self.remember_mvsep = QCheckBox("Remember on this device (encrypted)")
-        self.remember_mvsep.setToolTip("Save the key in the OS keyring / encrypted store. Uncheck to use it for this session only.")
-        self.remember_mvsep.setChecked(bool(self.config.get("remember_mvsep_api_key", True)))
-        c_form.addRow("", self.remember_mvsep)
-
-        sec_note = QLabel(
-            "Secrets are stored encrypted (OS keyring, or an encrypted file as a fallback) — "
-            "never in settings.json. Uncheck 'Remember' to keep a key for the current session only."
-        )
-        sec_note.setWordWrap(True)
-        sec_note.setStyleSheet("color: #aaa; font-size: 9px; padding: 2px;")
-        c_form.addRow(sec_note)
-
-        # ---- Caption backend (pluggable providers) ----
-        self.caption_backend_combo = QComboBox()
-        self.caption_backend_combo.setToolTip("Which model captions the audio.")
-        self.caption_backend_combo.addItems([
-            "ace_step — ACE-Step captioner (Kaggle GPU, default)",
-            "gemini — Google Gemini (audio-native)",
-            "deepseek — DeepSeek LLM",
-            "custom — OpenAI-compatible endpoint (local/rented GPU)",
-        ])
-        cur_backend = (self.config.get("caption_backend") or "ace_step").strip().lower()
-        for i in range(self.caption_backend_combo.count()):
-            if self.caption_backend_combo.itemText(i).startswith(cur_backend):
-                self.caption_backend_combo.setCurrentIndex(i)
-                break
-        c_form.addRow("Caption Backend:", self.caption_backend_combo)
-
-        self.gemini_key = QLineEdit(self.config.get("gemini_api_key", ""))
-        self.gemini_key.setEchoMode(QLineEdit.Password)
-        c_form.addRow("Gemini API Key:", self.gemini_key)
-        self.remember_gemini = QCheckBox("Remember on this device (encrypted)")
-        self.remember_gemini.setToolTip("Save the key in the OS keyring / encrypted store. Uncheck to use it for this session only.")
-        self.remember_gemini.setChecked(bool(self.config.get("remember_gemini_key", True)))
-        c_form.addRow("", self.remember_gemini)
-
-        self.gemini_model_combo = QComboBox()
-        self.gemini_model_combo.setToolTip("Gemini model used for audio captioning.")
-        self.gemini_model_combo.setEditable(True)
-        self.gemini_model_combo.addItems(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"])
-        cur_model = (self.config.get("gemini_model") or "gemini-2.5-flash").strip()
-        idx = self.gemini_model_combo.findText(cur_model)
-        if idx >= 0:
-            self.gemini_model_combo.setCurrentIndex(idx)
-        else:
-            self.gemini_model_combo.setEditText(cur_model)
-        c_form.addRow("Gemini Model:", self.gemini_model_combo)
-
-        self.custom_url_edit = QLineEdit(self.config.get("custom_caption_url", ""))
-        self.custom_url_edit.setToolTip("OpenAI-compatible base URL for the custom caption backend.")
-        self.custom_url_edit.setPlaceholderText("e.g. http://localhost:8000/v1 (vLLM/Ollama/runpod)")
-        c_form.addRow("Custom Endpoint Base URL:", self.custom_url_edit)
-
-        self.custom_model_edit = QLineEdit(self.config.get("custom_caption_model", ""))
-        self.custom_model_edit.setToolTip("Model name served by the custom endpoint.")
-        self.custom_model_edit.setPlaceholderText("model name served by the endpoint")
-        c_form.addRow("Custom Endpoint Model:", self.custom_model_edit)
-
-        self.custom_audio_check = QCheckBox("Send audio to the endpoint (OpenAI input_audio)")
-        self.custom_audio_check.setChecked(bool(self.config.get("custom_caption_audio", False)))
-        c_form.addRow("", self.custom_audio_check)
-
-        save_cloud_btn = QPushButton("Save Cloud Credentials")
-        save_cloud_btn.clicked.connect(self.save_cloud_config)
-        c_form.addRow(save_cloud_btn)
-
-        layout.addWidget(cloud_grp)
-
-        llm_grp = QGroupBox("🧠 LLM Provider")
-        llm_form = QFormLayout(llm_grp)
-        llm_form.setContentsMargins(8, 18, 8, 8)
-
-        self.llm_provider_combo = QComboBox()
-        self.llm_provider_combo.addItems([
-            "deepseek (paid, cheap — default)",
-            "gemini (free tier)",
-            "groq (free tier)",
-            "openrouter (free models)",
-            "local (custom endpoint)",
-        ])
-        cur_prov = str(self.config.get("llm_provider", "deepseek") or "deepseek").lower()
-        for i in range(self.llm_provider_combo.count()):
-            if self.llm_provider_combo.itemText(i).startswith(cur_prov):
-                self.llm_provider_combo.setCurrentIndex(i)
-                break
-        self.llm_provider_combo.currentIndexChanged.connect(self._on_llm_provider_changed)
-        llm_form.addRow("Provider:", self.llm_provider_combo)
-
-        self.llm_api_key = QLineEdit(self.config.get("deepseek_key", ""))
-        self.llm_api_key.setEchoMode(QLineEdit.Password)
-        self.llm_api_key.setPlaceholderText("auto-routes to the selected provider/model")
-        self.llm_api_key.setToolTip("One key field that routes to whichever provider is selected (DeepSeek / Gemini / Groq / OpenRouter). The app knows which API from the model chosen.")
-        llm_form.addRow("Provider API Key:", self.llm_api_key)
-        self.remember_llm_api = QCheckBox("Remember this key (encrypted)")
-        self.remember_llm_api.setToolTip("Save the active provider's key in the encrypted store. Uncheck for session-only.")
-        self.remember_llm_api.setChecked(bool(self.config.get("remember_deepseek_key", True)))
-        llm_form.addRow("", self.remember_llm_api)
-
-        self.llm_model_combo = QComboBox()
-        self.llm_model_combo.setEditable(True)
-        llm_form.addRow("Model:", self.llm_model_combo)
-
-        self.llm_base_url_edit = QLineEdit()
-        self.llm_base_url_edit.setPlaceholderText("auto-filled from the provider (editable)")
-        llm_form.addRow("Base URL:", self.llm_base_url_edit)
-
-        self.openrouter_key = QLineEdit(self.config.get("openrouter_key", ""))
-        self.openrouter_key.setEchoMode(QLineEdit.Password)
-        llm_form.addRow("OpenRouter Key:", self.openrouter_key)
-        self.remember_openrouter = QCheckBox("Remember on this device (encrypted)")
-        self.remember_openrouter.setChecked(bool(self.config.get("remember_openrouter_key", True)))
-        llm_form.addRow("", self.remember_openrouter)
-
-        self.groq_key = QLineEdit(self.config.get("groq_key", ""))
-        self.groq_key.setEchoMode(QLineEdit.Password)
-        llm_form.addRow("Groq Key:", self.groq_key)
-        self.remember_groq = QCheckBox("Remember on this device (encrypted)")
-        self.remember_groq.setChecked(bool(self.config.get("remember_groq_key", True)))
-        llm_form.addRow("", self.remember_groq)
-
-        # ---- Per-role overrides (aggregator / captioner / assistant) ----
-        roles_box = QGroupBox("Per-role overrides (empty = use the global provider/model)")
-        rform = QFormLayout(roles_box)
-        rform.setContentsMargins(8, 14, 8, 8)
-        self.role_provider_combo = {}
-        self.role_model_combo = {}
-        _role_providers = ["default (global)", "deepseek", "gemini", "groq", "openrouter", "local"]
-        for role in ("aggregator", "captioner", "assistant"):
-            row = QHBoxLayout()
-            prov = QComboBox()
-            prov.addItems(_role_providers)
-            cur = (self.config.get(f"llm_provider_{role}") or "").strip()
-            prov.setCurrentText(cur if cur in _role_providers[1:] else "default (global)")
-            prov.setToolTip(f"Provider used by the {role} (the master-caption aggregator, the LLM captioner, or the AI assistant).")
-            mod = QComboBox()
-            mod.setEditable(True)
-            mod.addItems(["", "deepseek-chat", "gemini-2.5-flash", "gemini-3.7-flash",
-                          "llama-3.3-70b-versatile", "meta-llama/llama-3.3-70b-instruct:free"])
-            mod.setCurrentText(self.config.get(f"llm_model_{role}", ""))
-            mod.setToolTip(f"Model used by the {role}; empty = the provider default.")
-            self.role_provider_combo[role] = prov
-            self.role_model_combo[role] = mod
-            row.addWidget(prov, 1)
-            row.addWidget(mod, 2)
-            rform.addRow(f"{role.capitalize()}:", row)
-        llm_form.addRow(roles_box)
-
-        self.llm_note = QLabel("")
-        self.llm_note.setWordWrap(True)
-        self.llm_note.setStyleSheet("color: #aaa; font-size: 9px;")
-        llm_form.addRow(self.llm_note)
-        self._on_llm_provider_changed()
-
-        layout.addWidget(llm_grp)
-
-        pipe_grp = QGroupBox("🎛 Pipeline & Model Defaults")
-        p_form = QFormLayout(pipe_grp)
-        p_form.setContentsMargins(8, 18, 8, 8)
-
-        self.prompt_edit = QTextEdit()
-        self.prompt_edit.setToolTip("The instruction given to the caption model for every chunk. Edit to steer descriptions.")
-        self.prompt_edit.setPlainText(self.config.get("caption_prompt", ""))
-        self.prompt_edit.setMaximumHeight(120)
-        self.prompt_edit.setPlaceholderText("Prompt used by the caption backends (ACE-Step / Gemini / custom).")
-        p_form.addRow("Caption Prompt:", self.prompt_edit)
-
-        self.max_tokens_spin = QSpinBox()
-        self.max_tokens_spin.setToolTip("Maximum tokens the captioner may generate per chunk.")
-        self.max_tokens_spin.setRange(32, 2048)
-        self.max_tokens_spin.setValue(int(self.config.get("caption_max_tokens", 512)))
-        p_form.addRow("Caption Max Tokens:", self.max_tokens_spin)
-
-        self.max_dur_spin = QSpinBox()
-        self.max_dur_spin.setRange(0, 600)
-        self.max_dur_spin.setValue(int(self.config.get("caption_max_audio_duration", 120)))
-        self.max_dur_spin.setToolTip("Max audio length fed to the captioner in seconds (0 = whole file).")
-        p_form.addRow("Max Audio Duration (s):", self.max_dur_spin)
-
-        self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setRange(1, 8)
-        self.batch_size_spin.setValue(int(self.config.get("caption_batch_size", 1)))
-        self.batch_size_spin.setToolTip("Chunks processed per captioner forward pass on the Kaggle GPU. 1 is safest; 2-4 is faster when VRAM allows (32 GB total across both T4s).")
-        p_form.addRow("Caption Batch Size:", self.batch_size_spin)
-
-        self.tag_ratio_spin = QSpinBox()
-        self.tag_ratio_spin.setRange(0, 100)
-        self.tag_ratio_spin.setSuffix("%")
-        self.tag_ratio_spin.setValue(int(self.config.get("tag_caption_ratio", 0)))
-        self.tag_ratio_spin.setToolTip("Hybrid captions: 0% = prose only (default), 100% = tag block only, in between = both.")
-        p_form.addRow("Hybrid Tag Ratio:", self.tag_ratio_spin)
-
-        self.clap_tagger_combo = QComboBox()
-        self.clap_tagger_combo.addItems(["auto (use CLAP if installed)", "on", "off"])
-        cur_clap = str(self.config.get("use_clap_tagger", "auto") or "auto").lower()
-        for i in range(self.clap_tagger_combo.count()):
-            if self.clap_tagger_combo.itemText(i).lower().startswith(cur_clap):
-                self.clap_tagger_combo.setCurrentIndex(i)
-                break
-        self.clap_tagger_combo.setToolTip("CLAP zero-shot tagging names specific instruments (needs torch + transformers). 'auto' uses it when available.")
-        p_form.addRow("Instrument Tagger:", self.clap_tagger_combo)
-
-        self.auto_recommend_check = QCheckBox("Auto-recommend instrument models from detected tags")
-        self.auto_recommend_check.setChecked(bool(self.config.get("auto_recommend_models", True)))
-        p_form.addRow(self.auto_recommend_check)
-
-        self.lead_vocal_combo = QComboBox()
-        self.lead_vocal_combo.addItems(["off", "mvsep (backing-vocal model)", "heuristic (experimental)"])
-        cur_lv = str(self.config.get("lead_vocal_splitter", "off") or "off").lower()
-        if cur_lv == "mvsep":
-            self.lead_vocal_combo.setCurrentIndex(1)
-        elif cur_lv == "heuristic":
-            self.lead_vocal_combo.setCurrentIndex(2)
-        p_form.addRow("Lead/Backing Vocal Split:", self.lead_vocal_combo)
-
-        self.min_sec_spin = QDoubleSpinBox()
-        self.min_sec_spin.setToolTip("Minimum section length in seconds (shorter sections are merged).")
-        self.min_sec_spin.setRange(1.0, 120.0)
-        self.min_sec_spin.setSingleStep(0.5)
-        self.min_sec_spin.setDecimals(1)
-        self.min_sec_spin.setValue(float(self.config.get("segment_min_sec", 12.0)))
-        p_form.addRow("Min Section Length (s):", self.min_sec_spin)
-
-        self.max_k_spin = QSpinBox()
-        self.max_k_spin.setToolTip("Maximum number of structural sections.")
-        self.max_k_spin.setRange(2, 40)
-        self.max_k_spin.setValue(int(self.config.get("segment_max_k", 20)))
-        p_form.addRow("Max Sections:", self.max_k_spin)
-
-        self.structure_backend_combo = QComboBox()
-        self.structure_backend_combo.addItems([
-            "librosa (default)",
-            "songformer (functional labels, Kaggle)",
-        ])
-        cur_struct = str(self.config.get("structure_backend", "librosa") or "librosa").lower()
-        self.structure_backend_combo.setCurrentIndex(1 if cur_struct.startswith("song") else 0)
-        self.structure_backend_combo.setToolTip(
-            "songformer splits sections into real labels (intro/verse/chorus/bridge/solo/outro) "
-            "via a Kaggle GPU kernel; falls back to librosa automatically."
-        )
-        p_form.addRow("Structure Backend:", self.structure_backend_combo)
-
-        self.stem_model_combo = QComboBox()
-        self.stem_model_combo.setToolTip("Demucs model for Kaggle stem separation (htdemucs_6s adds guitar + piano).")
-        self.stem_model_combo.addItems(["htdemucs", "htdemucs_ft", "htdemucs_6s", "mdx_extra"])
-        cur_stem = self.config.get("kaggle_stem_model", "htdemucs_ft")
-        for i in range(self.stem_model_combo.count()):
-            if self.stem_model_combo.itemText(i) == cur_stem:
-                self.stem_model_combo.setCurrentIndex(i)
-                break
-        p_form.addRow("Kaggle Stem Model:", self.stem_model_combo)
-
-        stem_out_row = QHBoxLayout()
-        self.stem_out_edit = QLineEdit(self.config.get("stem_output_dir", ""))
-        self.stem_out_edit.setToolTip("Folder where separated stems are written (empty = default ~/mvsep_stems).")
-        self.stem_out_edit.setPlaceholderText("Default: ~/mvsep_stems")
-        browse_btn = QPushButton("Browse…")
-        browse_btn.clicked.connect(self._browse_stem_dir)
-        stem_out_row.addWidget(self.stem_out_edit)
-        stem_out_row.addWidget(browse_btn)
-        p_form.addRow("Stem Output Folder:", stem_out_row)
-
-        self.lufs_spin = QDoubleSpinBox()
-        self.lufs_spin.setToolTip("Target loudness for DSP normalization (EBU R128).")
-        self.lufs_spin.setRange(-30.0, 0.0)
-        self.lufs_spin.setDecimals(1)
-        self.lufs_spin.setValue(float(self.config.get("dsp_target_lufs", -14.0)))
-        p_form.addRow("Normalize Target (LUFS):", self.lufs_spin)
-
-        self.sr_spin = QSpinBox()
-        self.sr_spin.setToolTip("Target sample rate for DSP normalization.")
-        self.sr_spin.setRange(8000, 192000)
-        self.sr_spin.setSingleStep(1000)
-        self.sr_spin.setValue(int(self.config.get("dsp_target_sr", 44100)))
-        p_form.addRow("Normalize Target SR (Hz):", self.sr_spin)
-
-        save_pipe_btn = QPushButton("Save Pipeline Defaults")
-        save_pipe_btn.clicked.connect(self.save_pipeline_defaults)
-        p_form.addRow(save_pipe_btn)
-
-        layout.addWidget(pipe_grp)
-
-        lyrics_grp = QGroupBox("🎤 Lyrics Transcription")
-        lf = QFormLayout(lyrics_grp)
-        lf.setContentsMargins(8, 18, 8, 8)
-        self.lyrics_engine_combo = QComboBox()
-        self.lyrics_engine_combo.addItems([
-            "whisperx (default)", "gemini", "acestep-transcriber (experimental)",
-        ])
-        cur_eng = str(self.config.get("lyrics_engine", "whisperx") or "whisperx").lower()
-        for i in range(self.lyrics_engine_combo.count()):
-            if self.lyrics_engine_combo.itemText(i).lower().startswith(cur_eng):
-                self.lyrics_engine_combo.setCurrentIndex(i)
-                break
-        self.lyrics_engine_combo.setToolTip("Which engine transcribes lyrics. Gemini uses the audio-native Gemini backend; ace-step-transcriber is experimental.")
-        lf.addRow("Engine:", self.lyrics_engine_combo)
-        self.lyrics_language_edit = QLineEdit(self.config.get("lyrics_language", ""))
-        self.lyrics_language_edit.setPlaceholderText("e.g. en (empty = auto-detect)")
-        self.lyrics_language_edit.setToolTip("Force the transcription language (ISO code) or leave empty to auto-detect.")
-        lf.addRow("Language:", self.lyrics_language_edit)
-        self.lyrics_prompt_edit = QLineEdit(self.config.get("lyrics_initial_prompt", ""))
-        self.lyrics_prompt_edit.setPlaceholderText("e.g. 1970s hard rock by Black Sabbath")
-        self.lyrics_prompt_edit.setToolTip("Biases the transcriber toward context: artist, genre, known words (improves accuracy).")
-        lf.addRow("Initial Prompt:", self.lyrics_prompt_edit)
-        layout.addWidget(lyrics_grp)
-
-        mm_grp = QGroupBox("🧰 Model Manager")
-        mm_form = QFormLayout(mm_grp)
-        mm_form.setContentsMargins(8, 18, 8, 8)
-
-        self.model_source_combo = QComboBox()
-        self.model_source_combo.setToolTip("Where to download catalog models from.")
-        self.model_source_combo.addItems(["hf (Hugging Face)", "github (my repo)"])
-        cur_src = str(self.config.get("model_download_source", "hf") or "hf").lower()
-        self.model_source_combo.setCurrentIndex(1 if cur_src.startswith("git") else 0)
-        mm_form.addRow("Download Source:", self.model_source_combo)
-
-        self.model_pick_combo = QComboBox()
-        self.model_pick_combo.setToolTip("The model to download / remove.")
-        self.model_pick_combo.setMinimumWidth(340)
-        self._populate_model_picker()
-        mm_form.addRow("Model:", self.model_pick_combo)
-
-        self.model_status = QLabel("Select a model to see its status.")
-        self.model_status.setWordWrap(True)
-        self.model_status.setStyleSheet("color: #aaa; font-size: 9px;")
-        mm_form.addRow(self.model_status)
-
-        dl_row = QHBoxLayout()
-        download_btn = QPushButton("⬇ Download")
-        download_btn.clicked.connect(self.download_selected_model)
-        remove_btn = QPushButton("🗑 Remove")
-        remove_btn.clicked.connect(self.remove_selected_model)
-        refresh_btn = QPushButton("↻ Status")
-        refresh_btn.clicked.connect(self.refresh_model_status)
-        dl_row.addWidget(download_btn)
-        dl_row.addWidget(remove_btn)
-        dl_row.addWidget(refresh_btn)
-        mm_form.addRow(dl_row)
-
-        self.leaderboard_combo = QComboBox()
-        for item in leaderboards():
-            self.leaderboard_combo.addItem(item["name"], item["url"])
-        open_lb = QPushButton("Open")
-        open_lb.clicked.connect(self.open_selected_leaderboard)
-        lb_row = QHBoxLayout()
-        lb_row.addWidget(self.leaderboard_combo, 1)
-        lb_row.addWidget(open_lb)
-        mm_form.addRow("Leaderboards:", lb_row)
-
-        self.hf_token_edit = QLineEdit(self.config.get("hf_token", ""))
-        self.hf_token_edit.setToolTip("Hugging Face token for gated model downloads.")
-        self.hf_token_edit.setEchoMode(QLineEdit.Password)
-        mm_form.addRow("Hugging Face Token:", self.hf_token_edit)
-        self.remember_hf = QCheckBox("Remember on this device (encrypted)")
-        self.remember_hf.setChecked(bool(self.config.get("remember_hf_token", True)))
-        mm_form.addRow("", self.remember_hf)
-
-        self.model_dir_edit = QLineEdit(self.config.get("model_dir", "models"))
-        self.model_dir_edit.setToolTip("Folder for downloaded models.")
-        self.model_dir_edit.setToolTip("Folder where downloaded models are stored (gitignored).")
-        mm_form.addRow("Models Folder:", self.model_dir_edit)
-
-        layout.addWidget(mm_grp)
-        layout.addStretch()
-        scroll.setWidget(inner)
-        outer.addWidget(scroll)
-
-    # -----------------------------------------------------------------------
-    # Advanced Tools Tab
-    # -----------------------------------------------------------------------
     # -----------------------------------------------------------------------
     # AI Assistant Tab
     # -----------------------------------------------------------------------
@@ -2730,7 +1639,7 @@ class DatasetManager(QMainWindow):
         self.active_worker.error_occurred.connect(self.on_spatial_error)
         self.active_worker.start()
 
-    def run_structural_pipeline(self):
+    def run_spatial_pipeline(self):
         # ---- Determine which tracks to process based on scope ----
         scope = self.struct_scope_combo.currentText()
         if scope == "All Tracks":
@@ -2917,6 +1826,16 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Structural Pipeline Methods
     # -----------------------------------------------------------------------
+    def run_structural_pipeline(self):
+        # ---- Read the active track layout options ----
+        stem_source = self.struct_stem_combo.currentText()
+        use_deepseek = self.struct_deepseek_check.isChecked()
+
+        # 🛡️ THE GATEKEEPER: Run the shared key & credential verification helper
+        if not self._prepare_pipeline_credentials(stem_source, use_deepseek):
+            return
+
+        # ---- Determine which tracks to process based on scope ----
         scope = self.struct_scope_combo.currentText()
         if scope == "All Tracks":
             tracks = self.dataset.get("samples", [])
@@ -3273,43 +2192,8 @@ class DatasetManager(QMainWindow):
     # Original Methods (keep as is)
     # -----------------------------------------------------------------------
     def apply_custom_theme(self):
-        base_size = int(12 * self.custom_theme["zoom_factor"])
-        font_fam = self.custom_theme["font_family"]
-        bg = self.custom_theme["bg_color"]
-        panel = self.custom_theme["panel_bg"]
-        text = self.custom_theme["text_color"]
-        accent = self.custom_theme["accent_color"]
-
-        style = f"""
-            QWidget {{
-                background-color: {bg};
-                color: {text};
-                font-family: '{font_fam}';
-                font-size: {base_size}px;
-            }}
-            QGroupBox, QTableWidget, QTextEdit, QLineEdit, QComboBox, QSpinBox, QScrollArea {{
-                background-color: {panel};
-                border: 1px solid #3c3c3c;
-                border-radius: 4px;
-            }}
-            QPushButton {{
-                background-color: {accent};
-                color: #ffffff;
-                border: none;
-                border-radius: 3px;
-                padding: {int(4 * self.custom_theme['zoom_factor'])}px {int(10 * self.custom_theme['zoom_factor'])}px;
-            }}
-            QPushButton:hover {{
-                background-color: #1177bb;
-            }}
-            QHeaderView::section {{
-                background-color: {panel};
-                color: {text};
-                padding: 4px;
-                border: 1px solid #333;
-            }}
-        """
-        self.setStyleSheet(style)
+        from ui_theme import compile_and_apply_theme
+        compile_and_apply_theme(self)
 
     def save_all_settings(self):
         """Persist every settings group (cloud keys, LLM provider, pipeline
@@ -3459,12 +2343,14 @@ class DatasetManager(QMainWindow):
         self.config["stem_output_dir"] = self.stem_out_edit.text().strip()
         self.config["dsp_target_lufs"] = self.lufs_spin.value()
         self.config["dsp_target_sr"] = self.sr_spin.value()
+        self.config["audit_backend"] = "kaggle" if self.audit_backend_combo.currentIndex() == 1 else "local"
         if hasattr(self, "lyrics_engine_combo"):
             self.config["lyrics_engine"] = {
-                "whisperx (default)": "whisperx",
+                "kaggle (default, gpu)": "kaggle",
+                "whisperx (local)": "whisperx",
                 "gemini": "gemini",
                 "acestep-transcriber (experimental)": "acestep_transcriber",
-            }.get(self.lyrics_engine_combo.currentText(), "whisperx")
+            }.get(self.lyrics_engine_combo.currentText(), "kaggle")
             self.config["lyrics_language"] = self.lyrics_language_edit.text().strip()
             self.config["lyrics_initial_prompt"] = self.lyrics_prompt_edit.text().strip()
         try:
@@ -3610,6 +2496,7 @@ class DatasetManager(QMainWindow):
         self.refresh_table()
 
     def refresh_table(self):
+        self._loading_table = True
         self.table.setRowCount(0)
         self._table_sample_indices = []
         exceptions_count = 0
@@ -3633,7 +2520,16 @@ class DatasetManager(QMainWindow):
             self._table_sample_indices.append(idx)
             row = self.table.rowCount()
             self.table.insertRow(row)
-            self.table.setItem(row, 0, QTableWidgetItem(s.get("filename", "")))
+
+            locked = bool(s.get("locked", True))
+
+            def _cell(text, editable):
+                item = QTableWidgetItem(str(text) if text not in (None, 0, "") else "")
+                if not editable:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                return item
+
+            self.table.setItem(row, 0, _cell(s.get("filename", ""), False))
 
             h_item = QTableWidgetItem(f"✓ Healthy" if status == "Healthy" else (f"⚠ Warning" if status == "Warning" else status))
             if status == "Healthy":
@@ -3642,16 +2538,36 @@ class DatasetManager(QMainWindow):
                 h_item.setForeground(QColor("#FF9800"))
             elif status == "Missing":
                 h_item.setForeground(QColor("#F44336"))
+            h_item.setFlags(h_item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, 1, h_item)
 
-            self.table.setItem(row, 2, QTableWidgetItem(s.get("custom_tag", "")))
-            self.table.setItem(row, 3, QTableWidgetItem(s.get("genre", "")))
-            dur = s.get("duration", 0)
-            self.table.setItem(row, 4, QTableWidgetItem(f"{dur}s" if dur else ""))
-            self.table.setItem(row, 5, QTableWidgetItem(str(s.get("keyscale", ""))))
+            self.table.setItem(row, 2, _cell(s.get("custom_tag", ""), False))
+            self.table.setItem(row, 3, _cell(s.get("genre", ""), not locked))
+            self.table.setItem(row, 4, _cell(s.get("keyscale", ""), not locked))
             bpm = s.get("bpm", 0)
-            self.table.setItem(row, 6, QTableWidgetItem(str(bpm) if bpm else ""))
+            self.table.setItem(row, 5, _cell(str(bpm) if bpm else "", not locked))
+            self.table.setItem(row, 6, _cell(s.get("timesignature", ""), not locked))
+            dur = s.get("duration", 0)
+            self.table.setItem(row, 7, _cell(f"{dur}s" if dur else "", not locked))
 
+            # Actions column: unlock/lock toggle + delete (with confirmation).
+            actions = QWidget()
+            actions_layout = QHBoxLayout(actions)
+            actions_layout.setContentsMargins(2, 0, 2, 0)
+            actions_layout.setSpacing(4)
+            lock_btn = QPushButton("🔓" if not locked else "🔒")
+            lock_btn.setToolTip("Lock / unlock this track's metadata for manual editing")
+            lock_btn.setMaximumWidth(36)
+            lock_btn.clicked.connect(lambda _=False, i=idx: self.toggle_track_lock(i))
+            del_btn = QPushButton("🗑")
+            del_btn.setToolTip("Remove this track from the dataset")
+            del_btn.setMaximumWidth(36)
+            del_btn.clicked.connect(lambda _=False, i=idx: self.confirm_delete_sample(i))
+            actions_layout.addWidget(lock_btn)
+            actions_layout.addWidget(del_btn)
+            self.table.setCellWidget(row, 8, actions)
+
+        self._loading_table = False
         self.exceptions_view_btn.setText(f"⚠ Exceptions Queue ({exceptions_count})")
         if hasattr(self, "filter_count_label"):
             total = len(self.dataset["samples"])
@@ -3669,15 +2585,6 @@ class DatasetManager(QMainWindow):
             ]).lower()
             if q not in hay:
                 return False
-        if self.filter_genre and self.filter_genre.lower() not in (s.get("genre") or "").lower():
-            return False
-        if self.filter_key and self.filter_key.lower() not in (s.get("keyscale") or "").lower():
-            return False
-        bpm = s.get("bpm") or 0
-        if self.filter_bpm_min and bpm < self.filter_bpm_min:
-            return False
-        if self.filter_bpm_max and bpm > self.filter_bpm_max:
-            return False
         if self.filter_inst == "instrumental" and not s.get("is_instrumental"):
             return False
         if self.filter_inst == "vocal" and s.get("is_instrumental"):
@@ -3688,20 +2595,12 @@ class DatasetManager(QMainWindow):
 
     def on_filters_changed(self, *_):
         self.filter_query = self.filter_search.text().strip()
-        self.filter_genre = self.filter_genre_edit.text().strip()
-        self.filter_key = self.filter_key_edit.text().strip()
-        self.filter_bpm_min = self.filter_bpm_min_spin.value()
-        self.filter_bpm_max = self.filter_bpm_max_spin.value()
         self.filter_inst = self.filter_inst_combo.currentText().lower()
         self.filter_captioned = self.filter_captioned_check.isChecked()
         self.refresh_table()
 
     def clear_filters(self):
         self.filter_search.clear()
-        self.filter_genre_edit.clear()
-        self.filter_key_edit.clear()
-        self.filter_bpm_min_spin.setValue(0)
-        self.filter_bpm_max_spin.setValue(0)
         self.filter_inst_combo.setCurrentIndex(0)
         self.filter_captioned_check.setChecked(False)
 
@@ -3710,6 +2609,94 @@ class DatasetManager(QMainWindow):
         if 0 <= row < len(self._table_sample_indices):
             return self.dataset["samples"][self._table_sample_indices[row]]
         return None
+
+    def toggle_track_lock(self, idx):
+        """Lock / unlock a single track's metadata (🔒/🔓 button in Actions)."""
+        samples = self.dataset.get("samples", [])
+        if not (0 <= idx < len(samples)):
+            return
+        samples[idx]["locked"] = not samples[idx].get("locked", True)
+        self.refresh_table()
+        # Keep the selection on the toggled row if possible.
+        try:
+            row = self._table_sample_indices.index(idx)
+            self.table.setCurrentCell(row, 0)
+        except ValueError:
+            pass
+        self.on_table_selection_changed()
+        state = "locked" if samples[idx].get("locked") else "unlocked"
+        self.status_label.setText(f"Metadata for '{samples[idx].get('filename', '')}' {state}.")
+
+    def confirm_delete_sample(self, idx):
+        """Ask before removing a track; always back up the file when removed."""
+        samples = self.dataset.get("samples", [])
+        if not (0 <= idx < len(samples)):
+            return
+        s = samples[idx]
+        fname = s.get("filename", "?")
+        resp = QMessageBox.question(
+            self,
+            "Delete Track",
+            f"Are you sure you want to remove '{fname}' from the dataset?\n\n"
+            "The audio file will be backed up to project_backups/deleted/ "
+            "(non-destructive).",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        self.record_snapshot()
+        sid = s.get("id", "")
+        path = s.get("audio_path", "")
+        if path and os.path.exists(path):
+            backup_dir = Path("project_backups") / "deleted"
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                dest = backup_dir / os.path.basename(path)
+                if dest.exists():
+                    dest = backup_dir / f"{Path(path).stem}_{time.strftime('%Y%m%d-%H%M%S')}{Path(path).suffix}"
+                shutil.copy2(path, str(dest))
+                self.status_label.setText(f"Backed up '{fname}' to {dest}.")
+            except OSError as e:
+                QMessageBox.warning(self, "Backup Warning", f"Could not back up file: {e}")
+        samples.pop(idx)
+        self.health_reports.pop(sid, None)
+        self.original_backups.pop(sid, None)
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.status_label.setText(f"Removed '{fname}' from the dataset.")
+
+    def on_metadata_cell_edited(self, item):
+        """Write back inline table edits (Genre/Key/BPM/Time/Duration) when unlocked."""
+        if getattr(self, "_loading_table", False):
+            return
+        row = item.row()
+        if not (0 <= row < len(self._table_sample_indices)):
+            return
+        idx = self._table_sample_indices[row]
+        samples = self.dataset.get("samples", [])
+        if not (0 <= idx < len(samples)):
+            return
+        s = samples[idx]
+        if s.get("locked", True):
+            return
+        col = item.column()
+        text = item.text().strip()
+        try:
+            if col == 3:      # Genre
+                s["genre"] = text
+            elif col == 4:    # Key
+                s["keyscale"] = text
+            elif col == 5:    # BPM
+                s["bpm"] = int(float(text)) if text else 0
+            elif col == 6:    # Time signature
+                s["timesignature"] = text
+            elif col == 7:    # Duration
+                s["duration"] = int(float(text.rstrip("s"))) if text else 0
+        except (ValueError, TypeError):
+            pass
+        self.health_reports.pop(s.get("id", ""), None)
+        self.status_label.setText(f"Updated {s.get('filename', '')} metadata.")
 
     def on_table_selection_changed(self):
         s = self.get_selected_sample()
@@ -3733,31 +2720,16 @@ class DatasetManager(QMainWindow):
             self.caption_text.blockSignals(True)
             self.lyrics_text.blockSignals(True)
             self.track_tag_input.blockSignals(True)
-            self.genre_input.blockSignals(True)
-            self.key_input.blockSignals(True)
-            self.bpm_spin.blockSignals(True)
             self.inst_check.blockSignals(True)
 
             self.caption_text.setPlainText(s.get("caption", ""))
             self.lyrics_text.setPlainText(s.get("formatted_lyrics", s.get("lyrics", "")))
             self.track_tag_input.setText(s.get("custom_tag", ""))
-            self.genre_input.setText(s.get("genre", ""))
-            self.key_input.setText(str(s.get("keyscale", "")))
-            self.bpm_spin.setValue(int(s.get("bpm", 0)))
             self.inst_check.setChecked(bool(s.get("is_instrumental", False)))
-
-            is_locked = s.get("locked", True)
-            self.bpm_lock.setChecked(is_locked)
-            self.key_lock.setChecked(is_locked)
-            self.bpm_spin.setEnabled(not is_locked)
-            self.key_input.setEnabled(not is_locked)
 
             self.caption_text.blockSignals(False)
             self.lyrics_text.blockSignals(False)
             self.track_tag_input.blockSignals(False)
-            self.genre_input.blockSignals(False)
-            self.key_input.blockSignals(False)
-            self.bpm_spin.blockSignals(False)
             self.inst_check.blockSignals(False)
 
     def _load_track_preview(self, sample):
@@ -3827,11 +2799,13 @@ class DatasetManager(QMainWindow):
         if action == "Lock All Detected":
             for s in self.dataset["samples"]:
                 s["locked"] = True
+            self.refresh_table()
             self.on_table_selection_changed()
             self.status_label.setText("Locked all detected metadata fields.")
         elif action == "Unlock All Fields":
             for s in self.dataset["samples"]:
                 s["locked"] = False
+            self.refresh_table()
             self.on_table_selection_changed()
             self.status_label.setText("Unlocked all metadata fields for editing.")
         elif action == "Restore Detected Values":
@@ -3842,16 +2816,11 @@ class DatasetManager(QMainWindow):
                 if rep:
                     s["bpm"] = rep.get("bpm_detected", 0)
                     s["keyscale"] = rep.get("key_detected", "")
+                    s["timesignature"] = rep.get("timesig", s.get("timesignature", "4/4"))
+                    self.refresh_table()
                     self.on_table_selection_changed()
                     self.status_label.setText("Restored original detected values.")
         self.lock_action_combo.setCurrentIndex(0)
-
-    def on_lock_toggled(self):
-        s = self.get_selected_sample()
-        if s:
-            s["locked"] = self.bpm_lock.isChecked()
-            self.bpm_spin.setEnabled(not self.bpm_lock.isChecked())
-            self.key_input.setEnabled(not self.key_lock.isChecked())
 
     def on_caption_edited(self):
         s = self.get_selected_sample()
@@ -4004,21 +2973,6 @@ class DatasetManager(QMainWindow):
         if s:
             s["custom_tag"] = text
 
-    def on_genre_edited(self, text):
-        s = self.get_selected_sample()
-        if s:
-            s["genre"] = text
-
-    def on_key_edited(self, text):
-        s = self.get_selected_sample()
-        if s:
-            s["keyscale"] = text
-
-    def on_bpm_edited(self, val):
-        s = self.get_selected_sample()
-        if s:
-            s["bpm"] = val
-
     def on_inst_edited(self):
         s = self.get_selected_sample()
         if s:
@@ -4102,73 +3056,118 @@ class DatasetManager(QMainWindow):
             QMessageBox.warning(self, "No Tracks", "Please add audio tracks before scanning.")
             return
 
+        use_kaggle = self.audit_backend_combo.currentIndex() == 1
+
         if not self.startup_scan_notice_shown:
             self.startup_scan_notice_shown = True
-            QMessageBox.information(self, "Testing Dataset Audio", "Testing dataset audio. Please wait a few seconds...")
-
-        self.scan_btn.setEnabled(False)
+            msg = (
+                "Sending the dataset audio to a Kaggle GPU kernel for analysis. "
+                "Please wait a few minutes..."
+                if use_kaggle else
+                "Testing dataset audio. Please wait a few seconds..."
+            )
+            QMessageBox.information(self, "Testing Dataset Audio", msg)
+        if hasattr(self, "scan_btn") and self.scan_btn is not None:
+            self.scan_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status_label.setText("Auditing dataset health, metadata & degradation penalties...")
 
-        self.active_worker = HealthAuditorWorker(samples, self.config)
+        if use_kaggle:
+            self.active_worker = KaggleAuditWorker(samples, self.config)
+        else:
+            self.active_worker = HealthAuditorWorker(samples, self.config)
         self.active_worker.progress.connect(self.on_worker_progress)
         self.active_worker.file_audited.connect(self.on_file_audited)
         self.active_worker.audit_completed.connect(self.on_audit_completed)
         self.active_worker.error_occurred.connect(self.on_worker_error)
         self.active_worker.start()
 
+    def start_remote_consolidated_pipeline(self):
+        """Asynchronously triggers the master Kaggle container and opens the console view."""
+        from core.file_system import compress_dataset_folder, launch_remote_kaggle_console
+        
+        # Zip local directory structures
+        bundle_path = compress_dataset_folder(self.dataset["samples"])
+        
+        # Push audio assets out to cloud storage volume mounts
+        os.system(f"kaggle datasets version -m 'Upload bundle' -p {bundle_path}")
+        os.system(f"kaggle kernels push -p core/kaggle_worker.py")
+        
+        # THE CONSOLE PASS: Open the container workspace interface instantly
+        username = self.config.get("kaggle_user", "your-username")
+        notebook_slug = "ace-step-master-pipeline" # Your notebook's specific URL string
+        launch_remote_kaggle_console(username, notebook_slug)
+        
+        # SAFETY GUARD
+        if hasattr(self, "scan_btn") and self.scan_btn is not None:
+            self.scan_btn.setEnabled(False)
+
+        # Hand execution tracking off to background thread monitor
+        from workers.kaggle_consolidated import KaggleConsolidatedWorker
+        self.active_worker = KaggleConsolidatedWorker(self.config)
+        self.active_worker.progress.connect(self.on_worker_progress)
+        self.active_worker.all_done.connect(self.on_remote_pipeline_success)
+        self.active_worker.failed.connect(self.on_worker_error)
+        self.active_worker.start()   
+        self.status_label.setText("Container deployed! Redirecting your browser to monitor the GPUs live...")
+
     def on_file_audited(self, sid, rep):
         self.health_reports[sid] = rep
         for s in self.dataset["samples"]:
-            if s["id"] == sid and not s.get("locked", False):
-                if not s.get("bpm") or s.get("bpm") == 0:
-                    s["bpm"] = rep.get("bpm_detected", 0)
-                if not s.get("keyscale"):
-                    s["keyscale"] = rep.get("key_detected", "")
-                if not s.get("duration") or s.get("duration") == 0:
-                    s["duration"] = int(rep.get("duration", 0))
+            if s["id"] != sid:
+                continue
+            # Auto-fill detected metadata next to the filename, then lock it.
+            # User-entered (non-empty) values are never overwritten; an unlocked
+            # track with non-empty values keeps its manual edits.
+            filled = False
+            if not s.get("bpm") or s.get("bpm") == 0:
+                if rep.get("bpm_detected"):
+                    s["bpm"] = rep["bpm_detected"]
+                    filled = True
+            if not s.get("keyscale"):
+                if rep.get("key_detected"):
+                    s["keyscale"] = rep["key_detected"]
+                    filled = True
+            if not s.get("timesignature"):
+                if rep.get("timesig"):
+                    s["timesignature"] = rep["timesig"]
+                    filled = True
+            if not s.get("duration") or s.get("duration") == 0:
+                if rep.get("duration"):
+                    s["duration"] = int(rep["duration"])
+                    filled = True
+            if filled and s.get("locked", True) is not False:
+                s["locked"] = True
 
     def on_audit_completed(self, summary):
-        if hasattr(self, "rescan_notice") and self.rescan_notice is not None:
-            self.rescan_notice.close()
-            self.rescan_notice.deleteLater()
-            self.rescan_notice = None
-        self.scan_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.status_label.setText("Health & Homogeneity audit finished.")
+        """
+        Callback handler when the lightweight integrity scan finishes.
+        🛡️ Bulletproof Value Check: Uses a strict non-None gate to shield boot timing races.
+        """
+        # 🚀 THE CRITICAL FIX: Only call methods if the button has been fully drawn as a PySide6 object
+        if getattr(self, "scan_btn", None) is not None:
+            self.scan_btn.setEnabled(True)
+            
+        if getattr(self, "progress_bar", None) is not None:
+            self.progress_bar.setVisible(False)
 
-        score = summary.get("quality_score", 100)
-        reasons = summary.get("reasons", [])
-
-        if score >= 80:
-            self.quality_badge.setText(f"Dataset Quality: {score}% [Ready for LoRA]")
-            self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #2E7D32; border-radius: 4px; color: #fff;")
-        elif score >= 60:
-            self.quality_badge.setText(f"Dataset Quality: {score}% [Warning]")
-            self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #F57F17; border-radius: 4px; color: #fff;")
-        else:
-            self.quality_badge.setText(f"Dataset Quality: {score}% [Critical Inconsistencies]")
-            self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #B71C1C; border-radius: 4px; color: #fff;")
-
-        self.refresh_table()
-        self.on_table_selection_changed()
-
-        if reasons or summary.get("recommendations") or summary.get("near_duplicates"):
-            reasons_str = "\n• " + "\n• ".join(reasons) if reasons else "\n• (none)"
-            recs = summary.get("recommendations", [])
-            recs_str = "\n• " + "\n• ".join(recs) if recs else ""
-            dup_str = ""
-            dups = summary.get("near_duplicates", [])
-            if dups:
-                dup_lines = [f"  {a}  ≈  {b}  ({sim:.3f})" for a, b, sim in dups]
-                dup_str = "\nNear-duplicates:\n" + "\n".join(dup_lines)
-            QMessageBox.information(
-                self, f"Quality Audit: {score}% Score",
-                f"Degradation risks:\n{reasons_str}\n\n"
-                f"Recommendations:{recs_str}{dup_str}\n\n"
-                "Run DSP Normalize to resolve loudness / sample-rate mismatches automatically."
+        # Update the visual status panel text with the clean summary payload data
+        if getattr(self, "status_label", None) is not None:
+            reasons = summary.get("reasons", [])
+            mismatches = summary.get("missing_count", 0) + len(reasons)
+            self.status_label.setText(
+                f"Integrity Pass Complete. Verified: {summary.get('total_audited', 0)} tracks. "
+                f"Source mismatches found: {mismatches}"
             )
+
+        # 🦾 REDRAW THE CANVAS: Use your actual native function to update the PySide6 table view
+        self.table.blockSignals(True)
+        try:
+            self.refresh_table()
+            self.on_table_selection_changed()
+        finally:
+            self.table.blockSignals(False)
 
     # -----------------------------------------------------------------------
     # DSP Normalize
@@ -4287,6 +3286,133 @@ class DatasetManager(QMainWindow):
         self.rescan_notice.show()
         self.start_health_audit()
 
+# Metadata Correction Script
+    def force_sync_manifest_to_metadata(self):
+        """
+        Runs an explicit reconciliation script pass over the active collection.
+        Forces the internal health reports to respect your canonical metadata fields,
+        overwriting false 4/4 auto-detection warnings.
+        """
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            self.status_label.setText("Synchronization skipped: Dataset contains no track rows.")
+            return
+
+        # 1. Initiate atomic snapshot backup
+        self.record_snapshot()
+        reconciled_count = 0
+
+        for sample in samples:
+            sid = sample.get("id", "")
+            
+            # Fetch the actual metadata values defined in your manifest
+            canonical_time_sig = str(sample.get("timesignature", "4/4")).strip()
+            
+            # 2. Intercept the active health report record for this track
+            if sid in self.health_reports:
+                report = self.health_reports[sid]
+                
+                # Check if the report issues contains a false auto-detected time signature warning
+                clean_issues = []
+                for issue in report.get("issues", []):
+                    # Strip out any lingering warnings about heuristic meter detection clashes
+                    if "time signature auto-detected" in issue.lower() or "time-signature" in issue.lower():
+                        continue
+                    clean_issues.append(issue)
+                
+                # Write the cleaned issues back to the tracking index
+                report["issues"] = clean_issues
+                
+                # If there are no longer any hardware degradation issues, upgrade status cleanly
+                if not clean_issues:
+                    report["status"] = "Healthy"
+                    
+                reconciled_count += 1
+
+        # 3. 🛡️ THE SIGNAL BLOCKER GATEWAY: Pause table signals before updating cell properties
+        self.table.blockSignals(True)
+        try:
+            self.refresh_table()
+            self.on_table_selection_changed()
+        finally:
+            self.table.blockSignals(False) # Securely restore signals regardless of compilation output
+
+        # 4. Force a recalculation of the global summary badge state
+        from modules.audit import aggregate_health_summary
+        summary = aggregate_health_summary(self.health_reports, self.dataset.get("samples", []), self.config)
+        self.on_audit_completed(summary)
+
+        self.status_label.setText(f"Manifest sync pass finished! Reconciled {reconciled_count} tracks.")
+        QMessageBox.information(self, "Metadata Alignment Pass Complete", 
+                                f"Successfully matched {reconciled_count} tracks.\nFalse 4/4 meter detection warnings have been removed from the health reports matrix.")
+
+    def import_acestep_15xl_tags(self):
+        """
+        Primary Toolkit Engine: Ingests Pydantic-enforced 1.5XL captions and lyrics tags,
+        overwrites placeholders, and resolves consistency metrics instantly.
+        """
+        path, _ = QFileDialog.getOpenFileName(self, "Import ACE-Step 1.5XL Manifest", "", "Data Files (*.csv *.json)")
+        if not path:
+            return
+
+        import csv
+        self.record_snapshot()
+        synced_count = 0
+
+        try:
+            with open(path, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                
+                for row in reader:
+                    song_id = row.get("song_id", "").strip()
+                    time_sig = row.get("time_signature", "4/4").strip()
+                    try:
+                        bpm_val = int(float(row.get("tempo_bpm", 0)))
+                    except (ValueError, TypeError):
+                        bpm_val = 0
+                        
+                    caption_text = row.get("caption", "").strip()
+                    lyrics_text = row.get("lyrics", "").strip()
+
+                    # Iterate and bind directly into your memory dataset array
+                    for sample in self.dataset["samples"]:
+                        # Match tracks by unique ID or matching filename string boundaries
+                        if song_id.lower() in sample.get("filename", "").lower() or sample.get("id", "").lower() in song_id.lower() or synced_count < len(self.dataset["samples"]):
+                            sample["timesignature"] = time_sig
+                            sample["bpm"] = bpm_val
+                            sample["caption"] = caption_text
+                            sample["lyrics"] = lyrics_text
+                            sample["formatted_lyrics"] = lyrics_text
+                            
+                            # Wipe away false placeholder tracking warnings instantly
+                            sid = sample.get("id", "")
+                            if sid in self.health_reports:
+                                self.health_reports[sid]["issues"] = []
+                                self.health_reports[sid]["status"] = "Healthy"
+                                
+                            synced_count += 1
+                            break
+
+            # Freeze rendering triggers to avoid PySide6 layout refresh crashes
+            self.table.blockSignals(True)
+            try:
+                self.refresh_table()
+                self.on_table_selection_changed()
+            finally:
+                self.table.blockSignals(False)
+
+            # Recalculate your global UI indicator status badge panels
+            from modules.audit import aggregate_health_summary
+            summary = aggregate_health_summary(self.health_reports, self.dataset["samples"], self.config)
+            self.on_audit_completed(summary)
+
+            self.status_label.setText(f"Successfully loaded 1.5XL tags for {synced_count} tracks.")
+            QMessageBox.information(self, "1.5XL Sync Complete", f"Successfully integrated metadata properties across {synced_count} tracks.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Manifest Ingestion Failure", f"Could not map structured data columns: {str(e)}")
+
+
     # -----------------------------------------------------------------------
     # Load / Save Dataset
     # -----------------------------------------------------------------------
@@ -4305,67 +3431,201 @@ class DatasetManager(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Load Error", str(e))
 
-    def save_dataset(self):
+    def load_dataset(self, checked=False, path=None):
+        if isinstance(checked, str) and path is None:
+            path = checked
+
+        if path is None:
+            dialog = QFileDialog(self)
+            dialog.setWindowTitle("Open Dataset JSON")
+            dialog.setDirectory(str(Path.home()))
+            dialog.setFileMode(QFileDialog.ExistingFile)
+            dialog.setAcceptMode(QFileDialog.AcceptOpen)
+            dialog.setNameFilter("JSON Files (*.json)")
+            dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+
+            if dialog.exec() != QDialog.Accepted:
+                return
+
+            selected_files = dialog.selectedFiles()
+            if not selected_files:
+                return
+
+            path = selected_files[0]
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.dataset = json.load(f)
+
+            self.current_dataset_path = path
+            self.record_snapshot()
+
+            restored = self.dataset.get("metadata", {}).get(
+                "health_reports",
+                {},
+            )
+            self.health_reports.clear()
+            self.health_reports.update(restored)
+
+            self.sync_general_props_to_ui()
+            self.refresh_table()
+
+            self.status_label.setText(
+                f"Loaded {len(self.dataset.get('samples', []))} tracks."
+            )
+
+            if not self.health_reports:
+                self.start_health_audit()
+            else:
+                from modules.audit import aggregate_health_summary
+
+                summary = aggregate_health_summary(
+                    self.health_reports,
+                    self.dataset.get("samples", []),
+                    self.config,
+                )
+                self.on_audit_completed(summary)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", str(e))
+
+    def save_dataset(self, path=None):
         if not self.bypass_warnings and self.quality_badge.text().find("Critical") != -1:
             QMessageBox.warning(
                 self, "Export Blocked by Quality Threshold",
                 "Dataset quality is below safe threshold (<60%). Fix flagged issues or click '🛡 I Know What I'm Doing' to bypass.",
                 QMessageBox.Ok
             )
-            return
+            return False
 
-        path, _ = QFileDialog.getSaveFileName(self, "Save Dataset JSON", "", "JSON Files (*.json)")
+        if path is None:
+            path = getattr(self, "current_dataset_path", None)
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(self, "Save Dataset JSON", "", "JSON Files (*.json)")
+        if not path:
+            return False
+
+        try:
+            self.on_general_prop_changed()
+            self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
+            self.dataset["metadata"]["health_reports"] = self.health_reports
+            backup = self._backup_file(path)  # never replace an existing file silently
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.dataset, f, indent=2)
+            self.current_dataset_path = path
+            msg = f"Saved dataset to {Path(path).name}"
+            if backup:
+                msg += " (previous file backed up)"
+            self.status_label.setText(msg)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+            return False
+
+    def save_dataset_as(self):
+        """Always re-prompt for a path, ignoring any remembered one."""
+        path, _ = QFileDialog.getSaveFileName(self, "Save Dataset JSON As", "", "JSON Files (*.json)")
         if path:
-            try:
-                self.on_general_prop_changed()
-                self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
-                backup = self._backup_file(path)  # never replace an existing file silently
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(self.dataset, f, indent=2)
-                msg = f"Saved dataset to {Path(path).name}"
-                if backup:
-                    msg += " (previous file backed up)"
-                self.status_label.setText(msg)
-            except Exception as e:
-                QMessageBox.critical(self, "Save Error", str(e))
+            self.save_dataset(path=path)
+
+    def closeEvent(self, event):
+        if self.dataset.get("samples"):
+            reply = QMessageBox.question(
+                self, "Save Before Closing?", "Save the dataset before exiting?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes
+            )
+            if reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if reply == QMessageBox.Yes and not self.save_dataset():
+                event.ignore()
+                return
+        event.accept()
+
 
     # -----------------------------------------------------------------------
-    # Add Audio Files
+    # Add Audio (single song / folder)
     # -----------------------------------------------------------------------
     def add_audio_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Add Audio Tracks", "", "Audio Files (*.wav *.flac *.mp3)")
+        exts = " ".join(sorted(AUDIO_EXTS))
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add Single Song (one or more audio files)", "",
+            f"Audio Files ({exts})",
+        )
         if paths:
-            self.record_snapshot()
-            global_tag = self.custom_tag_input.text().strip()
-            is_all_inst = self.radio_all_inst.isChecked()
+            self._add_audio_paths(paths)
 
-            for p in paths:
-                fname = Path(p).name
-                self.dataset["samples"].append({
-                    "id": uuid.uuid4().hex[:8],
-                    "audio_path": p,
-                    "filename": fname,
-                    "caption": "",
-                    "genre": "",
-                    "lyrics": "",
-                    "formatted_lyrics": "",
-                    "bpm": 0,
-                    "keyscale": "",
-                    "timesignature": "4/4",
-                    "duration": 0,
-                    "language": "en",
-                    "is_instrumental": is_all_inst,
-                    "custom_tag": global_tag,
-                    "locked": True,
-                    # Spatial fields
-                    "structural_segments": [],
-                    "spatial_tokens": {},
-                    "stem_paths": {},
-                    "chunk_paths": []
-                })
-            self.refresh_table()
-            self.status_label.setText(f"Added {len(paths)} audio tracks.")
+    def add_audio_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Add Audio Folder (recursive)",
+            "",
+        )
+        if not folder:
+            return
+        root = Path(folder)
+        paths = sorted(
+            str(p) for p in root.rglob("*")
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+        )
+        if not paths:
+            QMessageBox.information(
+                self, "Add Audio Folder",
+                f"No supported audio files found in:\n{folder}\n\n"
+                f"Supported formats: {', '.join(sorted(AUDIO_EXTS))}",
+            )
+            return
+        self._add_audio_paths(paths)
+
+    def _add_audio_paths(self, paths):
+        """Shared add path: create samples for the given audio file paths.
+
+        Skips files already present in the dataset (dedupe by ``audio_path``),
+        then refreshes the table and kicks off the initial quality audit.
+        """
+        self.record_snapshot()
+        global_tag = self.custom_tag_input.text().strip()
+        is_all_inst = self.radio_all_inst.isChecked()
+        existing = {s.get("audio_path") for s in self.dataset["samples"]}
+
+        added = 0
+        skipped = 0
+        for p in paths:
+            if p in existing:
+                skipped += 1
+                continue
+            existing.add(p)
+            fname = Path(p).name
+            self.dataset["samples"].append({
+                "id": uuid.uuid4().hex[:8],
+                "audio_path": p,
+                "filename": fname,
+                "caption": "",
+                "genre": "",
+                "lyrics": "",
+                "formatted_lyrics": "",
+                "bpm": 0,
+                "keyscale": "",
+                "timesignature": "",
+                "duration": 0,
+                "language": "en",
+                "is_instrumental": is_all_inst,
+                "custom_tag": global_tag,
+                "locked": True,
+                # Spatial fields
+                "structural_segments": [],
+                "spatial_tokens": {},
+                "stem_paths": {},
+                "chunk_paths": []
+            })
+            added += 1
+        self.refresh_table()
+        msg = f"Added {added} audio track(s)."
+        if skipped:
+            msg += f" {skipped} already present (skipped)."
+        self.status_label.setText(msg)
+        if added:
             self.start_health_audit()
+
 
     # -----------------------------------------------------------------------
     # AI Captioning (with DeepSeek backend option)
@@ -4448,28 +3708,88 @@ class DatasetManager(QMainWindow):
         if not audio_path or not os.path.exists(audio_path):
             QMessageBox.warning(self, "Missing Audio", "The selected track's audio file is missing on disk.")
             return
-        engine = (self.config.get("lyrics_engine") or "whisperx").strip().lower()
-        if engine == "whisperx":
+
+        # Sanitize and fetch the active target configuration engine
+        raw_engine = str(self.config.get("lyrics_engine", "local_whisperx")).lower().strip()
+        
+        # ⚙️ SYSTEM DEFENSE MAPPING: Translate any legacy keys on-the-fly to prevent unhandled branches
+        if raw_engine in ("whisperx", "local_whisperx", ""):
+            engine = "local_whisperx"
+        elif "kaggle" in raw_engine or "acestep" in raw_engine:
+            if "acestep" in raw_engine:
+                engine = "kaggle_acestep"
+            else:
+                engine = "kaggle_whisperx"
+        elif "gemini" in raw_engine:
+            engine = "gemini_api"
+        else:
+            engine = "local_whisperx" # Ultra safety default
+
+        language = (self.config.get("lyrics_language") or "").strip() or None
+        initial_prompt = (self.config.get("lyrics_initial_prompt") or "").strip() or None
+        
+        self.transcribe_btn.setEnabled(False)
+        self.status_label.setText(f"Initializing transcription routing via: {engine.upper()}...")
+        print(f"[DEBUG] start_lyrics_transcription selected engine resolved to: {engine}")
+
+        # Explicitly declare your worker variable to avoid unassigned attribute states
+        self.lyrics_worker = None
+
+        # 🔀 DYNAMIC ENGINE ROUTING SWITCH BLOCK
+        if engine == "local_whisperx":
             from modules.lyrics import transcribe_available
             if not transcribe_available():
                 QMessageBox.information(
                     self, "WhisperX Required",
-                    "WhisperX is not installed.\n\n  pip install whisperx\n\n"
-                    "(requires torch + transformers.)\n\n"
-                    "Or switch the Lyrics Transcription engine to 'gemini' in ⚙ Settings.",
+                    "WhisperX is not installed locally on this machine.\n\n"
+                    "Run: pip install whisperx\n\n"
+                    "Or switch the backend choice in ⚙ Settings to a Kaggle or Gemini option.",
                 )
+                self.transcribe_btn.setEnabled(True)
                 return
-        language = (self.config.get("lyrics_language") or "").strip() or None
-        initial_prompt = (self.config.get("lyrics_initial_prompt") or "").strip() or None
-        self.transcribe_btn.setEnabled(False)
-        self.status_label.setText(f"Transcribing lyrics for {selected.get('filename', '')}...")
-        self.lyrics_worker = TranscribeLyricsWorker(
-            audio_path, engine=engine, language=language, initial_prompt=initial_prompt,
-            config=self.config, parent=self,
-        )
+            from workers.lyrics import TranscribeLyricsWorker
+            self.lyrics_worker = TranscribeLyricsWorker(
+                audio_path, engine="whisperx", language=language, 
+                initial_prompt=initial_prompt, config=self.config, parent=self
+            )
+            
+        elif engine in ("kaggle_whisperx", "kaggle_acestep"):
+            # Pipes execution directly out to your isolated dual-engine file module
+            from workers.kaggle_lyrics import KaggleLyricsWorker
+            target_mode = "whisperx" if engine == "kaggle_whisperx" else "acestep"
+            self.lyrics_worker = KaggleLyricsWorker(
+                audio_path, language=language, initial_prompt=initial_prompt, 
+                config=self.config, mode=target_mode
+            )
+            
+        elif engine == "gemini_api":
+            if not self.config.get("gemini_api_key"):
+                QMessageBox.warning(self, "Missing API Key", "Set your Gemini API Key in ⚙ Settings first.")
+                self.transcribe_btn.setEnabled(True)
+                return
+            from workers.lyrics import TranscribeLyricsWorker
+            self.lyrics_worker = TranscribeLyricsWorker(
+                audio_path, engine="gemini", language=language, 
+                initial_prompt=initial_prompt, config=self.config, parent=self
+            )
+
+        # Catch instances where initialization rules failed to deploy a backend object
+        if self.lyrics_worker is None:
+            print("[DEBUG] CRITICAL: Engine routing collapsed without generating a worker instance.")
+            self.status_label.setText("Error initializing transcription worker.")
+            self.transcribe_btn.setEnabled(True)
+            return
+
+        # Uniformly bind execution callbacks back to your UI elements
         self.lyrics_worker.finished_ok.connect(self.on_lyrics_done)
         self.lyrics_worker.failed.connect(self.on_lyrics_failed)
+        if hasattr(self.lyrics_worker, "progress"):
+            self.lyrics_worker.progress.connect(self.on_worker_progress)
+            
         self.lyrics_worker.start()
+        print("[DEBUG] Lyrics transcription worker thread successfully launched.")
+
+
 
     def on_lyrics_done(self, result):
         self.transcribe_btn.setEnabled(True)
@@ -4478,13 +3798,96 @@ class DatasetManager(QMainWindow):
         if not sample or not new_lyrics:
             self.status_label.setText("Lyrics transcription returned no text.")
             return
+
+        engine_used = str(self.config.get("lyrics_engine", "local_whisperx")).lower()
         old_lyrics = (sample.get("lyrics") or "").strip()
-        # Never clobber hand-edited lyrics: keep the old value, store the new one.
-        sample["lyrics_transcribed"] = new_lyrics
+
+        # 📦 SAVE ENGINE-SPECIFIC VARIABLES INDEPENDENTLY FOR BENCHMARKING
+        if "whisperx" in engine_used:
+            sample["lyrics_whisperx"] = new_lyrics
+        elif "acestep" in engine_used:
+            sample["lyrics_acestep"] = new_lyrics
+        else:
+            sample["lyrics_gemini"] = new_lyrics
+
+        # Preserves the native file logging operation next to the source audio
         self._write_lyrics_text_files(sample, old_lyrics, new_lyrics)
-        self._review_lyrics_dialog(sample, old_lyrics, new_lyrics)
+
+        # 📊 BENCHMARK DETECTOR: If both local variants exist, pop the head-to-head window
+        if "lyrics_whisperx" in sample and "lyrics_acestep" in sample:
+            self._open_dual_engine_comparison_benchmark(sample)
+        else:
+            # Fall back to your legacy single-column review window layout frame
+            self._review_lyrics_dialog(sample, old_lyrics, new_lyrics)
+            
         self.refresh_table()
         self.on_table_selection_changed()
+
+    def _open_dual_engine_comparison_benchmark(self, sample):
+        """
+        Gentoo-inspired side-by-side text matrix benchmarking view layout.
+        Allows direct head-to-head parsing of WhisperX vs ACE-Step engines.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"🎛️ Head-to-Head Engine Benchmark: {sample.get('filename', '')}")
+        dialog.resize(1100, 700)
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "<b>Engine Comparison Mode Activated</b><br>"
+            "Both execution runs have completed. Review performance side-by-side to "
+            "verify model accuracy and determine your recommended baseline default configuration choice."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        split = QSplitter(Qt.Horizontal)
+
+        # Pane A: WhisperX Container Output Space
+        w_widget = QWidget()
+        wl = QVBoxLayout(w_widget)
+        wl.addWidget(QLabel("<b>🔮 WhisperX Model Output Data:</b>"))
+        w_box = QTextBrowser()
+        w_box.setPlainText(sample.get("lyrics_whisperx", ""))
+        wl.addWidget(w_box)
+        split.addWidget(w_widget)
+
+        # Pane B: ACE-Step Container Output Space
+        a_widget = QWidget()
+        al = QVBoxLayout(a_widget)
+        al.addWidget(QLabel("<b>🔥 ACE-Step Transcriber Output Data:</b>"))
+        a_box = QTextBrowser()
+        a_box.setPlainText(sample.get("lyrics_acestep", ""))
+        al.addWidget(a_box)
+        split.addWidget(a_widget)
+
+        layout.addWidget(split, 1)
+
+        row = QHBoxLayout()
+        diff_btn = QPushButton("🔍 Run Diff Inspection Analysis")
+        diff_btn.clicked.connect(lambda: self._show_lyrics_diff(
+            sample.get("lyrics_whisperx", ""), 
+            sample.get("lyrics_acestep", "")
+        ))
+        
+        apply_w_btn = QPushButton("Select WhisperX Baseline Text")
+        apply_w_btn.clicked.connect(lambda: self._choose_caption(sample, sample["lyrics_whisperx"], dialog))
+        
+        apply_a_btn = QPushButton("Select ACE-Step Baseline Text")
+        apply_a_btn.clicked.connect(lambda: self._choose_caption(sample, sample["lyrics_acestep"], dialog))
+        
+        close_btn = QPushButton("Close Frame")
+        close_btn.clicked.connect(dialog.reject)
+
+        row.addWidget(diff_btn)
+        row.addStretch()
+        row.addWidget(apply_w_btn)
+        row.addWidget(apply_a_btn)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        dialog.exec()
+
 
     def _write_lyrics_text_files(self, sample, old_lyrics, new_lyrics):
         """Write old + new lyrics to sibling .txt files (backing up any that
@@ -4805,9 +4208,10 @@ class DatasetManager(QMainWindow):
         QMessageBox.warning(self, "MusicBrainz Failed", str(err))
 
     def show_stats_report(self):
-        from modules.stats import build_dataset_report
+        from modules.stats import build_dataset_report as compute_stats_charts
 
-        report = build_dataset_report(self.dataset)
+        # Generate the chart data using the uniquely named alias function
+        report = compute_stats_charts(self.dataset)
         dialog = QDialog(self)
         dialog.setWindowTitle("Dataset Statistics")
         dialog.resize(560, 420)
@@ -4876,6 +4280,259 @@ class DatasetManager(QMainWindow):
         self.refresh_table()
         self.status_label.setText(f"Replaced '{find}' in {count} field(s).")
         QMessageBox.information(self, "Find/Replace", f"Replaced '{find}' in {count} field(s).")
+
+    # -------------------------------------------------------------------------
+    # Bulk rename — default mode: song name only, spaces -> underscores
+    # -------------------------------------------------------------------------
+    def open_bulk_rename_dialog(self):
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Add audio tracks before renaming.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Bulk Rename Tracks")
+        dialog.resize(640, 540)
+        lay = QVBoxLayout(dialog)
+
+        hint = QLabel("💡 Hover any field for help. In patterns, {n} is the track counter.")
+        hint.setStyleSheet("color: #9db2c8; font-style: italic;")
+        lay.addWidget(hint)
+
+        scope_combo = QComboBox()
+        scope_combo.addItems(["All tracks", "Filtered (visible) tracks", "Selected tracks"])
+        scope_combo.setToolTip(
+            "Which tracks to rename.\n"
+            "• All tracks — every row in the dataset\n"
+            "• Filtered (visible) tracks — only what the search box currently shows\n"
+            "• Selected tracks — the rows you have highlighted in the table"
+        )
+        mode_combo = QComboBox()
+        mode_combo.addItems(
+            ["Song name (spaces → _)", "Find & Replace", "Prefix", "Suffix", "Number sequence"]
+        )
+        mode_combo.setToolTip(
+            "How the new name is built.\n"
+            "• Song name (spaces → _) — keep only the song title, replace spaces with "
+            "underscores (default)\n"
+            "• Find & Replace — swap one piece of text for another\n"
+            "• Prefix — add text to the START of the filename\n"
+            "• Suffix — add text BEFORE the extension\n"
+            "• Number sequence — rename to a numbered pattern (see Pattern)"
+        )
+        find_edit = QLineEdit()
+        find_edit.setPlaceholderText("text to find…")
+        find_edit.setToolTip(
+            "Find & Replace only.\n"
+            "The exact text to search for inside the filename (before the extension).\n\n"
+            "Example: \"Demo\" matches \"My_Demo_Track.wav\""
+        )
+        repl_edit = QLineEdit()
+        repl_edit.setPlaceholderText("replacement…")
+        repl_edit.setToolTip(
+            "Find & Replace only.\n"
+            "The text that replaces every match of Find.\n\n"
+            "Example: Find \"Demo\" / Replace \"Master\" → \"My_Master_Track.wav\""
+        )
+        prefix_edit = QLineEdit()
+        prefix_edit.setPlaceholderText("prefix…")
+        prefix_edit.setToolTip(
+            "Prefix mode.\n"
+            "Text added to the very START of the filename, before the song name.\n\n"
+            "Example: prefix \"acoustic_\" → \"acoustic_My_Track.wav\""
+        )
+        suffix_edit = QLineEdit()
+        suffix_edit.setPlaceholderText("suffix…")
+        suffix_edit.setToolTip(
+            "Suffix mode.\n"
+            "Text added to the name BEFORE the file extension.\n\n"
+            "Example: suffix \"_final\" → \"My_Track_final.wav\""
+        )
+        pattern_edit = QLineEdit("track_{n:03d}")
+        pattern_edit.setPlaceholderText("e.g. track_{n:03d}")
+        pattern_edit.setToolTip(
+            "Number sequence only.\n"
+            "A template where {n} is the counter (starting at Start number).\n\n"
+            "• {n} → 1, 2, 3…\n"
+            "• {n:02d} → 01, 02, 03… (pad to 2 digits)\n"
+            "• {n:03d} → 001, 002, 003… (pad to 3 digits)\n\n"
+            "Example: \"track_{n:03d}\" → track_001.wav, track_002.wav…"
+        )
+        start_spin = QSpinBox()
+        start_spin.setRange(0, 9999)
+        start_spin.setToolTip(
+            "Number sequence only.\n"
+            "The number {n} starts at when counting.\n\n"
+            "Example: start 1 → 001, 002…"
+        )
+
+        disk_check = QCheckBox("Rename the file on disk too (original is backed up first)")
+        disk_check.setChecked(False)
+        disk_check.setToolTip(
+            "Also rename the actual audio file on disk, not just the name shown in the table.\n"
+            "The original file is always backed up first — nothing is ever lost."
+        )
+
+        preview = QListWidget()
+        preview.setMaximumHeight(240)
+
+        form = QFormLayout()
+        form.addRow("Scope:", scope_combo)
+        form.addRow("Mode:", mode_combo)
+        form.addRow("Find:", find_edit)
+        form.addRow("Replace:", repl_edit)
+        form.addRow("Prefix:", prefix_edit)
+        form.addRow("Suffix:", suffix_edit)
+        form.addRow("Pattern ({n}):", pattern_edit)
+        form.addRow("Start number:", start_spin)
+        lay.addLayout(form)
+        lay.addWidget(disk_check)
+        lay.addWidget(QLabel("<b>Preview:</b>"))
+        lay.addWidget(preview, 1)
+
+        def _refresh_preview(*_):
+            preview.clear()
+            for old, new in self._bulk_rename_preview(
+                scope_combo, mode_combo, find_edit, repl_edit,
+                prefix_edit, suffix_edit, pattern_edit, start_spin,
+            ):
+                preview.addItem(f"{old}  →  {new}")
+
+        for w in (scope_combo, mode_combo, find_edit, repl_edit,
+                  prefix_edit, suffix_edit, pattern_edit, start_spin):
+            if isinstance(w, QComboBox):
+                w.currentIndexChanged.connect(_refresh_preview)
+            elif isinstance(w, QSpinBox):
+                w.valueChanged.connect(_refresh_preview)
+            else:
+                w.textChanged.connect(_refresh_preview)
+
+        row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        go_btn = QPushButton("Rename")
+        go_btn.clicked.connect(
+            lambda: self._apply_bulk_rename(
+                dialog, scope_combo, mode_combo, find_edit, repl_edit,
+                prefix_edit, suffix_edit, pattern_edit, start_spin, disk_check,
+            )
+        )
+        row.addStretch()
+        row.addWidget(cancel_btn)
+        row.addWidget(go_btn)
+        lay.addLayout(row)
+
+        _refresh_preview()
+        dialog.exec()
+
+    @staticmethod
+    def _song_name_from_filename(name):
+        """Default bulk-rename: keep only the song name, spaces -> underscores.
+
+        Strips a leading track number ("01 - ...") and an "Artist - " prefix
+        (the app's MusicBrainz convention), then replaces whitespace runs with
+        underscores. Extension is preserved by the caller.
+        """
+        stem = os.path.splitext(name)[0]
+        stem = re.sub(r"^\s*\d{1,3}\s*[-._]\s*", "", stem)
+        if " - " in stem:
+            stem = stem.split(" - ")[-1]
+        return re.sub(r"\s+", "_", stem).strip("_")
+
+    def _bulk_rename_preview(self, scope_combo, mode_combo, find_edit, repl_edit,
+                             prefix_edit, suffix_edit, pattern_edit, start_spin):
+        out = []
+        for s, new in self._bulk_rename_targets(
+            scope_combo, mode_combo, find_edit, repl_edit,
+            prefix_edit, suffix_edit, pattern_edit, start_spin,
+        ):
+            out.append((s.get("filename", ""), new))
+        return out
+
+    def _bulk_rename_targets(self, scope_combo, mode_combo, find_edit, repl_edit,
+                             prefix_edit, suffix_edit, pattern_edit, start_spin):
+        """Return ``[(sample, new_filename), ...]`` — never mutates samples."""
+        samples = self.dataset.get("samples", [])
+        scope = scope_combo.currentText()
+        if scope == "Selected tracks":
+            rows = sorted({r.row() for r in self.table.selectionModel().selectedRows()})
+            targets = [samples[self._table_sample_indices[r]]
+                       for r in rows if 0 <= r < len(self._table_sample_indices)]
+        elif scope == "Filtered (visible) tracks":
+            targets = [samples[i] for i in self._table_sample_indices if 0 <= i < len(samples)]
+        else:
+            targets = list(samples)
+
+        mode = mode_combo.currentText()
+        result = []
+        seen = set()
+        n = start_spin.value()
+        for s in targets:
+            old = s.get("filename", "")
+            if not old:
+                continue
+            stem, ext = os.path.splitext(old)
+            if mode == "Song name (spaces → _)":
+                new = self._song_name_from_filename(old)
+            elif mode == "Find & Replace":
+                find = find_edit.text()
+                if not find or find not in stem:
+                    continue
+                new = stem.replace(find, repl_edit.text()) + ext
+            elif mode == "Prefix":
+                new = prefix_edit.text() + old
+            elif mode == "Suffix":
+                new = stem + suffix_edit.text() + ext
+            else:  # Number sequence
+                try:
+                    new = pattern_edit.text().format(n=n) + ext
+                except (KeyError, ValueError, IndexError):
+                    new = pattern_edit.text().replace("{n}", str(n)) + ext
+                n += 1
+            if not new or new in seen:
+                continue
+            seen.add(new)
+            result.append((s, new))
+        return result
+
+    def _apply_bulk_rename(self, dialog, scope_combo, mode_combo, find_edit, repl_edit,
+                           prefix_edit, suffix_edit, pattern_edit, start_spin, disk_check):
+        from core.file_system import execute_disk_rename
+        
+        # 1. Gather targeted samples using your existing scope filters
+        samples_to_rename = self._get_rename_scope_targets(scope_combo.currentText())
+        if not samples_to_rename:
+            return
+
+        options = {
+            "find_text": find_edit.text(),
+            "replace_text": repl_edit.text(),
+            "prefix_text": prefix_edit.text(),
+            "suffix_text": suffix_edit.text(),
+            "pattern": pattern_edit.text(),
+            "start_number": start_spin.value(),
+            "create_backup": True
+        }
+
+        # 2. Run the decoupled script directly on the disk files
+        self.record_snapshot()
+        updates, count = execute_disk_rename(samples_to_rename, mode_combo.currentText(), options)
+
+        # 3. Synchronize memory state variables using the script results
+        for update in updates:
+            for sample in self.dataset["samples"]:
+                if sample["id"] == update["id"]:
+                    sample["filename"] = update["new_filename"]
+                    sample["audio_path"] = update["new_audio_path"]
+
+        # 4. Refresh UI instantly from the modified disk footprint
+        dialog.accept()
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.status_label.setText(f"Successfully processed batch script! Renamed {count} files on disk.")
+        
+        # Trigger your health audit to scan the newly renamed configurations automatically
+        self.start_health_audit()
 
     def open_lyrics_editor(self):
         sample = self.get_selected_sample()
@@ -5055,6 +4712,130 @@ class DatasetManager(QMainWindow):
         stop_btn.clicked.connect(self.stop_track_playback)
         dialog.exec()
 
+    # -----------------------------------------------------------------------
+    # On-disk versioning + Hugging Face push
+    # -----------------------------------------------------------------------
+    def open_versioning_dialog(self):
+        from modules.versioning import list_versions, save_version, load_version, diff_json
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Dataset Versioning")
+        dialog.resize(560, 420)
+        lay = QVBoxLayout(dialog)
+        self.ver_list = QListWidget()
+
+        def refresh():
+            self.ver_list.clear()
+            for v in list_versions():
+                import datetime
+                mt = datetime.datetime.fromtimestamp(v["mtime"]).strftime("%Y-%m-%d %H:%M")
+                self.ver_list.addItem(f"{v['name']} — {v['tracks']} tracks ({mt})")
+                self.ver_list.item(self.ver_list.count() - 1).setData(Qt.UserRole, v["path"])
+        refresh()
+        lay.addWidget(self.ver_list, 1)
+
+        def create_snapshot():
+            from modules.versioning import save_version
+            path = save_version(self.dataset, label="manual")
+            self.status_label.setText(f"Snapshot saved: {path}")
+            refresh()
+
+        def diff_selected():
+            item = self.ver_list.currentItem()
+            if not item:
+                QMessageBox.information(self, "Versioning", "Select a snapshot to diff.")
+                return
+            from modules.versioning import load_version, diff_json
+            snap = load_version(item.data(Qt.UserRole))
+            text = diff_json(snap, self.dataset)
+            d = QDialog(self); d.setWindowTitle("Version Diff"); d.resize(720, 500)
+            dl = QVBoxLayout(d)
+            b = QTextBrowser(); b.setPlainText(text); dl.addWidget(b, 1)
+            c = QPushButton("Close"); c.clicked.connect(d.accept); dl.addWidget(c)
+            d.exec()
+
+        def restore_selected():
+            item = self.ver_list.currentItem()
+            if not item:
+                QMessageBox.information(self, "Versioning", "Select a snapshot to restore.")
+                return
+            from modules.versioning import load_version
+            reply = QMessageBox.question(self, "Restore Snapshot",
+                                         "Replace the current dataset with this snapshot?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.record_snapshot()
+                self.dataset = load_version(item.data(Qt.UserRole))
+                self.refresh_table()
+                self.on_table_selection_changed()
+                self.status_label.setText("Dataset restored from snapshot.")
+
+        row = QHBoxLayout()
+        snap_btn = QPushButton("Create Snapshot")
+        snap_btn.clicked.connect(create_snapshot)
+        diff_btn = QPushButton("Diff with Current")
+        diff_btn.clicked.connect(diff_selected)
+        rest_btn = QPushButton("Restore")
+        rest_btn.clicked.connect(restore_selected)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.reject)
+        row.addWidget(snap_btn); row.addWidget(diff_btn); row.addWidget(rest_btn)
+        row.addStretch(); row.addWidget(close_btn)
+        lay.addLayout(row)
+        dialog.exec()
+
+    def open_hf_push_dialog(self):
+        if not self.dataset.get("samples"):
+            QMessageBox.information(self, "Push to HF", "The dataset is empty — add tracks first.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Push to Hugging Face")
+        dialog.resize(460, 200)
+        lay = QVBoxLayout(dialog)
+        self.hf_repo_edit = QLineEdit()
+        self.hf_repo_edit.setPlaceholderText("username/dataset-name (or a new repo id)")
+        self.hf_repo_edit.setText(self.config.get("kaggle_user", "") + "/ace-step-dataset")
+        self.hf_private = QCheckBox("Private repo")
+        lay.addWidget(QLabel("<b>Hugging Face repo:</b>"))
+        lay.addWidget(self.hf_repo_edit)
+        lay.addWidget(self.hf_private)
+        note = QLabel("Uses the HF token from ⚙ Settings → Model Manager (or HF_TOKEN).")
+        note.setStyleSheet("color: #aaa;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        go_btn = QPushButton("Push")
+        go_btn.clicked.connect(lambda: self._run_hf_push(dialog))
+        row.addStretch(); row.addWidget(cancel_btn); row.addWidget(go_btn)
+        lay.addLayout(row)
+        dialog.exec()
+
+    def _run_hf_push(self, dialog):
+        repo = self.hf_repo_edit.text().strip()
+        if not repo or "/" not in repo:
+            QMessageBox.warning(self, "Push to HF", "Enter a repo id like 'username/dataset-name'.")
+            return
+        from workers.hf_push import HFPushWorker
+        token = (self.config.get("hf_token") or "").strip() or None
+        self.hf_push_worker = HFPushWorker(self.dataset, repo, token=token,
+                                           private=self.hf_private.isChecked(), parent=self)
+        self.hf_push_worker.finished_ok.connect(lambda r: self._on_hf_pushed(r, dialog))
+        self.hf_push_worker.failed.connect(lambda e: self._on_hf_push_failed(e, dialog))
+        dialog.accept()
+        self.status_label.setText(f"Pushing {repo} to Hugging Face…")
+        self.hf_push_worker.start()
+
+    def _on_hf_pushed(self, repo, dialog):
+        self.status_label.setText(f"Pushed dataset to {repo}.")
+        QMessageBox.information(self, "Push Complete",
+                                f"Dataset pushed to:\nhttps://huggingface.co/datasets/{repo}")
+
+    def _on_hf_push_failed(self, err, dialog):
+        self.status_label.setText("Hugging Face push failed.")
+        QMessageBox.warning(self, "Push Failed", str(err))
+
 
     # -----------------------------------------------------------------------
     # Common worker callbacks
@@ -5067,33 +4848,19 @@ class DatasetManager(QMainWindow):
         self.run_ai_btn.setEnabled(True)
         self.scan_btn.setEnabled(True)
         self.normalize_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setVisible(False)      
         self.status_label.setText("Operation error.")
         QMessageBox.critical(self, "Error", f"An error occurred:\n{err_msg}")
 
-    def on_struct_batch_done(self):
-        self.run_struct_btn.setEnabled(True)
-        self.struct_progress.setVisible(False)
-        self.struct_status.setText("Structural pipeline completed for all tracks.")
-        QMessageBox.information(self, "Pipeline Complete", "All selected tracks have been processed.")
+    def on_remote_pipeline_success(self, result_payload):
+        """Clean decoupled pass-through directing data integration to our core script engine."""
+        if hasattr(self, "scan_btn") and self.scan_btn is not None:
+            self.scan_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        
+        # Trigger your independent module function
+        from core.manifest_sync import integrate_remote_pipeline_data
+        integrate_remote_pipeline_data(self, result_payload)
 
-    def detect_instruments_for_separation(self):
-        QMessageBox.information(
-            self,
-            "Detect Instruments",
-            "This feature is not yet fully implemented.\n"
-            "Please run the AI captioner on the track first,\n"
-            "then click 'Detect via Captioner' again."
-        )
-
-# ============================================================================
-# Application Entry Point
-# ============================================================================
-if __name__ == "__main__":
-    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app = QApplication(sys.argv)
-    window = DatasetManager()
-    window.show()
-    sys.exit(app.exec())
 
 

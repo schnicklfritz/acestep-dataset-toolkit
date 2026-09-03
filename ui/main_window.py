@@ -2412,20 +2412,49 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Load / Save Dataset
     # -----------------------------------------------------------------------
-    def load_dataset(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open Dataset JSON", "", "JSON Files (*.json)")
-        if path:
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    self.dataset = json.load(f)
-                self.record_snapshot()
-                self.health_reports.clear()
-                self.sync_general_props_to_ui()
-                self.refresh_table()
-                self.status_label.setText(f"Loaded {len(self.dataset.get('samples', []))} tracks.")
-                self.start_health_audit()
-            except Exception as e:
-                QMessageBox.critical(self, "Load Error", str(e))
+    def load_dataset(self, checked=False):
+        QMessageBox.information(
+            self,
+            "Open JSON Test",
+            "The active Open JSON handler was called.",
+        )
+
+        start_dir = str(Path.home())
+
+        dialog = QFileDialog(self)
+        dialog.setWindowTitle("Open Dataset JSON")
+        dialog.setDirectory(start_dir)
+        dialog.setFileMode(QFileDialog.ExistingFile)
+        dialog.setAcceptMode(QFileDialog.AcceptOpen)
+        dialog.setNameFilter("JSON Files (*.json)")
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_files = dialog.selectedFiles()
+        if not selected_files:
+            return
+
+        path = selected_files[0]
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.dataset = json.load(f)
+
+            self.record_snapshot()
+            self.health_reports.clear()
+            self.sync_general_props_to_ui()
+            self.refresh_table()
+
+            self.status_label.setText(
+                f"Loaded {len(self.dataset.get('samples', []))} tracks."
+            )
+
+            self.start_health_audit()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", str(e))
 
     def save_dataset(self):
         if not self.bypass_warnings and self.quality_badge.text().find("Critical") != -1:
