@@ -22,6 +22,7 @@ import soundfile as sf
 from openai import OpenAI
 
 from config import DEFAULT_CONFIG
+from modules.mvsep_gui import MVSEPDialog
 from modules.config_store import load_config, save_config
 from modules.model_manager import load_catalog, leaderboards, find_model, is_downloaded, remove_model
 from workers.model_manager import ModelDownloadWorker
@@ -147,6 +148,22 @@ class DatasetManager(QMainWindow):
             self.undo_stack.pop(0)
         self.redo_stack.clear()
         self.update_undo_redo_buttons()
+
+    def open_mvsep_dialog(self):
+        selected = self.get_selected_sample()
+
+        audio_path = ""
+
+        if selected:
+            audio_path = selected.get("audio_path", "")
+
+        dialog = MVSEPDialog(
+            config=self.config,
+            audio_path=audio_path,
+            parent=self,
+        )
+
+        dialog.exec()
 
     def _backup_file(self, path):
         """Back up any existing file before it is changed or replaced.
@@ -1319,7 +1336,9 @@ class DatasetManager(QMainWindow):
 
         self.stem_source_combo = QComboBox()
         self.stem_source_combo.addItems(["Import existing stems", "Separate via MVSEP", "Separate via Kaggle (Demucs)"])
+
         opts_layout.addRow("Stem source:", self.stem_source_combo)
+
 
         self.use_deepseek_check = QCheckBox("Use DeepSeek for aggregation")
         self.use_deepseek_check.setChecked(True)
@@ -1424,6 +1443,11 @@ class DatasetManager(QMainWindow):
         self.struct_stem_combo = QComboBox()
         self.struct_stem_combo.addItems(["Import existing stems", "Separate via MVSEP", "Separate via Kaggle (Demucs)"])
         stem_layout.addWidget(self.struct_stem_combo)
+        self.mvsep_gui_button = QPushButton(
+            "🎛 Configure / Test MVSEP"
+        )
+        self.mvsep_gui_button.clicked.connect(self.open_mvsep_dialog)
+        inner.addWidget(self.mvsep_gui_button)
         inner.addLayout(stem_layout)
 
         # Segmentation source
@@ -1831,31 +1855,87 @@ class DatasetManager(QMainWindow):
         stem_source = self.struct_stem_combo.currentText()
         use_deepseek = self.struct_deepseek_check.isChecked()
 
-        # 🛡️ THE GATEKEEPER: Run the shared key & credential verification helper
-        if not self._prepare_pipeline_credentials(stem_source, use_deepseek):
-            return
-
+        
         # ---- Determine which tracks to process based on scope ----
-        scope = self.struct_scope_combo.currentText()
+        scope = self.struct_scope_combo.currentText().strip()
+        all_samples = self.dataset.get("samples", [])
+
         if scope == "All Tracks":
-            tracks = self.dataset.get("samples", [])
+            tracks = list(all_samples)
+
             if not tracks:
-                QMessageBox.warning(self, "No Tracks", "The dataset is empty.")
+                QMessageBox.warning(
+                    self,
+                    "No Tracks",
+                    "The dataset is empty.",
+                )
                 return
+
         elif scope == "Tracks Missing Captions":
-            tracks = [s for s in self.dataset.get("samples", []) if not s.get("caption", "").strip()]
+            tracks = [
+                sample
+                for sample in all_samples
+                if not (sample.get("caption") or "").strip()
+            ]
+
             if not tracks:
-                QMessageBox.information(self, "Nothing to Process", "All tracks already have captions.")
+                QMessageBox.information(
+                    self,
+                    "Nothing to Process",
+                    "All tracks already have captions.",
+                )
                 return
 
-            # Validate indices
-            all_samples = self.dataset.get("samples", [])
-            valid_indices = [i for i in indices if 1 <= i <= len(all_samples)]
+        else:
+            # The only remaining Structural Pipeline scope is:
+            # "Selected Tracks (from list)".
+            selected_indices = []
+
+            numbers_text = self.track_numbers_input.text().strip()
+
+            if numbers_text:
+                parsed_indices = self._parse_track_numbers(numbers_text)
+
+                if parsed_indices is None:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Input",
+                        "Use track numbers or ranges, for example: "
+                        "1,3,5 or 1-3,5.",
+                    )
+                    return
+
+                selected_indices.extend(parsed_indices)
+
+            for item in self.track_list_widget.selectedItems():
+                try:
+                    track_number = int(item.text().split(" - ", 1)[0])
+                    selected_indices.append(track_number)
+                except (ValueError, IndexError):
+                    continue
+
+            selected_indices = sorted(set(selected_indices))
+
+            valid_indices = [
+                index
+                for index in selected_indices
+                if 1 <= index <= len(all_samples)
+            ]
+
             if not valid_indices:
-                QMessageBox.warning(self, "No Valid Tracks", "None of the numbers correspond to existing tracks.")
+                QMessageBox.warning(
+                    self,
+                    "No Tracks Selected",
+                    "For 'Selected Tracks (from list)', select one or more "
+                    "tracks from the list or enter numbers such as 1,3,5.",
+                )
                 return
-            tracks = [all_samples[i-1] for i in valid_indices]
 
+            tracks = [
+                all_samples[index - 1]
+                for index in valid_indices
+            ]
+        
         # ---- Read UI options ----
         stem_source = self.struct_stem_combo.currentText()
         if stem_source == "Separate via MVSEP":
@@ -2013,60 +2093,6 @@ class DatasetManager(QMainWindow):
         self.struct_status.setText("Structural pipeline completed for all tracks.")
         QMessageBox.information(self, "Pipeline Complete", "All selected tracks have been processed.")
 
-    def detect_instruments_for_separation(self):
-        """Detect instruments (tagger-based, no API key) and recommend MVSEP models."""
-        selected = self.get_selected_sample()
-        if not selected:
-            QMessageBox.warning(self, "No Track Selected", "Please select a track first.")
-            return
-        audio_path = selected.get("audio_path", "")
-        if not audio_path or not os.path.exists(audio_path):
-            QMessageBox.warning(self, "Missing Audio", "The selected track's audio file is missing on disk.")
-            return
-
-        from workers.instrument_detect import recommend_from_tagger
-        try:
-            models, instruments = recommend_from_tagger(audio_path, self.config)
-        except Exception as e:  # noqa: BLE001
-            models, instruments = [], []
-            print(f"tagger recommend failed: {e}")
-
-        if instruments:
-            lines = [f"• {i}" for i in instruments]
-            lines.append("")
-            lines.append("Recommended models:")
-            if models:
-                lines.extend(f"  {m}" for m in models)
-            else:
-                lines.append("  (no instrument-specific model matched)")
-            self.detected_instruments_list.setText("\n".join(lines))
-            self.extra_models_input.setText(", ".join(models))
-            self.status_label.setText("Instruments detected — review the recommended models before running.")
-            return
-
-        # Fallback: keyword-match against the existing caption.
-        caption = selected.get("caption", "")
-        if not caption:
-            self.detected_instruments_list.setText(
-                "No instruments matched. Run the AI captioner first, then try again."
-            )
-            return
-        try:
-            from stem_separator import StemSeparator
-            separator = StemSeparator(self.config)
-            instrument_map = separator._instrument_to_model_map()
-            detected = []
-            caption_lower = caption.lower()
-            for keyword, model_name in instrument_map.items():
-                if keyword in caption_lower:
-                    detected.append(f"{keyword} → {model_name}")
-            if detected:
-                self.detected_instruments_list.setText("\n".join(detected))
-            else:
-                self.detected_instruments_list.setText("No known instruments detected in caption.")
-        except Exception as e:  # noqa: BLE001
-            self.detected_instruments_list.setText(f"Error: {e}")
-
     def load_band_profiles(self):
         """Load band profiles from band_profiles.json."""
         path = os.path.join(os.path.dirname(__file__), "band_profiles.json")
@@ -2097,12 +2123,140 @@ class DatasetManager(QMainWindow):
         for era in band_data.get("eras", []):
             self.era_combo.addItem(era["name"])
 
+    def get_structural_scope_samples(self):
+        """Return tracks selected by the Structural Pipeline scope pulldown."""
+        samples = self.dataset.get("samples", [])
+        scope = self.struct_scope_combo.currentText()
+
+        if scope == "All Tracks":
+            return list(samples)
+
+        if scope == "Tracks Missing Captions":
+            return [
+                sample
+                for sample in samples
+                if not (sample.get("caption") or "").strip()
+            ]
+
+        if scope == "Selected Tracks (from list)":
+            selected = self.get_selected_sample()
+
+            if selected is None:
+                raise ValueError(
+                    "Choose a track in Dataset Studio first, then run the "
+                    "Structural Pipeline with scope set to 'Selected Tracks (from list)'."
+                )
+
+            return [selected]
+
+        raise ValueError(f"Unknown Structural Pipeline scope: {scope}")
+
+
     def on_struct_scope_changed(self, scope_text):
-        show = scope_text == "Selected Tracks (from list)"
-        self.track_list_widget.setVisible(show)
-        self.track_numbers_input.setVisible(show)
-        if show:
+        """Show manual selection controls only for the selected-tracks scope."""
+        show_selected_controls = scope_text == "Selected Tracks (from list)"
+
+        self.track_list_widget.setVisible(show_selected_controls)
+        self.track_numbers_input.setVisible(show_selected_controls)
+
+        if show_selected_controls:
             self.refresh_track_list()
+
+
+
+    def detect_instruments_for_separation(self):
+        try:
+            selected_samples = self.get_structural_scope_samples()
+
+        except ValueError as exc:
+            QMessageBox.warning(
+                self,
+                "No Track Selected",
+                str(exc),
+            )
+            return
+
+        if not selected_samples:
+            QMessageBox.information(
+                self,
+                "No Tracks Available",
+                "The current Structural Pipeline scope contains no tracks.",
+            )
+            return
+
+        if len(selected_samples) != 1:
+            QMessageBox.information(
+                self,
+                "Instrument Analysis",
+                f"The current scope contains {len(selected_samples)} tracks. "
+                "Instrument analysis currently previews one track at a time. "
+                "Set scope to 'Selected Tracks' and select a track in "
+                "Dataset Studio.",
+            )
+            return
+
+        selected = selected_samples[0]
+        audio_path = selected.get("audio_path", "")
+        if not audio_path or not os.path.exists(audio_path):
+            QMessageBox.warning(
+                self,
+                "Missing Audio",
+                "The selected track's audio file is missing on disk.",
+            )
+            return
+
+        from workers.instrument_detect import recommend_from_tagger
+
+        try:
+            models, instruments = recommend_from_tagger(audio_path, self.config)
+        except Exception as exc:  # noqa: BLE001
+            models, instruments = [], []
+            print(f"tagger recommendation failed: {exc}")
+
+        if instruments:
+            lines = [f"• {instrument}" for instrument in instruments]
+            lines.append("")
+            lines.append("Recommended models:")
+            if models:
+                lines.extend(f"• {model}" for model in models)
+            else:
+                lines.append("• No instrument-specific MVSEP model matched.")
+
+            self.detected_instruments_list.setText("\n".join(lines))
+            self.extra_models_input.setText(", ".join(models))
+            self.status_label.setText(
+                "Instruments detected. Review recommendations before running."
+            )
+            return
+
+        caption = selected.get("caption", "")
+        if not caption:
+            self.detected_instruments_list.setText(
+                "No instruments detected from local analysis. "
+                "Run a caption job first, then try again."
+            )
+            return
+
+        try:
+            separator = StemSeparator(self.config)
+            instrument_map = separator._instrument_to_model_map()
+            caption_lower = caption.lower()
+            detected = [
+                f"{keyword} → {model_name}"
+                for keyword, model_name in instrument_map.items()
+                if keyword in caption_lower
+            ]
+
+            if detected:
+                self.detected_instruments_list.setText("\n".join(detected))
+            else:
+                self.detected_instruments_list.setText(
+                    "No known instruments detected in the current caption."
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.detected_instruments_list.setText(f"Instrument analysis error: {exc}")
+
+
 
     def refresh_track_list(self):
         """Populate the track list with numbered filenames."""

@@ -1,0 +1,36 @@
+# .changed_markers
+# ------------------------------------------------------------------
+# CACHE-INVALIDATION NOTICES — read THIS first before touching code.
+#
+# RULE (see .clinerules): Everything committed at HEAD is a CACHE HIT.
+# Only open files / line-ranges listed under [UNREVIEWED] below.
+# When you (the user) commit a change, DELETE its marker line(s) — the
+# change is then absorbed by git (the cache) and no longer needs reading.
+#
+# Format:  <path>  L<start>-<end>   <one-line status>
+# ------------------------------------------------------------------
+
+[UNREVIEWED]
+dataset_manager.py  — structural-pipeline scope handling & MVSEP integration
+   IMPLANTED FIXES (review these):
+   L~2130-2200  get_structural_scope_samples: scope string fixed to
+                "Selected Tracks (from list)" (was "Selected Tracks" -> crashed)
+   L~2100-...   removed DUPLICATE detect_instruments_for_separation (old def)
+                and DUPLICATE on_struct_scope_changed (old def) — silent overrides
+   L~2100-2200  cleaned placeholder dup "selected = selected_samples[0]" x2 -> x1
+   USER'S OWN NEW WORK (review for your commit):
+   ~top        new MVSEPDialog wiring + open_mvsep_dialog method
+   ~L1300s     new mvsep_gui_button + detected_instruments_list widgets
+   ~L1670-1930 reworked scope parsing/branching in structural pipeline
+modules/mvsep_gui.py  (NEW, untracked, 496 lines) — MVSEP config/test dialog.
+                Full review before add. Uses modules.mvsep_api.* worker.
+
+[FLAGGED - REVIEW / NOT AUTO-FIXED]
+dataset_manager.py  GATEKEEPER credential check REMOVED entirely:
+   The call to self._prepare_pipeline_credentials(...) AND the method definition
+   were both deleted across your recent edits (grep = 0 hits now).
+   Confirmed intentional?  If credentials are now validated lazily elsewhere,
+   fine. If not, this weakens API-key safeguards before the deepseek/llm calls.
+
+[RESOLVED / CACHE HIT]
+(no outstanding committed items to track)

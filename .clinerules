@@ -4,3 +4,16 @@
 - Do not read any code files in the repository unless explicitly asked by the user or required by the immediate task.
 - If you need to view code structure, always use specific structural tools (like reading only 'widgets.py' or 'orchestrator.py') instead of executing generic shell 'cat' commands on random files.
 - When generating or editing PySide6 UI structures, do not read digital signal processing logic files (e.g., dsp_normalizer, stem_separator) unless actively compiling data hooks between them.
+
+# ============================================================
+# CHANGE-MARKER SYSTEM (cost optimization) — READ .changed_markers FIRST
+# ============================================================
+- Before reading ANY module, read the repo-root file `.changed_markers`.
+- Treat committed state (git HEAD) as a full CACHE HIT: do NOT re-sweep or
+  re-read unchanged files to "confirm" behavior. Trust git.
+- Only open files / line-ranges listed under the `[UNREVIEWED]` section.
+- Placeholders / dead code already flagged there stay flagged until the USER
+  fixes them and removes the marker line — do not re-discover them.
+- Prefer `git diff` (base vs working tree) over whole-file reads to learn what
+  changed. Never `cat` a 5000-line file to find a delta.
+
