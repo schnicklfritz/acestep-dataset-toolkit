@@ -8,12 +8,38 @@
 # ============================================================
 # CHANGE-MARKER SYSTEM (cost optimization) — READ .changed_markers FIRST
 # ============================================================
-- Before reading ANY module, read the repo-root file `.changed_markers`.
-- Treat committed state (git HEAD) as a full CACHE HIT: do NOT re-sweep or
-  re-read unchanged files to "confirm" behavior. Trust git.
-- Only open files / line-ranges listed under the `[UNREVIEWED]` section.
-- Placeholders / dead code already flagged there stay flagged until the USER
-  fixes them and removes the marker line — do not re-discover them.
+# `.changed_markers` is the SINGLE exception to the cache-hit rule:
+# it is always read first, before any code, because it is the index.
+- Before reading ANY module, read `.changed_markers`.
+- Treat committed state (git HEAD) as an IMMUTABLE CACHE HIT. Never run
+  whole-repo file sweeps; never scan clean files to "confirm" behavior. Trust git.
+- Only inspect the specific hunks / functions identified in `.changed_markers`.
+- STALE LINE PROTECTION: anchor every edit to function/class names + surrounding
+  hunk context, never raw line numbers (marker line ranges can go stale).
+- SIDE-EFFECT AUDIT: if an edit changes a function signature, parameter list, or
+  return type, run `git grep -n "<fn>"` to inspect ONLY the call sites for
+  breakage. Do not re-read entire caller files.
 - Prefer `git diff` (base vs working tree) over whole-file reads to learn what
   changed. Never `cat` a 5000-line file to find a delta.
+- Once changes are committed to git, empty `.changed_markers` (loop has absorbed).
 
+# ============================================================
+# TWO-MODE MAINTENANCE (fix for historical dead code / tech debt)
+# ============================================================
+# `git diff` only sees DIRTY files. A dead function committed long ago and
+# never edited looks 100% clean to git (a cache hit) and would never be found.
+# So maintenance is split into two explicit modes:
+#
+# 1. DAILY ITERATIVE MODE (runs ~99% of the time) — git-as-cache above.
+#    Only touch dirty hunks + direct callers. Cost ~pennies.
+#
+# 2. ONE-TIME BASELINE SWEEP (explicit, when auditing an old repository):
+#    - Do NOT pay the LLM to read tens of thousands of lines searching for
+#      dead code. Run a FREE local static analyzer first, e.g.
+#        Python:     vulture . --exclude .venv,kernels   (dead code)
+#                    flake8 --select=F401 .              (unused imports)
+#        TypeScript: knip  /  ts-prune                    (unused/dead)
+#    - Pipe ONLY the flagged lines into `.changed_markers` under a
+#      `[BASELINE SWEEP]` section. The LLM then inspects just those
+#      candidates (judgment: is this really dead?) instead of the whole repo.
+#    - The free, deterministic tool does the scan; the model only reviews flags.

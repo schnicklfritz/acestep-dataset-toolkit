@@ -2,23 +2,37 @@
 # ------------------------------------------------------------------
 # CACHE-INVALIDATION NOTICES — read THIS first before touching code.
 #
-# RULE (see .clinerules): Everything committed at HEAD is a CACHE HIT.
-# Only open files / line-ranges listed under [UNREVIEWED] below.
-# When you (the user) commit a change, DELETE its marker line(s) — the
-# change is then absorbed by git (the cache) and no longer needs reading.
+# RULE (see .clinerules): Everything committed at HEAD is an IMMUTABLE CACHE HIT.
+# Only open files / hunks listed under [UNREVIEWED] below.
+# When you (the user) commit a change, EMPTY this file — the loop has absorbed it.
 #
-# Format:  <path>  L<start>-<end>   <one-line status>
+# STALE LINE PROTECTION: bind notes to function/class names + hunk context,
+# not raw line numbers (they go stale).
+#
+# TWO MODES:
+#   [UNREVIEWED]      = daily iterative mode (git diff dirty hunks)
+#   [BASELINE SWEEP]  = one-time dead-code audit (from vulture/flake8 flags)
 # ------------------------------------------------------------------
 
 [UNREVIEWED]
-(no open items — last batch absorbed into commits 15520af..4bfdf43)
+(daily iterative mode — currently no dirty hunks pending)
+
+[BASELINE SWEEP]
+# (not yet run) Historical dead code is invisible to git diff (committed =
+# clean = cache hit). To populate this section, run once, then delete:
+#   vulture . --exclude .venv,kernels --min-confidence 80
+#   flake8 --select=F401 .    # unused imports
+# Pipe ONLY the flagged lines here; the agent reviews just those candidates.
 
 [FLAGGED - REVIEW / NOT AUTO-FIXED]
 dataset_manager.py  GATEKEEPER credential check REMOVED entirely:
-   The call to self._prepare_pipeline_credentials(...) AND the method definition
-   were both deleted across recent edits (grep = 0 hits now).
-   Confirmed intentional?  If credentials are now validated lazily elsewhere,
-   fine. If not, this weakens API-key safeguards before the deepseek/llm calls.
+   self._prepare_pipeline_credentials(...) + method deleted (grep = 0 hits).
+   Confirm intentional before closing.
+core/kaggle_worker.py + kaggle_health.py (BROKEN DUPLICATES):
+   health-audit remnants w/ `pip install git+https://github.com` + hardcoded
+   /kaggle/input/ace-step-upload-bundle. Candidate dead code (confirm via
+   BASELINE SWEEP before removal). dataset_manager.py:3249 still references
+   core/kaggle_worker.py via start_remote_consolidated_pipeline.
 
 [RESOLVED / CACHE HIT]
-(all items from the 2d0c302..HEAD rewrite are absorbed; none pending)
+(stem-split fix + control/review plumbing verified; workflow + token docs added)
