@@ -19,8 +19,22 @@ import time
 import uuid
 
 
+ACCESS_TOKEN_FILE = "~/.kaggle/access_token"
+
+
 def ensure_kaggle_creds(config):
-    """Validate Kaggle credentials and set env vars. Returns the username."""
+    """Validate Kaggle credentials and set env vars. Returns the username.
+
+    Kaggle's modern ``kaggle`` SDK (>= 2.x) authenticates FIRST via a
+    bearer access token (``KAGGLE_API_TOKEN`` / ``~/.kaggle/access_token``)
+    before falling back to the legacy ``KAGGLE_USERNAME``/``KAGGLE_KEY``
+    pair. The token issued from Settings > API (``KGAT_...``) is one of
+    these new-style access tokens, so we must present it in the new fields
+    or the API rejects it with ``401 Unauthorized``.
+
+    ``kaggle_user`` is kept for building dataset/kernel slugs only (the SDK
+    re-derives the real username from the token at auth time).
+    """
     user = config.get("kaggle_user", "").strip()
     key = config.get("kaggle_key", "").strip()
     if not user or not key:
@@ -30,6 +44,16 @@ def ensure_kaggle_creds(config):
         )
     os.environ["KAGGLE_USERNAME"] = user
     os.environ["KAGGLE_KEY"] = key
+    # New access-token auth (takes precedence in the modern SDK).
+    os.environ["KAGGLE_API_TOKEN"] = key
+    try:
+        token_path = os.path.expanduser(ACCESS_TOKEN_FILE)
+        os.makedirs(os.path.dirname(token_path), exist_ok=True)
+        with open(token_path, "w") as f:
+            f.write(key)
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass  # env var alone is enough; file is a convenience fallback
     return user
 
 
@@ -86,6 +110,30 @@ def upload_audio_dataset(config, audio_dir, title_prefix="ace-audio"):
         raise RuntimeError(f"Kaggle dataset upload failed: {e}") from e
 
     return f"{user}/{slug}"
+
+
+def wait_dataset_ready(config, audio_slug, timeout=300, poll_seconds=10):
+    """Poll a just-created private dataset until Kaggle reports it ``ready``.
+
+    ``dataset_create_new`` returns before the dataset version is fully
+    processed/mounted. Pushing a kernel that references the dataset before it
+    is ready results in an empty ``/kaggle/input/<slug>`` mount and a silent
+    empty manifest. Returns True when ready; False on timeout.
+    """
+    api, user = _get_api(config)
+    elapsed = 0
+    while elapsed < timeout:
+        time.sleep(poll_seconds)
+        elapsed += poll_seconds
+        try:
+            status = api.dataset_status(audio_slug)
+            if isinstance(status, dict):
+                status = status.get("status") or sorted(status.values())[-1] if status else ""
+            if str(status).lower() in {"ready", "complete"}:
+                return True
+        except Exception:  # noqa: BLE001 — keep polling on transient errors
+            continue
+    return False
 
 
 def push_kernel(config, kernel_dir, kernel_slug):

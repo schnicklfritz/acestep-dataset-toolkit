@@ -40,14 +40,52 @@ from demucs.apply import apply_model  # noqa: E402
 from demucs.pretrained import get_model  # noqa: E402
 
 model = get_model(MODEL)
-model.cuda().eval()
 
-files = sorted(
-    glob.glob(os.path.join(INPUT_DIR, "*.mp3"))
-    + glob.glob(os.path.join(INPUT_DIR, "*.wav"))
-    + glob.glob(os.path.join(INPUT_DIR, "*.flac"))
-    + glob.glob(os.path.join(INPUT_DIR, "*.ogg"))
-)
+# --- Device selection -------------------------------------------------------
+# Free Kaggle tiers often allocate older GPUs (Tesla P100, sm_60; K80, sm_37)
+# that the default torch build may NOT support (torch >= 2.x ships for
+# sm_70+). Calling `model.cuda()` / `device="cuda"` on such a box silently
+# produces no stems. So pick a genuinely usable device — CUDA only when the
+# running torch reports a compatible CUDA device, otherwise CPU.
+def _pick_device():
+    if torch.cuda.is_available():
+        # torch.cuda.is_available() can still be true for an unsupported
+        # older GPU; verify the capability is within this torch build's range.
+        cap = torch.cuda.get_device_capability(0)
+        if cap is not None:
+            major, minor = int(cap[0]), int(cap[1])
+            # torch caps the computed supported list; treat >=7.0 as usable,
+            # matching modern PyTorch builds (sm_70+).
+            if (major, minor) >= (7, 0):
+                return "cuda", torch.device("cuda")
+    return "cpu", torch.device("cpu")
+
+
+DEVICE_NAME, DEVICE = _pick_device()
+print(f"Using device: {DEVICE_NAME}", flush=True)
+model = model.to(DEVICE).eval()
+
+# Audio discovery: walk the WHOLE /kaggle/input tree. Kaggle sometimes mounts
+# private datasets at /kaggle/input/<slug> and other times nests them under
+# /kaggle/input/datasets/<...>; searching the whole tree handles both.
+def _walk_input_for_audio(base):
+    exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+    return sorted(
+        os.path.join(r, n)
+        for r, _d, fs in os.walk(base)
+        for n in fs
+        if os.path.splitext(n)[1].lower() in exts
+    )
+
+
+INPUT_ROOT = os.path.dirname(INPUT_DIR) or "/kaggle/input"
+files = _walk_input_for_audio(INPUT_ROOT)
+if not files:
+    print(f"No audio under {INPUT_ROOT}. Input tree:", flush=True)
+    for root, _dirs, names in os.walk(INPUT_ROOT):
+        print("  DIR:", root, flush=True)
+        for n in names:
+            print("  FILE:", os.path.join(root, n), flush=True)
 
 os.makedirs("stems", exist_ok=True)
 manifest = {}
@@ -71,7 +109,7 @@ for f in files:
     ref = wav.mean(0)
 
     with torch.no_grad():
-        sources = apply_model(model, wav[None], device="cuda", shifts=1, split=True)[0]
+        sources = apply_model(model, wav[None], device=DEVICE_NAME, shifts=1, split=True)[0]
 
     track = os.path.splitext(os.path.basename(f))[0]
     track_out = os.path.join("stems", track)

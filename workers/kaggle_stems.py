@@ -22,6 +22,12 @@ KERNEL_SCRIPT = (
     Path(__file__).resolve().parent.parent / "kernels" / "stem_separation_kernel.py"
 )
 
+# Populated by run_kaggle_stems() so a caller can deep-link the finished kernel
+# (and its downloadable output artifacts) in Kaggle's own web GUI for manual
+# review — the app stays the control surface; Kaggle stays the inspection UI.
+LAST_KERNEL_REF = ""     # e.g. "akronohio/ace-stems-XXXXXX"
+LAST_DATASET_REF = ""    # e.g. "akronohio/ace-audio-XXXXXX"
+
 
 def run_kaggle_stems(audio_path, config, model=None, two_stems=None,
                      output_dir=None, progress_cb=None):
@@ -58,6 +64,15 @@ def run_kaggle_stems(audio_path, config, model=None, two_stems=None,
         audio_slug = upload_audio_dataset(config, audio_dir)
         audio_name = audio_slug.split("/")[-1]
 
+        # Wait for the dataset to be fully versioned/mounted before pushing a
+        # kernel that references it — otherwise /kaggle/input/<slug> is empty.
+        progress_cb(9, "Waiting for dataset to be ready...")
+        from modules.kaggle import wait_dataset_ready
+        if not wait_dataset_ready(config, audio_slug):
+            raise RuntimeError(
+                f"Kaggle dataset {audio_slug} never became ready before timeout."
+            )
+
         # ---- kernel script with model + input baked in ----
         script = KERNEL_SCRIPT.read_text(encoding="utf-8")
         script = script.replace("{{MODEL}}", model)
@@ -88,7 +103,10 @@ def run_kaggle_stems(audio_path, config, model=None, two_stems=None,
             json.dump(metadata, f, indent=2)
 
         progress_cb(10, "Pushing stem-separation kernel to Kaggle...")
-        push_kernel(config, kernel_dir, kernel_slug)
+        kernel_ref = push_kernel(config, kernel_dir, kernel_slug)
+        global LAST_KERNEL_REF, LAST_DATASET_REF
+        LAST_KERNEL_REF = kernel_ref
+        LAST_DATASET_REF = audio_slug
         progress_cb(25, "Kaggle GPU job queued...")
         wait_kernel_done(config, kernel_slug)
 
@@ -107,8 +125,18 @@ def run_kaggle_stems(audio_path, config, model=None, two_stems=None,
         stems = []
         for track, stem_map in data.items():
             for _stem_name, rel in stem_map.items():
-                src = os.path.join(out_dir, rel)
-                if not os.path.exists(src):
+                # The kernel writes stems under a `stems/` subfolder of its
+                # /kaggle/working dir; the manifest paths (e.g.
+                # "test_tone_0/drums.wav") are relative to that `stems/` folder.
+                # Search the whole downloaded tree for the rel path so we find
+                # the file whether it lands at <out>/stems/<rel> or <out>/<rel>.
+                src = None
+                for base in (out_dir, os.path.join(out_dir, "stems")):
+                    cand = os.path.join(base, rel)
+                    if os.path.exists(cand):
+                        src = cand
+                        break
+                if src is None:
                     continue
                 dest = os.path.join(output_dir, f"{track}__{os.path.basename(rel)}")
                 shutil.copy2(src, dest)
@@ -120,6 +148,48 @@ def run_kaggle_stems(audio_path, config, model=None, two_stems=None,
         return stems
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def open_last_kernel_in_kaggle(open_dataset_too=False):
+    """Open the most recent stem kernel (and optionally its dataset) in Kaggle.
+
+    Returns nothing. When the push has already happened it opens the finish
+    kernel page so the user can review the run log + downloadable stem files in
+    Kaggle's own web GUI. Call after ``run_kaggle_stems`` so the URL is known.
+    """
+    import webbrowser
+    opened = []
+    if LAST_KERNEL_REF:
+        url = f"https://www.kaggle.com/code/{LAST_KERNEL_REF}/output"
+        webbrowser.open_new_tab(url)
+        opened.append(url)
+    if open_dataset_too and LAST_DATASET_REF:
+        url = f"https://www.kaggle.com/datasets/{LAST_DATASET_REF}"
+        webbrowser.open_new_tab(url)
+        opened.append(url)
+    return opened
+
+
+def build_default_stem_plan(method="demucs"):
+    """Return a recommended stem plan (the power-user 'which splitter' surface).
+
+    Represents which stems to produce and, for MVSEP, the note/recommendation.
+    The Kaggle/Demucs backend:
+      - "full"      -> vocals + drums + bass + other (htdemucs_ft, MIT)
+    The MVSEP backend is chosen by the caller via the live algorithm list.
+    """
+    return {
+        "backend": "kaggle",          # "kaggle" | "mvsep"
+        "model": "htdemucs_ft",       # ignored by mvsep (uses its own list)
+        "split": "full",              # "full" | "vocals" | "instrumental" | "custom"
+        "instruments": None,          # when split == "custom": list of stem names
+        "note": (
+            "Demucs htdemucs_ft (MIT) is fully open-source and runs free on "
+            "Kaggle. For a cleaner instrumental rebuild consider the MVSEP "
+            "PolarFormer first-stage instead (rebuilds instrumental to avoid "
+            "artifacts), then this as the multi-stem split of the instrumental."
+        ),
+    }
 
 
 class KaggleStemSeparator(QThread):
