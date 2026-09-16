@@ -143,8 +143,8 @@ def estimate_meter(audio_path, sr=22050, margin=1.10, candidate_periods=(3, 4)):
 def integrate_into_sample(sample, min_confidence=0.35):
     """Apply estimate_meter() to a dataset sample dict, following the same
     lock-respecting, non-destructive auto-fill convention used elsewhere in
-    the app for bpm/key/time_signature (see HealthAuditorWorker.analyze_track
-    and on_file_audited in dataset_manager.py).
+    the app for bpm/key/time_signature (see the structural pipeline's
+    auto-fill handling in dataset_manager.py).
 
     Only writes sample["time_signature"] when:
       - the field is currently empty (never overwrites an existing/manual/

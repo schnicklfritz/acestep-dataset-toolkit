@@ -379,7 +379,3 @@ class SpatialPipelineWorker(QThread):
 
     def cancel(self):
         self._is_cancelled = True
-
-# ============================================================================
-# ORIGINAL HealthAuditorWorker (from your file – keep as is)
-# ============================================================================

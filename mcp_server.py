@@ -1,7 +1,7 @@
 """ACE-Step Dataset Toolkit — MCP server.
 
 Exposes the app's dataset tools over the **Model Context Protocol** (stdio) so
-any MCP client (Claude Desktop, Cursor, custom agents) can inspect, audit, tag
+any MCP client (Claude Desktop, Cursor, custom agents) can inspect, tag
 and curate your datasets directly.
 
 Requires:  pip install "mcp[cli]"
@@ -40,11 +40,6 @@ def main(argv=None):
     def dataset_summary() -> str:
         """High-level dataset summary: track count, vocal/instrumental mix, caption coverage."""
         return mcp_tools.tool_dataset_summary(args.dataset)
-
-    @mcp.tool()
-    def health_audit() -> str:
-        """Audit the dataset: missing files, mono/short tracks, undetermined BPM, near-duplicates."""
-        return mcp_tools.tool_health_audit(args.dataset)
 
     @mcp.tool()
     def tag_track(audio_path: str) -> str:

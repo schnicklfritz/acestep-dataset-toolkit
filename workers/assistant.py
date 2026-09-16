@@ -90,18 +90,16 @@ def build_system_prompt(help_text, dataset_summary):
     )
 
 
-def summarize_dataset(dataset, health_reports=None):
+def summarize_dataset(dataset):
     """Build a compact text summary of the current dataset for the assistant.
 
     Includes per-track metadata (genre, BPM, key, language, time signature,
-    instrumental flag, prompt style) plus the audio health flags from the last
-    Scan & Fill (clipping, lossy cutoff, sample rate, issues).
+    instrumental flag, prompt style).
     """
     if not dataset:
         return None
     samples = dataset.get("samples", []) or []
     meta = dataset.get("metadata", {}) or {}
-    health_reports = health_reports or {}
     lines = [
         f"Dataset: {meta.get('name') or '(unnamed)'} | "
         f"{len(samples)} track(s) | tag: {meta.get('custom_tag') or 'none'} | "
@@ -110,19 +108,6 @@ def summarize_dataset(dataset, health_reports=None):
     ]
     for i, s in enumerate(samples[:12], start=1):
         name = s.get("filename", f"Track {i}")
-        sid = s.get("id", "")
-        rep = health_reports.get(sid, {}) or {}
-        flags = []
-        if rep.get("is_clipping"):
-            flags.append("clipping")
-        if rep.get("has_lossy_cutoff"):
-            flags.append("lossy-cutoff")
-        if rep.get("sample_rate") and rep.get("sample_rate") != 44100:
-            flags.append(f"{rep.get('sample_rate')}Hz")
-        issues = rep.get("issues") or []
-        if issues:
-            flags.append("issues: " + "; ".join(issues))
-        flag_str = f" | flags: {', '.join(flags)}" if flags else ""
         line = (
             f"  {i}. {name}"
             f" | genre: {s.get('genre') or '?'}"
@@ -132,7 +117,6 @@ def summarize_dataset(dataset, health_reports=None):
             f" | ts: {s.get('timesignature') or '?'}"
             f" | {'instrumental' if s.get('is_instrumental') else 'vocal'}"
             f" | style: {s.get('prompt_style') or 'use_global'}"
-            f"{flag_str}"
         )
         cap = (s.get("caption") or "").strip().replace("\n", " ")[:120]
         if cap:

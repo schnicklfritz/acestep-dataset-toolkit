@@ -15,13 +15,10 @@ The **Exceptions Queue** is a smart view/filter on the main dataset grid that is
 * **Exceptions Queue Filter**: Displays only tracks with unresolved warnings (missing files, clipping, loudness spikes, lossy cutoffs, missing captions, or low-confidence BPM/keys).
 * Resolving an issue removes the track from the queue until all items pass.
 
-### Dataset Quality Metric & Health Gauge
-Displayed at the top of the window with live color coding:
-* **Green (80% – 100%)**: Optimal homogeneity, valid metadata, lossless audio, structured captions.
-* **Yellow (60% – 79%)**: Minor inconsistencies (loudness spread, unverified tempos, missing lyrics).
-* **Red (Below 60%)**: Critical degradation risks (digital clipping, missing files, mixed lossy rips).
-* **Estimated Degradation Penalty**: Each warning displays an impact penalty (e.g., `-15% Quality: Low-bitrate 128 kbps source introduces compression artifacts into LoRA weights`).
-* **Bypass Gate**: A prominent **"I Know What I'm Doing" (Bypass All)** button allows intentional export despite warnings.
+### Dataset Quality Metric & Health Gauge (removed)
+The live quality gauge and its export bypass gate were tied to the local health
+audit and have been **removed** with it. The exporter no longer blocks on a
+quality threshold; it validates manifest structure instead.
 
 ---
 
@@ -37,7 +34,7 @@ Displayed at the top of the window with live color coding:
    * `📂 Open JSON`, `💾 Save JSON`, `➕ Add Audio`, `⚙ Settings & Endpoints`, `↩ Undo`, `↪ Redo`.
 3. **Exceptions Queue & View Bar**:
    * View Toggle: `[ All Tracks (N) ]` | `[ Exceptions Queue (N) ]`.
-   * Quick Actions: `[ 🔍 Scan & Fill ]` | `[ 🎚 DSP Normalize ]` | `[ 🚀 Run AI Captioner ]`.
+   * Quick Actions: `[ 🎚 DSP Normalize ]` | `[ 🚀 Run AI Captioner ]`.
 4. **Central Workspace (Split View)**:
    * **Left (60%)**: Responsive Dataset Matrix with per-track status badges, locked/unlocked state, and quick-playback compare buttons.
    * **Right (40%)**: Scrollable Track Inspector with individual lock checkboxes for every field, lyrics editor, and diagnostic report.

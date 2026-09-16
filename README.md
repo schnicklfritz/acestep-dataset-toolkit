@@ -24,11 +24,9 @@ python dataset_manager.py
 1. **Dataset Studio** → *Add Single Song* (one or more files) or *Add Audio
    Folder* (recursive — every track in a folder and its subfolders, deduped
    against what's already loaded). Tracks land in the table.
-2. **🔍 Scan & Fill** — health audit: sample rates, channels, clipping, lossy
-   cutoffs, **real BPM/key** (librosa + Krumhansl-Schmuckler), loudness spread,
-   **near-duplicate detection**, and a quality score with **actionable
-   recommendations** (lossy source → find a lossless master, mono → re-export,
-   duplicates → remove, etc.).
+2. **Tracks land in the table** — added instantly with blank metadata (BPM/key/
+   time/duration) and are unlocked, so you can type values inline or fill them
+   from the captioner / structural pipeline.
 3. **🎚 DSP Normalize** — EBU R128 to a target loudness/sample rate (defaults
    -14 LUFS / 44.1 kHz; originals are backed up, Undo/Redo available).
 4. **🚀 Run AI Captioner** — pick a backend (below). Each caption is reviewed
@@ -104,12 +102,10 @@ separation/tagging/segmentation/lyrics models with **download source
 **leaderboard links** (MDX, MVSEP, papers-with-code). Downloads are
 gitignored. An **HF token** (encrypted, optional) unlocks gated models.
 
-### Health audit → recommendations + near-duplicates
-The audit flags tracks that would drag the dataset down — lossy sources,
-clipping, mono, LUFS outliers, low-confidence BPM/key, small dataset size,
-and **near-duplicate pairs** (librosa fingerprints) — then gives you
-**actionable, copyright-safe recommendations** (e.g. "find a lossless
-master", "remove the duplicate").
+### Health audit (removed)
+The legacy local health audit (sample rates, clipping, LUFS spread, near-
+duplicate detection, quality score) has been **removed** to keep the app lean.
+It is intended to return later as an optional, self-contained module.
 
 The audit is the same "🔍 Scan Audio & Fill Metadata" action (there is no
 separate second audit) — pick **Local (fast)** or **Kaggle GPU** as the audit
@@ -138,7 +134,7 @@ instrument gaps to fill so the dataset converges on a specific sound).
 ### MCP server
 The app can run as a **Model Context Protocol server**
 (`python mcp_server.py --dataset path/to/dataset.json`), exposing dataset
-summary, health audit, near-duplicate, tagging, and curation tools to any MCP
+summary, tagging, and curation tools to any MCP
 client (Claude Desktop, Cursor, custom agents). Requires `pip install mcp`.
 This is rare in dataset apps — your dataset becomes directly steerable by AI.
 
@@ -211,7 +207,6 @@ modules/
   config_store.py           settings.json + encrypted secrets
   secrets_manager.py        OS keyring / Fernet-encrypted secrets
   audio_analysis.py         Structural sections + slicing
-  homogeneity.py            LUFS / crest / centroid audit
   caption_audit.py          Instrument-naming consistency across captions
   instruments_db.py         Filename-keyword instrument lookup
   manifest_validation.py    ACE-Step schema validation

@@ -1,32 +1,18 @@
-import sys
 import os
 import json
 import re
 import html
 import uuid
-import tempfile
-import subprocess
 import time
-import math
-import struct
-import wave
 import shutil
-import zipfile
 from stem_separator import StemSeparator
 from pathlib import Path
-
-# NEW IMPORTS
-import librosa
-import numpy as np
-import soundfile as sf
-from openai import OpenAI
 
 from config import DEFAULT_CONFIG
 from modules.mvsep_gui import MVSEPDialog
 from modules.config_store import load_config, save_config
-from modules.model_manager import load_catalog, leaderboards, find_model, is_downloaded, remove_model
+from modules.model_manager import load_catalog, find_model, is_downloaded, remove_model
 from workers.model_manager import ModelDownloadWorker
-from workers.lyrics import TranscribeLyricsWorker
 from workers.rockstar import RockstarLookupWorker
 from workers.embeddings import EmbeddingWorker
 from workers.export import ExportWorker
@@ -49,24 +35,21 @@ from workers.assistant import (
 # --- NEW: extracted widgets/orchestrator (replaces inline class definitions below) ---
 from widgets import WaveformWidget, ScatterPlotWidget
 from orchestrator import DeepSeekMusicOrchestrator, AdvancedDatasetOrchestratorWorker
-from workers.health_audit import HealthAuditorWorker
 from workers.dsp_normalizer import DspNormalizerWorker
 from ui.settings_tab import build_settings_tab
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize, QUrl, QTime
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QLabel, QLineEdit, QComboBox, QTextEdit, QFileDialog,
     QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
-    QInputDialog,QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QInputDialog, QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
-    QLabel, QLineEdit, QComboBox, QTextEdit, QFileDialog,
-    QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
     QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
-    QTabWidget, QFontComboBox, QSlider, QRadioButton, QButtonGroup,
-    QFrame, QListWidget, QTextBrowser, QSizePolicy, QAbstractItemView
+    QTabWidget, QSlider, QRadioButton, QButtonGroup,
+    QListWidget, QTextBrowser, QAbstractItemView
 )
-from PySide6.QtGui import QFont, QColor, QDesktopServices, QPainter, QPen, QPalette
+from PySide6.QtGui import QDesktopServices
 
 # Provider -> (key config field, remember flag) — the unified "Provider API Key"
 # field routes to whichever provider/model is selected.
@@ -81,6 +64,9 @@ LLM_KEY_FIELDS = {
 # Audio file extensions accepted when adding songs/folders to the dataset
 # (single source of truth, used by both the file picker and the folder scan).
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
+# Same set as a deterministic, human-ordered tuple for building the file-dialog
+# filter string (a set's iteration order would make the filter jump around).
+AUDIO_EXTS_ORDERED = (".wav", ".flac", ".mp3", ".ogg", ".m4a")
 
 # ============================================================================
 # Main Window: DatasetManager
@@ -118,7 +104,6 @@ class DatasetManager(QMainWindow):
         # encrypted secrets store. Each secret has a per-key "remember on this
         # device" policy — when unchecked it is kept for the session only.
         self.config = load_config(DEFAULT_CONFIG)
-        self.health_reports = {}
         self.original_backups = {}
         self.active_worker = None
         self.filter_exceptions_only = False
@@ -131,7 +116,6 @@ class DatasetManager(QMainWindow):
         self.filter_inst = "all"
         self.filter_captioned = False
         self._loading_table = False
-        self.startup_scan_notice_shown = False
         self.kaggle_notebook_unlocked = False  # NEW
 
         self.init_ui()
@@ -214,9 +198,7 @@ class DatasetManager(QMainWindow):
     def init_ui(self):
         """Initializes and anchors our decoupled multi-tier interface layout variables."""
         # 🛡️ GLOBAL CLASS ATTRIBUTE GUARDS: Declare early to eliminate initial initialization AttributeErrors
-        self.audit_backend_combo = QComboBox()
         self.lyrics_engine_combo = QComboBox()
-        self.scan_btn = None
         self.import_json_manifest_btn = None
         self.sync_meta_btn = None
         self.normalize_btn = None
@@ -270,10 +252,6 @@ class DatasetManager(QMainWindow):
 
         # --- Header Bar ---
         header_bar = QHBoxLayout()
-
-        self.quality_badge = QLabel("Dataset Quality: 100% [Ready]")
-        self.quality_badge.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px 14px; background-color: #2E7D32; border-radius: 4px; color: #fff;")
-        header_bar.addWidget(self.quality_badge)
 
         self.bypass_btn = QPushButton("🛡 I Know What I'm Doing (Bypass All)")
         self.bypass_btn.setCheckable(True)
@@ -558,16 +536,20 @@ class DatasetManager(QMainWindow):
         # --- Table + Inspector ---
         splitter = QSplitter(Qt.Horizontal)
 
-        self.table = QTableWidget(0, 9)
+        # Column schema (index -> field): 0 Filename (read-only),
+        # 1 Tag, 2 Genre, 3 Key, 4 BPM, 5 Time signature, 6 Duration,
+        # 7 Actions. All metadata columns are editable inline; new tracks
+        # are NOT locked by default so you can type values straight in.
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
-            ["Filename", "Health", "Tag", "Genre", "Key", "BPM", "Time", "Duration", "Actions"]
+            ["Filename", "Tag", "Genre", "Key", "BPM", "Time", "Duration", "Actions"]
         )
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 8):
+        for i in range(1, 7):
             self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
         self.table.itemChanged.connect(self.on_metadata_cell_edited)
         splitter.addWidget(self.table)
@@ -578,7 +560,7 @@ class DatasetManager(QMainWindow):
         insp_layout = QVBoxLayout(inspector)
         insp_layout.setContentsMargins(8, 8, 8, 8)
 
-        self.sample_health_alert = QLabel("Select a track to inspect diagnostics.")
+        self.sample_health_alert = QLabel("Select a track to edit its metadata and caption.")
         self.sample_health_alert.setWordWrap(True)
         self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #555; border-radius: 2px;")
         insp_layout.addWidget(self.sample_health_alert)
@@ -794,7 +776,7 @@ class DatasetManager(QMainWindow):
             self._set_assistant_busy(False)
             return
         self._set_assistant_busy(True)
-        summary = summarize_dataset(self.dataset, self.health_reports)
+        summary = summarize_dataset(self.dataset)
         sys_prompt = build_system_prompt(APP_HELP_TEXT, summary)
         if self.assistant_linear_check.isChecked():
             sys_prompt += "\n\nWork through the problem step by step before answering."
@@ -838,7 +820,7 @@ class DatasetManager(QMainWindow):
     def execute_assistant_tool(self, name, args):
         try:
             if name == "get_dataset_summary":
-                return summarize_dataset(self.dataset, self.health_reports) or "(dataset empty)"
+                return summarize_dataset(self.dataset) or "(dataset empty)"
             if name == "list_tracks":
                 lines = []
                 for i, s in enumerate(self.dataset.get("samples", []), start=1):
@@ -857,11 +839,21 @@ class DatasetManager(QMainWindow):
                 issues = validate_manifest(self.dataset)
                 return "\n".join(issues) if issues else "Manifest is valid."
             if name == "scan_health":
-                self.start_health_audit()
-                return "Started the health audit (Scan & Fill). Ask again after it finishes."
+                # The health audit was removed (can be re-added later as a module).
+                return (
+                    "The health audit (Scan & Fill) is not available in this build — "
+                    "it was removed and can be re-added later as a module."
+                )
             if name == "detect_instruments":
-                self.detect_instruments_for_separation()
-                return "Started instrument detection on the selected track."
+                # Instrument detection runs through the Structural pipeline
+                # (workers/tagger.py). There is no standalone trigger on the
+                # live DatasetManager, so point the user at the real control
+                # instead of claiming detection already started.
+                return (
+                    "Instrument detection runs as part of the Structural pipeline. "
+                    "Select a track and run 'Structural' (or use Detect via Captioner) "
+                    "to populate instrument tags."
+                )
             if name == "get_dataset_sound_profile":
                 return build_sound_profile(self.dataset)
             if name == "curate_dataset":
@@ -1497,19 +1489,8 @@ class DatasetManager(QMainWindow):
         disclaimer.setStyleSheet("color: #ffcc80; font-size: 10px; padding: 4px;")
         sep_layout2.addWidget(disclaimer)
 
-        detect_layout = QHBoxLayout()
-        detect_layout.addWidget(QLabel("Detected instruments:"))
-        self.detect_instruments_btn = QPushButton("Detect via Captioner")
-        self.detect_instruments_btn.clicked.connect(self.detect_instruments_for_separation)
-        detect_layout.addWidget(self.detect_instruments_btn)
-        detect_layout.addStretch()
-        sep_layout2.addLayout(detect_layout)
 
-        self.detected_instruments_list = QTextEdit()
-        self.detected_instruments_list.setPlaceholderText("Run 'Detect' to see instruments...")
-        self.detected_instruments_list.setMaximumHeight(80)
-        self.detected_instruments_list.setReadOnly(True)
-        sep_layout2.addWidget(self.detected_instruments_list)
+
 
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel("Additional models to run:"))
@@ -2087,11 +2068,7 @@ class DatasetManager(QMainWindow):
         self.refresh_table()
         self.on_table_selection_changed()
 
-    def on_struct_batch_done(self):
-        self.run_struct_btn.setEnabled(True)
-        self.struct_progress.setVisible(False)
-        self.struct_status.setText("Structural pipeline completed for all tracks.")
-        QMessageBox.information(self, "Pipeline Complete", "All selected tracks have been processed.")
+ 
 
     def load_band_profiles(self):
         """Load band profiles from band_profiles.json."""
@@ -2123,6 +2100,15 @@ class DatasetManager(QMainWindow):
         for era in band_data.get("eras", []):
             self.era_combo.addItem(era["name"])
 
+    def on_struct_scope_changed(self, scope_text):
+        show = scope_text.strip() == "Selected Tracks (from list)"
+
+        self.track_list_widget.setVisible(show)
+        self.track_numbers_input.setVisible(show)
+
+        if show:
+            self.refresh_track_list()
+
     def get_structural_scope_samples(self):
         """Return tracks selected by the Structural Pipeline scope pulldown."""
         samples = self.dataset.get("samples", [])
@@ -2138,13 +2124,13 @@ class DatasetManager(QMainWindow):
                 if not (sample.get("caption") or "").strip()
             ]
 
-        if scope == "Selected Tracks (from list)":
+        if scope == "Selected Tracks":
             selected = self.get_selected_sample()
 
             if selected is None:
                 raise ValueError(
                     "Choose a track in Dataset Studio first, then run the "
-                    "Structural Pipeline with scope set to 'Selected Tracks (from list)'."
+                    "Structural Pipeline with scope set to 'Selected Tracks'."
                 )
 
             return [selected]
@@ -2164,100 +2150,7 @@ class DatasetManager(QMainWindow):
 
 
 
-    def detect_instruments_for_separation(self):
-        try:
-            selected_samples = self.get_structural_scope_samples()
-
-        except ValueError as exc:
-            QMessageBox.warning(
-                self,
-                "No Track Selected",
-                str(exc),
-            )
-            return
-
-        if not selected_samples:
-            QMessageBox.information(
-                self,
-                "No Tracks Available",
-                "The current Structural Pipeline scope contains no tracks.",
-            )
-            return
-
-        if len(selected_samples) != 1:
-            QMessageBox.information(
-                self,
-                "Instrument Analysis",
-                f"The current scope contains {len(selected_samples)} tracks. "
-                "Instrument analysis currently previews one track at a time. "
-                "Set scope to 'Selected Tracks' and select a track in "
-                "Dataset Studio.",
-            )
-            return
-
-        selected = selected_samples[0]
-        audio_path = selected.get("audio_path", "")
-        if not audio_path or not os.path.exists(audio_path):
-            QMessageBox.warning(
-                self,
-                "Missing Audio",
-                "The selected track's audio file is missing on disk.",
-            )
-            return
-
-        from workers.instrument_detect import recommend_from_tagger
-
-        try:
-            models, instruments = recommend_from_tagger(audio_path, self.config)
-        except Exception as exc:  # noqa: BLE001
-            models, instruments = [], []
-            print(f"tagger recommendation failed: {exc}")
-
-        if instruments:
-            lines = [f"• {instrument}" for instrument in instruments]
-            lines.append("")
-            lines.append("Recommended models:")
-            if models:
-                lines.extend(f"• {model}" for model in models)
-            else:
-                lines.append("• No instrument-specific MVSEP model matched.")
-
-            self.detected_instruments_list.setText("\n".join(lines))
-            self.extra_models_input.setText(", ".join(models))
-            self.status_label.setText(
-                "Instruments detected. Review recommendations before running."
-            )
-            return
-
-        caption = selected.get("caption", "")
-        if not caption:
-            self.detected_instruments_list.setText(
-                "No instruments detected from local analysis. "
-                "Run a caption job first, then try again."
-            )
-            return
-
-        try:
-            separator = StemSeparator(self.config)
-            instrument_map = separator._instrument_to_model_map()
-            caption_lower = caption.lower()
-            detected = [
-                f"{keyword} → {model_name}"
-                for keyword, model_name in instrument_map.items()
-                if keyword in caption_lower
-            ]
-
-            if detected:
-                self.detected_instruments_list.setText("\n".join(detected))
-            else:
-                self.detected_instruments_list.setText(
-                    "No known instruments detected in the current caption."
-                )
-        except Exception as exc:  # noqa: BLE001
-            self.detected_instruments_list.setText(f"Instrument analysis error: {exc}")
-
-
-
+ 
     def refresh_track_list(self):
         """Populate the track list with numbered filenames."""
         self.track_list_widget.clear()
@@ -2497,7 +2390,6 @@ class DatasetManager(QMainWindow):
         self.config["stem_output_dir"] = self.stem_out_edit.text().strip()
         self.config["dsp_target_lufs"] = self.lufs_spin.value()
         self.config["dsp_target_sr"] = self.sr_spin.value()
-        self.config["audit_backend"] = "kaggle" if self.audit_backend_combo.currentIndex() == 1 else "local"
         if hasattr(self, "lyrics_engine_combo"):
             self.config["lyrics_engine"] = {
                 "kaggle (default, gpu)": "kaggle",
@@ -2657,11 +2549,7 @@ class DatasetManager(QMainWindow):
         shown = 0
 
         for idx, s in enumerate(self.dataset["samples"]):
-            sid = s.get("id", "")
-            rep = self.health_reports.get(sid, {})
-            status = rep.get("status", "Not Audited")
-
-            is_exception = (status == "Warning" or status == "Missing" or not s.get("caption"))
+            is_exception = not s.get("caption")
             if is_exception:
                 exceptions_count += 1
 
@@ -2675,54 +2563,46 @@ class DatasetManager(QMainWindow):
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            locked = bool(s.get("locked", True))
-
-            def _cell(text, editable):
+            def _cell(text, editable=True):
                 item = QTableWidgetItem(str(text) if text not in (None, 0, "") else "")
                 if not editable:
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 return item
 
+            # 0 Filename (read-only)
             self.table.setItem(row, 0, _cell(s.get("filename", ""), False))
-
-            h_item = QTableWidgetItem(f"✓ Healthy" if status == "Healthy" else (f"⚠ Warning" if status == "Warning" else status))
-            if status == "Healthy":
-                h_item.setForeground(QColor("#4CAF50"))
-            elif status == "Warning":
-                h_item.setForeground(QColor("#FF9800"))
-            elif status == "Missing":
-                h_item.setForeground(QColor("#F44336"))
-            h_item.setFlags(h_item.flags() & ~Qt.ItemIsEditable)
-            self.table.setItem(row, 1, h_item)
-
-            self.table.setItem(row, 2, _cell(s.get("custom_tag", ""), False))
-            self.table.setItem(row, 3, _cell(s.get("genre", ""), not locked))
-            self.table.setItem(row, 4, _cell(s.get("keyscale", ""), not locked))
+            # 1 Tag, 2 Genre, 3 Key — free text, always editable
+            self.table.setItem(row, 1, _cell(s.get("custom_tag", "")))
+            self.table.setItem(row, 2, _cell(s.get("genre", "")))
+            self.table.setItem(row, 3, _cell(s.get("keyscale", "")))
+            # 4 BPM
             bpm = s.get("bpm", 0)
-            self.table.setItem(row, 5, _cell(str(bpm) if bpm else "", not locked))
-            self.table.setItem(row, 6, _cell(s.get("timesignature", ""), not locked))
+            self.table.setItem(row, 4, _cell(str(bpm) if bpm else ""))
+            # 5 Time signature
+            self.table.setItem(row, 5, _cell(s.get("timesignature", "")))
+            # 6 Duration (seconds)
             dur = s.get("duration", 0)
-            self.table.setItem(row, 7, _cell(f"{dur}s" if dur else "", not locked))
+            self.table.setItem(row, 6, _cell(f"{dur}s" if dur else ""))
 
-            # Actions column: unlock/lock toggle + delete (with confirmation).
+            # 7 Actions: edit-metadata dialog + delete.
             actions = QWidget()
             actions_layout = QHBoxLayout(actions)
             actions_layout.setContentsMargins(2, 0, 2, 0)
             actions_layout.setSpacing(4)
-            lock_btn = QPushButton("🔓" if not locked else "🔒")
-            lock_btn.setToolTip("Lock / unlock this track's metadata for manual editing")
-            lock_btn.setMaximumWidth(36)
-            lock_btn.clicked.connect(lambda _=False, i=idx: self.toggle_track_lock(i))
+            edit_btn = QPushButton("✏️")
+            edit_btn.setToolTip("Edit this track's tag / genre / key / BPM / time / duration")
+            edit_btn.setMaximumWidth(36)
+            edit_btn.clicked.connect(lambda _=False, i=idx: self.open_metadata_editor(i))
             del_btn = QPushButton("🗑")
             del_btn.setToolTip("Remove this track from the dataset")
             del_btn.setMaximumWidth(36)
             del_btn.clicked.connect(lambda _=False, i=idx: self.confirm_delete_sample(i))
-            actions_layout.addWidget(lock_btn)
+            actions_layout.addWidget(edit_btn)
             actions_layout.addWidget(del_btn)
-            self.table.setCellWidget(row, 8, actions)
+            self.table.setCellWidget(row, 7, actions)
 
         self._loading_table = False
-        self.exceptions_view_btn.setText(f"⚠ Exceptions Queue ({exceptions_count})")
+        self.exceptions_view_btn.setText(f"⚠ Missing Captions ({exceptions_count})")
         if hasattr(self, "filter_count_label"):
             total = len(self.dataset["samples"])
             self.filter_count_label.setText(f"{shown} of {total} tracks")
@@ -2814,14 +2694,56 @@ class DatasetManager(QMainWindow):
             except OSError as e:
                 QMessageBox.warning(self, "Backup Warning", f"Could not back up file: {e}")
         samples.pop(idx)
-        self.health_reports.pop(sid, None)
         self.original_backups.pop(sid, None)
         self.refresh_table()
         self.on_table_selection_changed()
         self.status_label.setText(f"Removed '{fname}' from the dataset.")
 
+    # Column index -> ("field", parser) for inline manual edits in the table.
+    # Matches the header set in init_ui: 0 Filename, 1 Tag, 2 Genre, 3 Key,
+    # 4 BPM, 5 Time signature, 6 Duration, 7 Actions.
+    _MANUAL_COLS = {
+        1: ("custom_tag", str),
+        2: ("genre", str),
+        3: ("keyscale", str),
+        4: ("bpm", int),
+        5: ("timesignature", str),
+        6: ("duration", int),
+    }
+
+    def _parse_manual_value(self, field, text):
+        """Parse raw cell text for a manual metadata field. Returns value or None."""
+        text = (text or "").strip()
+        if not text:
+            return 0 if field in ("bpm", "duration") else ""
+        if field in ("bpm", "duration"):
+            text = text.rstrip("s").strip()
+            # Allow mm:ss (and h:mm:ss) style durations, e.g. "2:15" or "1:02:33".
+            if field == "duration" and ":" in text and text.count(":") <= 2:
+                parts = text.split(":")
+                try:
+                    secs = 0
+                    for p in parts:
+                        secs = secs * 60 + int(float(p))
+                    return secs
+                except (ValueError, TypeError):
+                    return None
+            try:
+                return int(round(float(text)))
+            except (ValueError, TypeError):
+                return None
+        return text
+
+    def _apply_manual_metadata(self, s, field, raw_value):
+        """Validate + write a single manual field; returns True on success."""
+        value = self._parse_manual_value(field, raw_value)
+        if value is None:
+            return False
+        s[field] = value
+        return True
+
     def on_metadata_cell_edited(self, item):
-        """Write back inline table edits (Genre/Key/BPM/Time/Duration) when unlocked."""
+        """Write back inline table edits (Tag/Genre/Key/BPM/Time/Duration)."""
         if getattr(self, "_loading_table", False):
             return
         row = item.row()
@@ -2831,45 +2753,95 @@ class DatasetManager(QMainWindow):
         samples = self.dataset.get("samples", [])
         if not (0 <= idx < len(samples)):
             return
-        s = samples[idx]
-        if s.get("locked", True):
-            return
         col = item.column()
-        text = item.text().strip()
-        try:
-            if col == 3:      # Genre
-                s["genre"] = text
-            elif col == 4:    # Key
-                s["keyscale"] = text
-            elif col == 5:    # BPM
-                s["bpm"] = int(float(text)) if text else 0
-            elif col == 6:    # Time signature
-                s["timesignature"] = text
-            elif col == 7:    # Duration
-                s["duration"] = int(float(text.rstrip("s"))) if text else 0
-        except (ValueError, TypeError):
-            pass
-        self.health_reports.pop(s.get("id", ""), None)
-        self.status_label.setText(f"Updated {s.get('filename', '')} metadata.")
+        if col not in self._MANUAL_COLS:
+            return
+        field = self._MANUAL_COLS[col][0]
+        s = samples[idx]
+        text = (item.text() or "").strip()
+
+        # Keep the display normalized: revert the cell on parse failure.
+        parsed = self._parse_manual_value(field, text)
+        if parsed is None:
+            self.table.blockSignals(True)
+            item.setText("")
+            self.table.blockSignals(False)
+            return
+        s[field] = parsed
+        self.status_label.setText(f"Updated {s.get('filename', '')} ({self._MANUAL_COLS[col][0]}).")
+
+    def open_metadata_editor(self, idx):
+        """A clear dialog to input Tag / Genre / Key / BPM / Time / Duration manually."""
+        samples = self.dataset.get("samples", [])
+        if not (0 <= idx < len(samples)):
+            return
+        s = samples[idx]
+        fname = s.get("filename", "")
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit Metadata — {fname}")
+        form = QFormLayout(dialog)
+        dialog.setMinimumWidth(360)
+
+        def _txt(init):
+            e = QLineEdit(str(init) if init not in (None, 0, "") else "")
+            return e
+
+        tag_edit = _txt(s.get("custom_tag", ""))
+        genre_edit = _txt(s.get("genre", ""))
+        key_edit = _txt(s.get("keyscale", ""))
+        bpm_edit = _txt(s.get("bpm", 0))
+        time_edit = _txt(s.get("timesignature", ""))
+        dur_edit = _txt(s.get("duration", 0))
+
+        form.addRow("Trigger Tag:", tag_edit)
+        form.addRow("Genre:", genre_edit)
+        form.addRow("Key (e.g. C, Gm):", key_edit)
+        form.addRow("BPM:", bpm_edit)
+        form.addRow("Time signature (e.g. 3/4):", time_edit)
+        form.addRow("Duration (sec):", dur_edit)
+
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(cancel_btn)
+        form.addRow(btn_row)
+
+        cancel_btn.clicked.connect(dialog.reject)
+
+        def _on_save():
+            dirty = False
+            for field, widget in (
+                ("custom_tag", tag_edit),
+                ("genre", genre_edit),
+                ("keyscale", key_edit),
+                ("bpm", bpm_edit),
+                ("timesignature", time_edit),
+                ("duration", dur_edit),
+            ):
+                if self._apply_manual_metadata(s, field, widget.text()):
+                    dirty = True
+            if dirty:
+                self.record_snapshot()
+            dialog.accept()
+
+        save_btn.clicked.connect(_on_save)
+        dialog.exec()
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.status_label.setText(f"Saved metadata for '{fname}'.")
 
     def on_table_selection_changed(self):
         s = self.get_selected_sample()
         self._load_track_preview(s)
         if s:
-            sid = s.get("id", "")
-            rep = self.health_reports.get(sid, {})
-            issues = rep.get("issues", [])
-
-            if not rep:
-                self.sample_health_alert.setText("Health: Not Audited (Click '🔍 Scan Audio & Fill Metadata' to scan)")
-                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #777; border-radius: 2px;")
-            elif not issues:
-                self.sample_health_alert.setText(f"✓ Healthy: {rep.get('sample_rate', 44100)} Hz | {rep.get('channels', 2)} ch | Est: {rep.get('lufs', -14):.1f} LUFS | BPM Conf: {int(rep.get('bpm_confidence', 0.8)*100)}%")
-                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #1b3a1d; border-left: 4px solid #4CAF50; border-radius: 2px; color: #a5d6a7;")
+            if not s.get("caption"):
+                self.sample_health_alert.setText("No caption yet — add a detailed description below.")
+                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #FB8C00; border-radius: 2px;")
             else:
-                issues_text = " • " + " • ".join(issues)
-                self.sample_health_alert.setText(f"⚠ Diagnostic Inconsistencies:\n{issues_text}")
-                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #3e2723; border-left: 4px solid #FF9800; border-radius: 2px; color: #ffcc80;")
+                self.sample_health_alert.setText("Track loaded — edit Tag / Genre / Key / BPM / Time / Duration in the table or via the ✏️ button.")
+                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #4CAF50; border-radius: 2px;")
 
             self.caption_text.blockSignals(True)
             self.lyrics_text.blockSignals(True)
@@ -2963,17 +2935,11 @@ class DatasetManager(QMainWindow):
             self.on_table_selection_changed()
             self.status_label.setText("Unlocked all metadata fields for editing.")
         elif action == "Restore Detected Values":
-            s = self.get_selected_sample()
-            if s:
-                sid = s.get("id", "")
-                rep = self.health_reports.get(sid, {})
-                if rep:
-                    s["bpm"] = rep.get("bpm_detected", 0)
-                    s["keyscale"] = rep.get("key_detected", "")
-                    s["timesignature"] = rep.get("timesig", s.get("timesignature", "4/4"))
-                    self.refresh_table()
-                    self.on_table_selection_changed()
-                    self.status_label.setText("Restored original detected values.")
+            # Health-audit auto-detection has been removed (it can be re-added
+            # later as a module). Nothing to restore from until then.
+            self.status_label.setText(
+                "Restore Detected Values is unavailable — the health audit was removed."
+            )
         self.lock_action_combo.setCurrentIndex(0)
 
     def on_caption_edited(self):
@@ -3202,41 +3168,8 @@ class DatasetManager(QMainWindow):
             self.status_label.setText("Warning bypass DISABLED.")
 
     # -----------------------------------------------------------------------
-    # Health Audit
+    # Remote (Kaggle) consolidated pipeline
     # -----------------------------------------------------------------------
-    def start_health_audit(self):
-        samples = self.dataset.get("samples", [])
-        if not samples:
-            QMessageBox.warning(self, "No Tracks", "Please add audio tracks before scanning.")
-            return
-
-        use_kaggle = self.audit_backend_combo.currentIndex() == 1
-
-        if not self.startup_scan_notice_shown:
-            self.startup_scan_notice_shown = True
-            msg = (
-                "Sending the dataset audio to a Kaggle GPU kernel for analysis. "
-                "Please wait a few minutes..."
-                if use_kaggle else
-                "Testing dataset audio. Please wait a few seconds..."
-            )
-            QMessageBox.information(self, "Testing Dataset Audio", msg)
-        if hasattr(self, "scan_btn") and self.scan_btn is not None:
-            self.scan_btn.setEnabled(True)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Auditing dataset health, metadata & degradation penalties...")
-
-        if use_kaggle:
-            self.active_worker = KaggleAuditWorker(samples, self.config)
-        else:
-            self.active_worker = HealthAuditorWorker(samples, self.config)
-        self.active_worker.progress.connect(self.on_worker_progress)
-        self.active_worker.file_audited.connect(self.on_file_audited)
-        self.active_worker.audit_completed.connect(self.on_audit_completed)
-        self.active_worker.error_occurred.connect(self.on_worker_error)
-        self.active_worker.start()
-
     def start_remote_consolidated_pipeline(self):
         """Asynchronously triggers the master Kaggle container and opens the console view."""
         from core.file_system import compress_dataset_folder, launch_remote_kaggle_console
@@ -3253,10 +3186,6 @@ class DatasetManager(QMainWindow):
         notebook_slug = "ace-step-master-pipeline" # Your notebook's specific URL string
         launch_remote_kaggle_console(username, notebook_slug)
         
-        # SAFETY GUARD
-        if hasattr(self, "scan_btn") and self.scan_btn is not None:
-            self.scan_btn.setEnabled(False)
-
         # Hand execution tracking off to background thread monitor
         from workers.kaggle_consolidated import KaggleConsolidatedWorker
         self.active_worker = KaggleConsolidatedWorker(self.config)
@@ -3265,68 +3194,6 @@ class DatasetManager(QMainWindow):
         self.active_worker.failed.connect(self.on_worker_error)
         self.active_worker.start()   
         self.status_label.setText("Container deployed! Redirecting your browser to monitor the GPUs live...")
-
-    def on_file_audited(self, sid, rep):
-        self.health_reports[sid] = rep
-        for s in self.dataset["samples"]:
-            if s["id"] != sid:
-                continue
-            # Auto-fill detected metadata next to the filename, then lock it.
-            # User-entered (non-empty) values are never overwritten; an unlocked
-            # track with non-empty values keeps its manual edits.
-            filled = False
-            if not s.get("bpm") or s.get("bpm") == 0:
-                if rep.get("bpm_detected"):
-                    s["bpm"] = rep["bpm_detected"]
-                    filled = True
-            if not s.get("keyscale"):
-                if rep.get("key_detected"):
-                    s["keyscale"] = rep["key_detected"]
-                    filled = True
-            if not s.get("timesignature"):
-                if rep.get("timesig"):
-                    s["timesignature"] = rep["timesig"]
-                    filled = True
-            if not s.get("duration") or s.get("duration") == 0:
-                if rep.get("duration"):
-                    s["duration"] = int(rep["duration"])
-                    filled = True
-            if filled and s.get("locked", True) is not False:
-                s["locked"] = True
-
-    def on_audit_completed(self, summary):
-        """
-        Callback handler when the lightweight integrity scan finishes.
-        🛡️ Bulletproof Value Check: Uses a strict non-None gate to shield boot timing races.
-        """
-        notice = getattr(self, "rescan_notice", None)
-        if notice is not None:
-            notice.close()
-            notice.deleteLater()
-            self.rescan_notice = None        
-
-        if getattr(self, "scan_btn", None) is not None:
-            self.scan_btn.setEnabled(True)
-            
-        if getattr(self, "progress_bar", None) is not None:
-            self.progress_bar.setVisible(False)
-
-        # Update the visual status panel text with the clean summary payload data
-        if getattr(self, "status_label", None) is not None:
-            reasons = summary.get("reasons", [])
-            mismatches = summary.get("missing_count", 0) + len(reasons)
-            self.status_label.setText(
-                f"Integrity Pass Complete. Verified: {summary.get('total_audited', 0)} tracks. "
-                f"Source mismatches found: {mismatches}"
-            )
-
-        # 🦾 REDRAW THE CANVAS: Use your actual native function to update the PySide6 table view
-        self.table.blockSignals(True)
-        try:
-            self.refresh_table()
-            self.on_table_selection_changed()
-        finally:
-            self.table.blockSignals(False)
 
     # -----------------------------------------------------------------------
     # DSP Normalize
@@ -3435,15 +3302,7 @@ class DatasetManager(QMainWindow):
             f"Normalized Audio Workspace:\n{norm_dir}\n\nOriginal Backup Stored At:\n{backup_dir}"
         )
 
-        self.status_label.setText("Rescanning dataset files. Please wait a few seconds...")
-        self.rescan_notice = QMessageBox(self)
-        self.rescan_notice.setWindowTitle("Rescanning Dataset")
-        self.rescan_notice.setIcon(QMessageBox.Information)
-        self.rescan_notice.setText("Rescanning dataset files. Please wait a few seconds...")
-        self.rescan_notice.setStandardButtons(QMessageBox.NoButton)
-        self.rescan_notice.setModal(False)
-        self.rescan_notice.show()
-        self.start_health_audit()
+        self.status_label.setText("DSP normalization finished. Dataset is ready to edit.")
 
 # Metadata Correction Script
     def force_sync_manifest_to_metadata(self):
@@ -3463,30 +3322,9 @@ class DatasetManager(QMainWindow):
 
         for sample in samples:
             sid = sample.get("id", "")
-            
+
             # Fetch the actual metadata values defined in your manifest
             canonical_time_sig = str(sample.get("timesignature", "4/4")).strip()
-            
-            # 2. Intercept the active health report record for this track
-            if sid in self.health_reports:
-                report = self.health_reports[sid]
-                
-                # Check if the report issues contains a false auto-detected time signature warning
-                clean_issues = []
-                for issue in report.get("issues", []):
-                    # Strip out any lingering warnings about heuristic meter detection clashes
-                    if "time signature auto-detected" in issue.lower() or "time-signature" in issue.lower():
-                        continue
-                    clean_issues.append(issue)
-                
-                # Write the cleaned issues back to the tracking index
-                report["issues"] = clean_issues
-                
-                # If there are no longer any hardware degradation issues, upgrade status cleanly
-                if not clean_issues:
-                    report["status"] = "Healthy"
-                    
-                reconciled_count += 1
 
         # 3. 🛡️ THE SIGNAL BLOCKER GATEWAY: Pause table signals before updating cell properties
         self.table.blockSignals(True)
@@ -3496,14 +3334,9 @@ class DatasetManager(QMainWindow):
         finally:
             self.table.blockSignals(False) # Securely restore signals regardless of compilation output
 
-        # 4. Force a recalculation of the global summary badge state
-        from modules.audit import aggregate_health_summary
-        summary = aggregate_health_summary(self.health_reports, self.dataset.get("samples", []), self.config)
-        self.on_audit_completed(summary)
-
         self.status_label.setText(f"Manifest sync pass finished! Reconciled {reconciled_count} tracks.")
-        QMessageBox.information(self, "Metadata Alignment Pass Complete", 
-                                f"Successfully matched {reconciled_count} tracks.\nFalse 4/4 meter detection warnings have been removed from the health reports matrix.")
+        QMessageBox.information(self, "Metadata Alignment Pass Complete",
+                                f"Successfully matched {reconciled_count} tracks.")
 
     def import_acestep_15xl_tags(self):
         """
@@ -3542,13 +3375,7 @@ class DatasetManager(QMainWindow):
                             sample["caption"] = caption_text
                             sample["lyrics"] = lyrics_text
                             sample["formatted_lyrics"] = lyrics_text
-                            
-                            # Wipe away false placeholder tracking warnings instantly
-                            sid = sample.get("id", "")
-                            if sid in self.health_reports:
-                                self.health_reports[sid]["issues"] = []
-                                self.health_reports[sid]["status"] = "Healthy"
-                                
+
                             synced_count += 1
                             break
 
@@ -3560,11 +3387,6 @@ class DatasetManager(QMainWindow):
             finally:
                 self.table.blockSignals(False)
 
-            # Recalculate your global UI indicator status badge panels
-            from modules.audit import aggregate_health_summary
-            summary = aggregate_health_summary(self.health_reports, self.dataset["samples"], self.config)
-            self.on_audit_completed(summary)
-
             self.status_label.setText(f"Successfully loaded 1.5XL tags for {synced_count} tracks.")
             QMessageBox.information(self, "1.5XL Sync Complete", f"Successfully integrated metadata properties across {synced_count} tracks.")
 
@@ -3575,21 +3397,6 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Load / Save Dataset
     # -----------------------------------------------------------------------
-    def load_dataset(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open Dataset JSON", "", "JSON Files (*.json)")
-        if path:
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    self.dataset = json.load(f)
-                self.record_snapshot()
-                self.health_reports.clear()
-                self.sync_general_props_to_ui()
-                self.refresh_table()
-                self.status_label.setText(f"Loaded {len(self.dataset.get('samples', []))} tracks.")
-                self.start_health_audit()
-            except Exception as e:
-                QMessageBox.critical(self, "Load Error", str(e))
-
     def load_dataset(self, checked=False, path=None):
         if isinstance(checked, str) and path is None:
             path = checked
@@ -3619,13 +3426,6 @@ class DatasetManager(QMainWindow):
             self.current_dataset_path = path
             self.record_snapshot()
 
-            restored = self.dataset.get("metadata", {}).get(
-                "health_reports",
-                {},
-            )
-            self.health_reports.clear()
-            self.health_reports.update(restored)
-
             self.sync_general_props_to_ui()
             self.refresh_table()
 
@@ -3633,30 +3433,10 @@ class DatasetManager(QMainWindow):
                 f"Loaded {len(self.dataset.get('samples', []))} tracks."
             )
 
-            if not self.health_reports:
-                self.start_health_audit()
-            else:
-                from modules.audit import aggregate_health_summary
-
-                summary = aggregate_health_summary(
-                    self.health_reports,
-                    self.dataset.get("samples", []),
-                    self.config,
-                )
-                self.on_audit_completed(summary)
-
         except Exception as e:
             QMessageBox.critical(self, "Load Error", str(e))
 
     def save_dataset(self, path=None):
-        if not self.bypass_warnings and self.quality_badge.text().find("Critical") != -1:
-            QMessageBox.warning(
-                self, "Export Blocked by Quality Threshold",
-                "Dataset quality is below safe threshold (<60%). Fix flagged issues or click '🛡 I Know What I'm Doing' to bypass.",
-                QMessageBox.Ok
-            )
-            return False
-
         if path is None:
             path = getattr(self, "current_dataset_path", None)
         if not path:
@@ -3667,7 +3447,6 @@ class DatasetManager(QMainWindow):
         try:
             self.on_general_prop_changed()
             self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
-            self.dataset["metadata"]["health_reports"] = self.health_reports
             backup = self._backup_file(path)  # never replace an existing file silently
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self.dataset, f, indent=2)
@@ -3706,10 +3485,10 @@ class DatasetManager(QMainWindow):
     # Add Audio (single song / folder)
     # -----------------------------------------------------------------------
     def add_audio_files(self):
-        exts = " ".join(sorted(AUDIO_EXTS))
+        exts = " ".join(AUDIO_EXTS_ORDERED)
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Add Single Song (one or more audio files)", "",
-            f"Audio Files ({exts})",
+            f"Audio Files ({exts});;All Files (*)",
         )
         if paths:
             self._add_audio_paths(paths)
@@ -3730,7 +3509,7 @@ class DatasetManager(QMainWindow):
             QMessageBox.information(
                 self, "Add Audio Folder",
                 f"No supported audio files found in:\n{folder}\n\n"
-                f"Supported formats: {', '.join(sorted(AUDIO_EXTS))}",
+                f"Supported formats: {', '.join(AUDIO_EXTS_ORDERED)}",
             )
             return
         self._add_audio_paths(paths)
@@ -3739,7 +3518,9 @@ class DatasetManager(QMainWindow):
         """Shared add path: create samples for the given audio file paths.
 
         Skips files already present in the dataset (dedupe by ``audio_path``),
-        then refreshes the table and kicks off the initial quality audit.
+        then refreshes the table. Tracks are added instantly with blank metadata
+        (BPM/key/time/duration) and are left unlocked/editable so you can type
+        values inline. No health audit runs on add (the audit module was removed).
         """
         self.record_snapshot()
         global_tag = self.custom_tag_input.text().strip()
@@ -3769,7 +3550,7 @@ class DatasetManager(QMainWindow):
                 "language": "en",
                 "is_instrumental": is_all_inst,
                 "custom_tag": global_tag,
-                "locked": True,
+                "locked": False,
                 # Spatial fields
                 "structural_segments": [],
                 "spatial_tokens": {},
@@ -3782,8 +3563,6 @@ class DatasetManager(QMainWindow):
         if skipped:
             msg += f" {skipped} already present (skipped)."
         self.status_label.setText(msg)
-        if added:
-            self.start_health_audit()
 
 
     # -----------------------------------------------------------------------
@@ -4689,9 +4468,6 @@ class DatasetManager(QMainWindow):
         self.refresh_table()
         self.on_table_selection_changed()
         self.status_label.setText(f"Successfully processed batch script! Renamed {count} files on disk.")
-        
-        # Trigger your health audit to scan the newly renamed configurations automatically
-        self.start_health_audit()
 
     def open_lyrics_editor(self):
         sample = self.get_selected_sample()
@@ -5004,14 +4780,7 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(msg)
 
     def on_worker_error(self, err_msg):
-        notice = getattr(self, "rescan_notice", None)
-        if notice is not None:
-            notice.close()
-            notice.deleteLater()
-            self.rescan_notice = None
-
         self.run_ai_btn.setEnabled(True)
-        self.scan_btn.setEnabled(True)
         self.normalize_btn.setEnabled(True)
         self.progress_bar.setVisible(False)      
         self.status_label.setText("Operation error.")
@@ -5019,8 +4788,6 @@ class DatasetManager(QMainWindow):
 
     def on_remote_pipeline_success(self, result_payload):
         """Clean decoupled pass-through directing data integration to our core script engine."""
-        if hasattr(self, "scan_btn") and self.scan_btn is not None:
-            self.scan_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         
         # Trigger your independent module function
