@@ -15,6 +15,46 @@
 # ------------------------------------------------------------------
 
 [UNREVIEWED]
+# ---------------------------------------------------------------------------
+# FIX: "Add Single Song" did not recognize audio files (2026-09-15)
+#   ROOT CAUSE: the QFileDialog filter was built as bare extensions
+#   ("Audio Files (.wav .flac ...)"). Qt filter grammar requires globs
+#   ("*.wav"); a bare extension matches nothing, so the picker hid every
+#   audio file (users had to manually pick "All Files (*)").
+#   FIX (dataset_manager.py::add_audio_files):
+#     globs = " ".join(f"*{e}" for e in AUDIO_EXTS_ORDERED)
+#     -> "Audio Files (*.wav *.flac ...);;All Files (*)"
+#
+# BROADENED FORMAT SUPPORT (user: "allow them all — never know what a person
+# will use"). AUDIO_EXTS / AUDIO_EXTS_ORDERED now cover 26 formats:
+#   lossless: .wav .flac .aiff .aif .aifc .alac .ape .wv .tta .au .caf .rf64 .bwf
+#   lossy   : .mp3 .m4a .aac .ogg .oga .opus .wma .ac3 .amr .mp2
+#   other   : .webm .mkv .mp4
+# New helper sets: LOSSLESS_EXTS, LOSSY_EXTS (disjoint; both ⊂ AUDIO_EXTS).
+#
+# NEW "Before You Add Tracks — Read This" warnings dialog
+#   dataset_manager.py::_show_add_track_warnings(count)
+#   Shown on both add paths (single song + folder) BEFORE importing. Covers:
+#     1. Prefer lossless sources (recommended) — lossy caps achievable quality
+#     2. Keep sources consistent (sample rate / mono-stereo / loudness / era)
+#     3. Common problems: clipping, mixed sample rates, mono+stereo, fake
+#        lossless, duplicates/re-rips, short clips, silence/count-ins,
+#        inconsistent loudness
+#     4. Aim for a coherent single-sound dataset
+#   Has a "Don't show this warning again" checkbox -> persists
+#   config["suppress_add_track_warnings"] (added to DEFAULT_CONFIG; False).
+#   Cancel aborts the import (returns False; status label reports cancellation).
+#
+# VERIFIED (offscreen):
+#   - filter string has *. on all 26 globs; ordered == set; lossless/lossy
+#     disjoint and both subset of AUDIO_EXTS
+#   - app boots; suppressed path returns True without dialog
+#   - dialog: Warning icon, checkbox text correct, Cancel -> False (aborts),
+#     all 10 content keywords present, 1743-char body
+#   - real .wav added end-to-end (samples == 1)
+# ---------------------------------------------------------------------------
+
+[UNREVIEWED — previous]
 (daily iterative mode — currently no dirty hunks pending)
 
 [BASELINE SWEEP]

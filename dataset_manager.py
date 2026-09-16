@@ -63,10 +63,35 @@ LLM_KEY_FIELDS = {
 
 # Audio file extensions accepted when adding songs/folders to the dataset
 # (single source of truth, used by both the file picker and the folder scan).
-AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
+# Deliberately permissive: users bring whatever they have. Lossless formats are
+# recommended for training quality (see the add-track warnings dialog), but the
+# app will accept lossy/container formats rather than block the workflow.
+AUDIO_EXTS = {
+    # Lossless (recommended)
+    ".wav", ".flac", ".aiff", ".aif", ".aifc", ".alac", ".ape", ".wv", ".tta", ".au",
+    # Lossy
+    ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma", ".ac3", ".amr", ".mp2",
+    # Containers / misc
+    ".webm", ".mkv", ".mp4", ".caf", ".rf64", ".bwf",
+}
 # Same set as a deterministic, human-ordered tuple for building the file-dialog
 # filter string (a set's iteration order would make the filter jump around).
-AUDIO_EXTS_ORDERED = (".wav", ".flac", ".mp3", ".ogg", ".m4a")
+AUDIO_EXTS_ORDERED = (
+    ".wav", ".flac", ".aiff", ".aif", ".aifc", ".alac", ".ape", ".wv", ".tta", ".au",
+    ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma", ".ac3", ".amr", ".mp2",
+    ".webm", ".mkv", ".mp4", ".caf", ".rf64", ".bwf",
+)
+# Formats we treat as lossless when warning about dataset quality.
+LOSSLESS_EXTS = {
+    ".wav", ".flac", ".aiff", ".aif", ".aifc", ".alac", ".ape", ".wv", ".tta", ".au",
+    ".caf", ".rf64", ".bwf",
+}
+# Formats known to be lossy-compressed (quality penalty for LoRA training).
+LOSSY_EXTS = {
+    ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma", ".ac3", ".amr", ".mp2",
+}
+# Settings key remembering that the user dismissed the add-track warnings.
+ADD_WARNINGS_SETTINGS_KEY = "suppress_add_track_warnings"
 
 # ============================================================================
 # Main Window: DatasetManager
@@ -3485,13 +3510,19 @@ class DatasetManager(QMainWindow):
     # Add Audio (single song / folder)
     # -----------------------------------------------------------------------
     def add_audio_files(self):
-        exts = " ".join(AUDIO_EXTS_ORDERED)
+        # Qt filter grammar needs globs ("*.wav"), not bare extensions (".wav"):
+        # a bare extension matches nothing and hides every audio file in the
+        # picker. Lossless formats are listed first as the recommended choice.
+        globs = " ".join(f"*{e}" for e in AUDIO_EXTS_ORDERED)
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Add Single Song (one or more audio files)", "",
-            f"Audio Files ({exts});;All Files (*)",
+            f"Audio Files ({globs});;All Files (*)",
         )
         if paths:
-            self._add_audio_paths(paths)
+            if self._show_add_track_warnings(len(paths)):
+                self._add_audio_paths(paths)
+            else:
+                self.status_label.setText("Add cancelled — no files were imported.")
 
     def add_audio_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -3512,7 +3543,69 @@ class DatasetManager(QMainWindow):
                 f"Supported formats: {', '.join(AUDIO_EXTS_ORDERED)}",
             )
             return
-        self._add_audio_paths(paths)
+        if self._show_add_track_warnings(len(paths)):
+            self._add_audio_paths(paths)
+        else:
+            self.status_label.setText("Add cancelled — no files were imported.")
+
+    def _show_add_track_warnings(self, count):
+        """Warn about dataset-quality risks before importing tracks.
+
+        Shown once per session unless the user ticks "Don't show this again"
+        (persisted via the ADD_WARNINGS_SETTINGS_KEY settings flag).
+        Returns True to proceed with the import, False if the user cancelled.
+        """
+        if self.config.get(ADD_WARNINGS_SETTINGS_KEY):
+            return True
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Before You Add Tracks — Read This")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            f"About to add {count} audio file(s). A few things strongly affect "
+            "how well your dataset trains:"
+        )
+        box.setInformativeText(
+            "<b>1. Prefer lossless sources (recommended).</b><br>"
+            "<code>.wav</code> / <code>.flac</code> / <code>.aiff</code> / "
+            "<code>.alac</code> are the recommended formats. Lossy formats "
+            "(<code>.mp3</code>, <code>.m4a</code>, <code>.aac</code>, "
+            "<code>.opus</code>, <code>.wma</code>) permanently discard audio "
+            "detail — a 128 kbps MP3 bakes compression artifacts straight into "
+            "your LoRA weights. Any lossy track caps your achievable quality. "
+            "If you only have a lossy file, try to find a lossless master first.<br><br>"
+
+            "<b>2. Keep your sources consistent.</b><br>"
+            "Mixing mismatched sources — different sample rates, mono vs stereo, "
+            "different loudness, vinyl rips beside studio masters, or one album "
+            "ripped from a different edition — teaches the model those differences "
+            "instead of the music. Normalize loudness/sample rate (DSP Normalize) "
+            "and avoid blending eras, releases, or transfer qualities.<br><br>"
+
+            "<b>3. Watch out for these common problems.</b><br>"
+            "&bull; <b>Clipping / brickwalled masters</b> — distortion the model will learn.<br>"
+            "&bull; <b>Different sample rates</b> (44.1k vs 48k) — resample to one rate.<br>"
+            "&bull; <b>Mono files mixed with stereo</b> — inconsistent stereo image.<br>"
+            "&bull; <b>Fake lossless</b> (a 128 kbps MP3 re-saved as WAV) — still lossy.<br>"
+            "&bull; <b>Duplicates / re-rips</b> of the same song — skewed weighting.<br>"
+            "&bull; <b>Short clips vs full songs</b> — inconsistent structure learning.<br>"
+            "&bull; <b>Silence, count-ins, or talking</b> at the start — trim it.<br>"
+            "&bull; <b>Inconsistent loudness</b> — normalize to one target LUFS.<br><br>"
+
+            "<b>4. Aim for a coherent, single-sound dataset.</b><br>"
+            "A smaller, consistent dataset (same genre/era/production, lossless, "
+            "one sample rate) trains far better than a large, heterogeneous one."
+        )
+        dont_show = QCheckBox("Don't show this warning again")
+        box.setCheckBox(dont_show)
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Ok)
+        if box.exec() != QMessageBox.Ok:
+            return False
+        if dont_show.isChecked():
+            self.config[ADD_WARNINGS_SETTINGS_KEY] = True
+            save_config(self.config)
+        return True
 
     def _add_audio_paths(self, paths):
         """Shared add path: create samples for the given audio file paths.

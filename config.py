@@ -20,6 +20,8 @@ DEFAULT_CONFIG = {
     "humanize_presets": [],     # user-entered humanization presets (free-form)
     "tag_caption_ratio": 0,     # % of tracks using tag-style prompts (0 = all captions, 100 = all tags)
     "kaggle_model_dataset": "michelmoalem9b/acestep-captioner-model",  # cached captioner weights
+    # Suppress the "Before You Add Tracks" dataset-quality warnings dialog.
+    "suppress_add_track_warnings": False,
     # Per-secret "remember on this device" policy (non-secret, kept in settings.json).
     # When True the secret is stored encrypted (OS keyring / secrets.enc); when
     # False it is used for the current session only and never persisted.
