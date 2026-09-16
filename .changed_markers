@@ -18,21 +18,119 @@
 (daily iterative mode — currently no dirty hunks pending)
 
 [BASELINE SWEEP]
-# (not yet run) Historical dead code is invisible to git diff (committed =
-# clean = cache hit). To populate this section, run once, then delete:
-#   vulture . --exclude .venv,kernels --min-confidence 80
-#   flake8 --select=F401 .    # unused imports
-# Pipe ONLY the flagged lines here; the agent reviews just those candidates.
+# RUN 2026-09-15 — first pass complete. Tools: vulture 2.16, flake8 7.3.0
+# (installed into .venv for this scan; NOT app runtime deps).
+#   .venv/bin/python -m vulture . --exclude .venv,kernels,__pycache__,scripts,.git --min-confidence 80
+#   .venv/bin/python -m flake8 --select=F401 . --exclude=.venv,kernels,__pycache__,scripts,.git
+#
+# RESULT: 3906 net lines of dead code removed; app boots clean (offscreen test).
 
 [FLAGGED - REVIEW / NOT AUTO-FIXED]
-dataset_manager.py  GATEKEEPER credential check REMOVED entirely:
-   self._prepare_pipeline_credentials(...) + method deleted (grep = 0 hits).
-   Confirm intentional before closing.
-core/kaggle_worker.py + kaggle_health.py (BROKEN DUPLICATES):
-   health-audit remnants w/ `pip install git+https://github.com` + hardcoded
-   /kaggle/input/ace-step-upload-bundle. Candidate dead code (confirm via
-   BASELINE SWEEP before removal). dataset_manager.py:3249 still references
-   core/kaggle_worker.py via start_remote_consolidated_pipeline.
+# ---------------------------------------------------------------------------
+# HEALTH AUDIT REMOVED (2026-09-15, user request — "can be added later as a module")
+# Deleted files:
+#   workers/health_audit.py      (HealthAuditorWorker)
+#   workers/health.py            (legacy duplicate)
+#   modules/audit.py             (aggregate_health_summary)
+#   modules/homogeneity.py       (HomogeneityEngine)
+#   kernels/health_audit_kernel.py
+# dataset_manager.py: removed import, state (health_reports,
+#   startup_scan_notice_shown), UI (quality_badge, scan_btn, audit_backend_combo),
+#   methods (start_health_audit / on_file_audited / on_audit_completed),
+#   the save/load persistence of metadata.health_reports, the export quality
+#   gate, and all auto-fill/restore-detected-values paths that depended on it.
+#   Assistant tool `scan_health` now returns a friendly "not available" string.
+# config.py: dropped the stale "audit_backend" default key.
+# Docs updated: README.md, SPECIFICATION.md, docs/workflow.md.
+#
+# STILL PRESENT / INTENTIONALLY KEPT:
+#   core/kaggle_worker.py + workers/kaggle_consolidated.py — the REMOTE Kaggle
+#     pipeline writes its own audit_results.json artifact. Unrelated to the
+#     removed LOCAL audit; left intact.
+#
+# MCP health_audit tool ALSO REMOVED (2026-09-15, user: "will remake later fresh"):
+#   mcp_server.py       -> dropped the @mcp.tool health_audit() definition + docstring word.
+#   modules/mcp_tools.py -> deleted tool_health_audit() and its private helper
+#     _file_stats(); removed now-unused `os` + `wave` imports; docstring updated.
+#   Remaining MCP tools: list_tracks, dataset_summary, tag_track, curate_dataset.
+#   VERIFIED: both files parse; mcp_tools imports; `mcp_server.py --help` runs;
+#   grep project-wide for health_audit/tool_health/_file_stats = 0 hits.
+#
+# BACKWARD COMPAT VERIFIED: loading a legacy dataset.json that still contains
+#   metadata.health_reports does NOT crash (key is simply ignored).
+# VERIFIED: app boots; add/save/settings/assistant-tool flows all pass offscreen.
+# ---------------------------------------------------------------------------
+# (1) FALSE POSITIVES — do NOT remove (verified):
+#   Behavior CONFIRMED intentional by user = add is INSTANT, no auto-audit.
+#   dataset_manager.py:
+#     - _add_audio_paths docstring corrected (it falsely promised "kicks off
+#       the initial quality audit"; the audit call had been removed). Now
+#       documents: blank metadata, unlocked/editable, no audit on add.
+#     - Added module constant AUDIO_EXTS_ORDERED (deterministic tuple) for the
+#       file-dialog filter + folder error message. AUDIO_EXTS (set) previously
+#       fed " ".join(sorted(...)) -> the "; ;All Files (*)" filter lost.
+#     - add_audio_files now offers "Audio Files (...);;All Files (*)" so files
+#       with unusual extensions remain selectable.
+#   New tracks stay "locked": False by design (editable inline). Safe: the only
+#   "locked" readers are toggle_track_lock / status text / on_file_audited.
+#   VERIFIED: offscreen test added 2 wavs (2 added, re-add deduped to 0),
+#   locked=False, bpm/key/dur blank, table rows=2, app boots.
+# ---------------------------------------------------------------------------
+# (1) FALSE POSITIVES — do NOT remove (verified):
+modules/exporters.py:62  'name_fn' -> function parameter (public signature).
+workers/structural.py:557 'step'    -> lambda parameter in signal connect.
+#     (closeEvent / save_dataset_as also flagged at conf-60 — Qt overrides /
+#      menu-wired; NOT dead.)
+#
+# (2) REMAINING F401 (41 unused imports, peripheral files — next pass):
+workers/advanced.py(6) workers/structural.py(5) stem_separator.py(5)
+workers/health.py(4) workers/caption.py(3) workers/spatial.py(2)
+workers/kaggle_stems.py(2) workers/assistant.py(2) workers/kaggle_consolidated.py(1)
+widgets.py(1) modules/audit.py(1) modules/audio_analysis.py(1)
+core/kaggle_worker.py(1) dataset_manager.py(7 nested/lazy)
+#     NOTE: do NOT blindly strip — verify each; several modules(workers/health.py,
+#     workers/caption.py, workers/structural.py) import names that are re-imported
+#     lazily inside functions.
+#
+# (3) CANDIDATE FEATURE REMOVALS STATUS (2026-09-15):
+#   REMOVED: modules/dependency_installer.py  (ensure_package, runtime pip hazard; 0 importers)
+#   REMOVED: ui/secret_prompt.py              (SecretPromptDialog; 0 references)
+#   KEPT (LIVE — would break features if removed):
+#     modules/web_research.py  -> imported at module level by modules/musicbrainz.py:10
+#                                 and modules/rockstar_lookup.py:20 (fetch_page).
+#                                 Powers MusicBrainz + Rockstar lookups.
+#     modules/recommender.py   -> recommend_mvsep_models() used in workers/spatial.py:122,
+#                                 workers/structural.py:125, workers/instrument_detect.py:76.
+#                                 Powers content-aware MVSEP model recommendation.
+#   NOTE: these two were originally flagged as removal candidates but are NOT dead.
+#
+# (1) FALSE POSITIVES — do NOT remove (verified):
 
 [RESOLVED / CACHE HIT]
-(stem-split fix + control/review plumbing verified; workflow + token docs added)
+# 2026-09-15 audit pass:
+#   core/kaggle_worker.py  -> LIVE (invoked by start_remote_consolidated_pipeline
+#       via `kaggle kernels push -p core/kaggle_worker.py`; wired to kaggle_master_btn
+#       at dataset_manager.py:442). Prior marker note claiming it removable was WRONG.
+#   kaggle_health.py       -> REMOVED (0 references anywhere)
+#   modules/analyze_track.py -> REMOVED (0 importers, 308 lines)
+#   ui/main_window.py      -> REMOVED (orphaned stale DatasetManager fork, 2638 lines)
+#   ui/mvsep_tab.py        -> REMOVED (MVSepTab class, 0 refs, 577 lines; live MVSEP
+#       flow uses modules/mvsep_gui.py MVSEPDialog instead)
+#   modules/stats.py       -> RESTORED from HEAD. Working tree had been mangled into
+#       invalid Python (class method spliced at module level, 4-space indent) which
+#       crashed `show_stats_report` with SyntaxError. Now 65 lines, parses + imports.
+#   dataset_manager.py     -> FIXED unreachable `return` in execute_assistant_tool
+#       (dead branch after scan_health). Restored missing `detect_instruments` tool
+#       handler, which was declared in workers/assistant.py:182 but unhandled ->
+#       assistant fell through to "Unknown tool".
+#   dataset_manager.py     -> TRIMMED import block: removed ~20 unused imports
+#       (sys/tempfile/subprocess/math/struct/wave/zipfile/librosa/numpy/soundfile/
+#       OpenAI/QThread/Signal/QSize/QTime/QFont.../QPalette/leaderboards/
+#       TranscribeLyricsWorker/build_settings_tab) + de-duplicated a repeated
+#       QtWidgets import group.
+#   modules/homogeneity.py -> removed unused imports (asdict/json/Dict/Optional).
+#   project_backups/       -> untracked + deleted from disk (~200MB binary audio);
+#       added to .gitignore along with *.save.
+#   .changed_markers       -> was corrupted (raw git-diff dump + Binary flac lines,
+#       69KB). Reset to this marker index.
+
