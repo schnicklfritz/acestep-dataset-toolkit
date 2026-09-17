@@ -49,3 +49,6 @@ project_backups/
 
 # Editor leftover saves
 *.save
+
+# Local lyrics normalization profiles (per-band rules — user data, not source)
+lyrics_profiles/

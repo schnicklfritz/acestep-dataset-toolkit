@@ -19,6 +19,13 @@ from workers.export import ExportWorker
 from workers.tag_creator import TagCreatorWorker
 from workers.musicbrainz import MusicBrainzWorker
 from modules.lyrics_tools import split_long_lines
+from modules.dataset_schema import (
+    LANGS,
+    TIME_SIGNATURES,
+    derive_instrumental_mode,
+    new_sample,
+    normalize_dataset,
+)
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
@@ -41,13 +48,23 @@ from ui.settings_tab import build_settings_tab
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
-    QLabel, QLineEdit, QComboBox, QTextEdit, QFileDialog,
-    QMessageBox, QSplitter, QGroupBox, QSpinBox, QDoubleSpinBox,
+    QLabel, QLineEdit, QTextEdit, QFileDialog,
+    QMessageBox, QSplitter, QGroupBox,
     QInputDialog, QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
     QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
-    QTabWidget, QSlider, QRadioButton, QButtonGroup,
+    QTabWidget, QRadioButton, QButtonGroup, QToolButton, QMenu,
     QListWidget, QTextBrowser, QAbstractItemView
+)
+# Scroll-wheel-guarded value widgets: the wheel only changes these after the
+# control has been clicked, so scrolling the dataset past a combo/spin/slider
+# can no longer silently alter a value. Aliased to the plain Qt names so every
+# existing construction site below is guarded with no further edits.
+from modules.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSlider as QSlider,
+    GuardedSpinBox as QSpinBox,
 )
 from PySide6.QtGui import QDesktopServices
 
@@ -120,8 +137,12 @@ class DatasetManager(QMainWindow):
                 "name": "",
                 "custom_tag": "",
                 "tag_position": "prepend",
+                "created_at": "",
+                "num_samples": 0,
+                "all_instrumental": False,
+                "genre_ratio": 0,
+                # Legacy 3-state string, kept in sync from all_instrumental.
                 "instrumental_mode": "mixed",
-                "num_samples": 0
             },
             "samples": []
         }
@@ -137,11 +158,19 @@ class DatasetManager(QMainWindow):
         # filename/caption/tag/genre/key; no separate genre/key/BPM filter
         # fields (single place for those values = the table, auto-locked).
         self._table_sample_indices = []
+        self._last_selected_row = -1
         self.filter_query = ""
         self.filter_inst = "all"
         self.filter_captioned = False
         self._loading_table = False
         self.kaggle_notebook_unlocked = False  # NEW
+        # RETAINMENT: every top-level tab page and grouped sub-tab container is
+        # appended here. PySide6 frees a C++ widget when its last Python
+        # reference goes away, and freeing a parent frees its children — so a
+        # local-only tab variable would silently delete the widgets inside it.
+        self._tab_pages = []
+        self._grouped_tabs = []
+        self._grouped_tab_inner = []
 
         self.init_ui()
         self.apply_custom_theme()
@@ -257,16 +286,41 @@ class DatasetManager(QMainWindow):
         embed_tab = QWidget()
         self.init_embedding_map_tab(embed_tab)
 
-        self.tabs.addTab(studio_tab, "🎛 Dataset Studio")
-        self.tabs.addTab(struct_tab, "🎶 Structural Pipeline")
-        self.tabs.addTab(settings_tab, "⚙ Settings")
-        self.tabs.addTab(advanced_tab, "🧠 Advanced Tools")
-        self.tabs.addTab(spatial_tab, "🌐 Spatial Pipeline")
-        self.tabs.addTab(assistant_tab, "🤖 AI Assistant")
-        self.tabs.addTab(tag_tab, "🏷️ Tag Manager")
-        self.tabs.addTab(embed_tab, "🗺️ Embedding Map")
+        caption_tab = QWidget()
+        self.init_caption_tab(caption_tab)
+
+        # --- Grouped tabs: keep the top level to a short, scannable list ----
+        # Pipelines (Structural / Spatial / Advanced) share one tab with inner
+        # sub-tabs; Organize (Tag Manager / Embedding Map) likewise.
+        pipelines_tab = self._build_grouped_tab(
+            "Pipeline",
+            [
+                ("🎶 Structural", struct_tab),
+                ("🌐 Spatial", spatial_tab),
+                ("🧠 Advanced", advanced_tab),
+            ],
+        )
+        organize_tab = self._build_grouped_tab(
+            "Organize",
+            [
+                ("🏷️ Tag Manager", tag_tab),
+                ("🗺️ Embedding Map", embed_tab),
+            ],
+        )
+
+        lyrics_tab = QWidget()
+        self.init_lyrics_tab(lyrics_tab)
+
+        self._add_tab(studio_tab, "🎛 Dataset Studio")
+        self._add_tab(caption_tab, "🎤 Caption")
+        self._add_tab(lyrics_tab, "🎵 Lyrics")
+        self._add_tab(pipelines_tab, "⚙️ Pipeline")
+        self._add_tab(organize_tab, "🏷️ Organize")
+        self._add_tab(settings_tab, "⚙ Settings")
+        self._add_tab(assistant_tab, "🤖 Assistant")
         self.tag_tab_index = self.tabs.indexOf(tag_tab)
         self.embed_tab_index = self.tabs.indexOf(embed_tab)
+        self.lyrics_tab_index = self.tabs.indexOf(lyrics_tab)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # Set the Dataset Studio tab as the default visible tab
@@ -276,56 +330,75 @@ class DatasetManager(QMainWindow):
             self.tabs.setCurrentIndex(studio_index)
 
         # --- Header Bar ---
+        # Compact primary actions; one-off utilities live behind the ⋯ menu so
+        # the bar stays scannable. Every action is still one click away.
         header_bar = QHBoxLayout()
 
-        self.bypass_btn = QPushButton("🛡 I Know What I'm Doing (Bypass All)")
+        load_btn = QPushButton("📂 Open")
+        load_btn.setToolTip("Load a dataset JSON file.")
+        load_btn.clicked.connect(self.load_dataset)
+
+        save_btn = QPushButton("💾 Save")
+        save_btn.setToolTip("Save the dataset JSON (previous file is backed up).")
+        save_btn.clicked.connect(self.save_dataset)
+
+        self.add_menu_btn = QToolButton()
+        self.add_menu_btn.setText("➕ Add")
+        self.add_menu_btn.setToolTip("Add audio to the dataset.")
+        self.add_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        add_menu = QMenu(self.add_menu_btn)
+        add_menu.addAction("Single Song…", self.add_audio_files)
+        add_menu.addAction("Audio Folder (recursive)…", self.add_audio_folder)
+        self.add_menu_btn.setMenu(add_menu)
+
+        self.export_menu_btn = QToolButton()
+        self.export_menu_btn.setText("📦 Export")
+        self.export_menu_btn.setToolTip("Export, split, or publish the dataset.")
+        self.export_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        export_menu = QMenu(self.export_menu_btn)
+        export_menu.addAction("Export / Split…", self.open_export_dialog)
+        export_menu.addAction("Push to Hugging Face…", self.open_hf_push_dialog)
+        self.export_menu_btn.setMenu(export_menu)
+
+        self.more_menu_btn = QToolButton()
+        self.more_menu_btn.setText("⋯")
+        self.more_menu_btn.setToolTip("Statistics, versioning, and warning controls.")
+        self.more_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        more_menu = QMenu(self.more_menu_btn)
+        more_menu.addAction("📊 Dataset Statistics", self.show_stats_report)
+        more_menu.addAction("🗂 Versioning…", self.open_versioning_dialog)
+        more_menu.addSeparator()
+        self.bypass_btn = QPushButton("🛡 Bypass Warnings")
         self.bypass_btn.setCheckable(True)
         self.bypass_btn.clicked.connect(self.toggle_bypass)
-        header_bar.addWidget(self.bypass_btn)
+        self.bypass_action = more_menu.addAction("🛡 Bypass Warnings")
+        self.bypass_action.setCheckable(True)
+        self.bypass_action.toggled.connect(self.bypass_btn.setChecked)
+        self.bypass_btn.toggled.connect(self.bypass_action.setChecked)
+        self.more_menu_btn.setMenu(more_menu)
+
+        header_bar.addWidget(load_btn)
+        header_bar.addWidget(save_btn)
+        header_bar.addWidget(self.add_menu_btn)
+        header_bar.addWidget(self.export_menu_btn)
 
         header_bar.addStretch()
 
-        self.undo_btn = QPushButton("↩ Undo")
+        self.undo_btn = QPushButton("↩")
+        self.undo_btn.setToolTip("Undo the last change.")
+        self.undo_btn.setMaximumWidth(36)
         self.undo_btn.setEnabled(False)
         self.undo_btn.clicked.connect(self.undo)
         header_bar.addWidget(self.undo_btn)
 
-        self.redo_btn = QPushButton("↪ Redo")
+        self.redo_btn = QPushButton("↪")
+        self.redo_btn.setToolTip("Redo the last undone change.")
+        self.redo_btn.setMaximumWidth(36)
         self.redo_btn.setEnabled(False)
         self.redo_btn.clicked.connect(self.redo)
         header_bar.addWidget(self.redo_btn)
 
-        load_btn = QPushButton("📂 Open JSON")
-        load_btn.clicked.connect(self.load_dataset)
-        save_btn = QPushButton("💾 Save JSON")
-        save_btn.clicked.connect(self.save_dataset)
-        export_btn = QPushButton("📦 Export / Split")
-        export_btn.clicked.connect(self.open_export_dialog)
-        add_btn = QPushButton("➕ Add Single Song")
-        add_btn.clicked.connect(self.add_audio_files)
-        folder_btn = QPushButton("📁 Add Audio Folder")
-        folder_btn.setToolTip(
-            "Add every audio track in a folder (recursive — subfolders included)."
-        )
-        folder_btn.clicked.connect(self.add_audio_folder)
-
-        header_bar.addWidget(load_btn)
-        header_bar.addWidget(save_btn)
-        header_bar.addWidget(export_btn)
-        stats_btn = QPushButton("📊 Stats")
-        stats_btn.setToolTip("Show a one-page statistics report for the dataset.")
-        stats_btn.clicked.connect(self.show_stats_report)
-        header_bar.addWidget(stats_btn)
-        ver_btn = QPushButton("🗂 Versioning")
-        ver_btn.setToolTip("Snapshot, diff, and restore the dataset from disk.")
-        ver_btn.clicked.connect(self.open_versioning_dialog)
-        header_bar.addWidget(ver_btn)
-        hf_btn = QPushButton("☁ Push to HF")
-        hf_btn.setToolTip("Push the dataset (dataset.json + README) to a Hugging Face repo.")
-        hf_btn.clicked.connect(self.open_hf_push_dialog)
-        header_bar.addWidget(hf_btn)
-        header_bar.addWidget(add_btn)
-        header_bar.addWidget(folder_btn)
+        header_bar.addWidget(self.more_menu_btn)
 
         studio_layout.addLayout(header_bar)
 
@@ -369,6 +442,10 @@ class DatasetManager(QMainWindow):
         gen_layout.addWidget(self.radio_no_inst)
 
         studio_layout.addWidget(gen_box)
+
+        # "Set All Tracks" — the deliberate alternative to per-row editing.
+        # Collapsed by default; nothing changes until Apply + confirm.
+        self.init_bulk_edit_panel(studio_layout)
 
         # ============================================================================
         # Row 1: Dataset Calibration (Primary Controls)
@@ -562,19 +639,19 @@ class DatasetManager(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
 
         # Column schema (index -> field): 0 Filename (read-only),
-        # 1 Tag, 2 Genre, 3 Key, 4 BPM, 5 Time signature, 6 Duration,
-        # 7 Actions. All metadata columns are editable inline; new tracks
-        # are NOT locked by default so you can type values straight in.
-        self.table = QTableWidget(0, 8)
+        # 1 Tag, 2 Genre, 3 Language, 4 Key, 5 BPM, 6 Time signature,
+        # 7 Duration, 8 Actions. All metadata columns are editable inline;
+        # new tracks are NOT locked by default so you can type values straight in.
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
-            ["Filename", "Tag", "Genre", "Key", "BPM", "Time", "Duration", "Actions"]
+            ["Filename", "Tag", "Genre", "Language", "Key", "BPM", "Time", "Duration", "Actions"]
         )
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 7):
+        for i in range(1, 8):
             self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
         self.table.itemChanged.connect(self.on_metadata_cell_edited)
         splitter.addWidget(self.table)
@@ -665,9 +742,623 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Settings Tab
     # -----------------------------------------------------------------------
+    def _add_tab(self, page, label):
+        """Add a top-level tab and retain its page on ``self``.
+
+        See ``self._tab_pages`` — without an explicit reference PySide6 may free
+        the page (and every widget inside it) once the local name goes away.
+        """
+        self.tabs.addTab(page, label)
+        self._tab_pages.append(page)
+        return page
+
+    def _build_grouped_tab(self, label, pages):
+        """Wrap several pages in one top-level tab with an inner sub-tab strip.
+
+        Keeps the main tab bar short without hiding functionality: each page is
+        the same QWidget the old top-level tab used, so every ``manager.<attr>``
+        reference and handler still resolves unchanged.
+
+        RETAINMENT: both the container and the inner QTabWidget are stored on
+        ``self``. PySide6 destroys a C++ object once its last Python reference
+        goes away, and destroying a parent destroys its children — a local-only
+        container silently takes every widget inside it (and the manager
+        attributes pointing at them) down with it.
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        inner = QTabWidget()
+        for page_label, page in pages:
+            inner.addTab(page, page_label)
+        layout.addWidget(inner)
+        container.setAccessibleName(label)
+
+        self._grouped_tabs.append(container)
+        self._grouped_tab_inner.append(inner)
+        return container
+
+    def init_lyrics_tab(self, parent):
+        """Build the 🎵 Lyrics tab and connect its actions."""
+        from ui.lyrics_tab import build_lyrics_tab
+        build_lyrics_tab(self, parent)
+
+        self.lyrics_preview_btn.clicked.connect(self.preview_lyrics_tidy)
+        self.lyrics_apply_btn.clicked.connect(self.apply_lyrics_tidy)
+        self.lyrics_manual_edit_btn.clicked.connect(self.open_lyrics_editor)
+        self.lyrics_add_row_btn.clicked.connect(self._lyrics_add_contract_row)
+        self.lyrics_del_row_btn.clicked.connect(self._lyrics_remove_contract_row)
+        self.lyrics_reset_btn.clicked.connect(self._lyrics_reset_contracts)
+        self.lyrics_profile_load_btn.clicked.connect(self.load_lyrics_profile)
+        self.lyrics_profile_save_btn.clicked.connect(self.save_lyrics_profile)
+        self.lyrics_profile_delete_btn.clicked.connect(self.delete_lyrics_profile)
+        self.lyrics_load_all_btn.clicked.connect(self.load_all_lyrics)
+        self.lyrics_tidy_all_btn.clicked.connect(self.tidy_all_lyrics_block)
+        self.lyrics_write_back_btn.clicked.connect(self.write_back_all_lyrics)
+        self.refresh_lyrics_profiles()
+
+    # --- Profiles: master always on, a profile specialises it -------------
+
+    def refresh_lyrics_profiles(self, select=None):
+        """Repopulate the profile combo from the local lyrics_profiles/ folder."""
+        from modules.lyrics_profiles import list_profiles
+
+        names = list_profiles()
+        combo = self.lyrics_profile_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("— master rules only —")
+        combo.addItems(names)
+        if select and select in names:
+            combo.setCurrentText(select)
+        combo.blockSignals(False)
+        return names
+
+    def _lyrics_master_rules(self):
+        """Master (always-on) rules: settings override, else shipped defaults."""
+        from modules.lyrics_normalizer import DEFAULT_CONTRACTIONS, DEFAULT_ING_EXCEPTIONS
+
+        master_c = self.config.get("lyrics_contractions") or dict(DEFAULT_CONTRACTIONS)
+        master_i = self.config.get("lyrics_ing_exceptions") or list(DEFAULT_ING_EXCEPTIONS)
+        return dict(master_c), list(master_i)
+
+    def load_lyrics_profile(self):
+        """Load the selected profile's rules into the tab's table + options."""
+        from modules.lyrics_profiles import load_profile
+
+        name = self.lyrics_profile_combo.currentText()
+        if not name or name.startswith("\u2014"):
+            available = self.refresh_lyrics_profiles()
+            if not available:
+                QMessageBox.information(
+                    self, "No Profiles Yet",
+                    "You have not saved any band profiles yet.\n\n"
+                    "Edit the contraction table below the way this band needs it, "
+                    "then press “Save As…” to store it as a named profile. "
+                    "Profiles live in the local lyrics_profiles/ folder.",
+                )
+            else:
+                QMessageBox.information(
+                    self, "Pick a Profile",
+                    "Choose a profile from the drop-down first, then press Load.\n\n"
+                    "Available: " + ", ".join(available),
+                )
+            self.lyrics_profile_status.setText(
+                "Master rules only — no profile selected."
+            )
+            return
+        profile = load_profile(name)
+        if not profile:
+            QMessageBox.warning(self, "Profile Not Found", f"Could not read profile '{name}'.")
+            self.refresh_lyrics_profiles()
+            return
+
+        self.lyrics_contract_table.setRowCount(0)
+        for word in sorted(profile["contractions"], key=lambda w: (len(w), w)):
+            r = self.lyrics_contract_table.rowCount()
+            self.lyrics_contract_table.insertRow(r)
+            self.lyrics_contract_table.setItem(r, 0, QTableWidgetItem(word))
+            self.lyrics_contract_table.setItem(r, 1, QTableWidgetItem(profile["contractions"][word]))
+
+        self.lyrics_ing_exceptions_edit.setText(", ".join(sorted(profile["ing_exceptions"])))
+        self.lyrics_ing_check.setChecked(profile["ing_to_in"])
+        self.lyrics_tags_check.setChecked(profile["capitalize_tags"])
+        self.lyrics_punct_check.setChecked(profile["strip_punctuation"])
+        self.lyrics_profile_status.setText(
+            f"Profile <b>{name}</b> loaded — layered on top of the master rules."
+        )
+        self.status_label.setText(f"Lyrics profile '{name}' loaded.")
+
+    def save_lyrics_profile(self):
+        """Save the current table + options as a named profile."""
+        from modules.lyrics_profiles import save_profile
+        from ui.lyrics_tab import read_contractions_from_table, read_ing_exceptions
+
+        name, ok = QInputDialog.getText(
+            self, "Save Lyrics Profile",
+            "Profile name (e.g. the band or artist):",
+            text=self.lyrics_profile_combo.currentText().strip("— "),
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        path = save_profile(
+            name,
+            read_contractions_from_table(self),
+            read_ing_exceptions(self),
+            ing_to_in=self.lyrics_ing_check.isChecked(),
+            capitalize_tags=self.lyrics_tags_check.isChecked(),
+            strip_punctuation=self.lyrics_punct_check.isChecked(),
+        )
+        self.refresh_lyrics_profiles(select=name)
+        self.lyrics_profile_status.setText(f"Profile <b>{name}</b> saved to {path}")
+        self.status_label.setText(f"Lyrics profile '{name}' saved.")
+
+    def delete_lyrics_profile(self):
+        """Delete the selected profile file."""
+        from modules.lyrics_profiles import delete_profile
+
+        name = self.lyrics_profile_combo.currentText()
+        if name.startswith("—"):
+            self.status_label.setText("Select a profile to delete.")
+            return
+        if QMessageBox.question(
+            self, "Delete Profile",
+            f"Delete the lyrics profile '{name}'?\n\nThis only removes the local "
+            "profile file; the master rules are unaffected.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        if delete_profile(name):
+            self.refresh_lyrics_profiles()
+            self.status_label.setText(f"Lyrics profile '{name}' deleted.")
+        else:
+            QMessageBox.warning(self, "Delete Failed", f"Could not delete '{name}'.")
+
+    def _lyrics_options(self):
+        """Effective tidy rules: master (always on) + the loaded profile.
+
+        Master = the settings override or the shipped defaults; a profile layers
+        on top, overriding master for any word it defines and adding its own.
+        """
+        from modules.lyrics_profiles import load_profile, merge_rules
+        from ui.lyrics_tab import read_contractions_from_table, read_ing_exceptions
+
+        master_c, master_ing = self._lyrics_master_rules()
+        table_c = read_contractions_from_table(self)
+        table_ing = read_ing_exceptions(self)
+
+        profile_name = self.lyrics_profile_combo.currentText()
+        profile = None
+        if not profile_name.startswith("—"):
+            profile = load_profile(profile_name)
+
+        if profile:
+            # The tab's table IS the profile's view, so merge master under it.
+            merged_c, merged_ing = merge_rules(
+                master_c, table_c, master_ing, table_ing
+            )
+        else:
+            merged_c, merged_ing = table_c, table_ing
+
+        return {
+            "contractions": merged_c,
+            "ing_to_in": self.lyrics_ing_check.isChecked(),
+            "ing_exceptions": merged_ing,
+            "do_capitalize_tags": self.lyrics_tags_check.isChecked(),
+            "do_strip_punctuation": self.lyrics_punct_check.isChecked(),
+        }
+
+    def _lyrics_scope_samples(self):
+        """Tracks the tidy pass should touch, per the scope combo."""
+        samples = self.dataset.get("samples", [])
+        scope = self.lyrics_scope_combo.currentText()
+        if scope.startswith("Selected"):
+            s = self.get_selected_sample()
+            return [s] if s else []
+        if scope.startswith("All Tracks ("):  # instrumentals excluded
+            return [s for s in samples if not s.get("is_instrumental")]
+        return list(samples)
+
+    def preview_lyrics_tidy(self, silent=False):
+        """Show the tidy result for the selected track.
+
+        ``silent`` suppresses warnings (used when auto-loading on tab switch).
+        The Before pane always shows the selected track's current lyrics; the
+        After pane shows the tidy result, so both populate together.
+        """
+        from modules.lyrics_normalizer import normalize_lyrics
+
+        s = self.get_selected_sample()
+        if not s:
+            if not silent:
+                QMessageBox.warning(
+                    self, "No Track Selected",
+                    "Select a track in the Dataset Studio table first, then come "
+                    "back to this tab.",
+                )
+            self.lyrics_before.setPlainText("")
+            self.lyrics_after.setPlainText("")
+            self.lyrics_report_label.setText(
+                "Select a track in the Dataset Studio tab to preview it here."
+            )
+            return
+        source = s.get("raw_lyrics") or s.get("formatted_lyrics") or s.get("lyrics") or ""
+        if not source.strip():
+            self.lyrics_before.setPlainText("")
+            self.lyrics_after.setPlainText("")
+            self.lyrics_report_label.setText(
+                f"'{s.get('filename', '?')}' has no lyrics to tidy yet."
+            )
+            return
+        new_text, report = normalize_lyrics(source, **self._lyrics_options())
+        self.lyrics_before.setPlainText(source)
+        self.lyrics_after.setPlainText(new_text)
+
+        # Diff view: line-level changes, so you can scan what the tidy did.
+        from ui.lyrics_tab import unified_diff
+        self.lyrics_diff.setPlainText(unified_diff(source, new_text) or "(no changes)")
+
+        self.lyrics_report_label.setText(
+            f"{s.get('filename', '?')} — {report['lines_changed']} line(s) changed | "
+            f"{len(report['contractions'])} contraction(s) mapped | "
+            f"{report['apostrophes']} apostrophe(s) stripped | "
+            f"{report['ing']} \u2011ing word(s) shortened | {report['tags']} tag(s) capitalized"
+        )
+
+    def apply_lyrics_tidy(self):
+        """Rewrite lyrics on the tracks in scope (undoable)."""
+        from modules.lyrics_normalizer import normalize_lyrics
+
+        targets = self._lyrics_scope_samples()
+        if not targets:
+            QMessageBox.warning(self, "Nothing To Tidy", "No tracks match the selected scope.")
+            return
+
+        opts = self._lyrics_options()
+        replace = self.lyrics_replace_check.isChecked()
+        touched = 0
+        total_lines = 0
+
+        self.record_snapshot()
+        for s in targets:
+            source = s.get("raw_lyrics") or s.get("formatted_lyrics") or s.get("lyrics") or ""
+            if not source.strip():
+                continue
+            if not replace and (s.get("formatted_lyrics") or "").strip():
+                continue  # fill-blanks-only mode: keep existing lyrics
+
+            new_text, report = normalize_lyrics(source, **opts)
+            if new_text == source:
+                continue
+            # Preserve the pre-tidy text so a re-run is idempotent and reversible.
+            if not s.get("raw_lyrics"):
+                s["raw_lyrics"] = source
+            s["formatted_lyrics"] = new_text
+            s["lyrics"] = new_text
+            touched += 1
+            total_lines += report["lines_changed"]
+
+        # Persist the (possibly edited) tables so they survive a restart.
+        self.config["lyrics_contractions"] = opts["contractions"]
+        self.config["lyrics_ing_exceptions"] = sorted(opts["ing_exceptions"])
+
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.status_label.setText(
+            f"Tidied lyrics on {touched} track(s) ({total_lines} line(s) changed)."
+        )
+        if touched:
+            self.preview_lyrics_tidy()
+
+    def _lyrics_add_contract_row(self):
+        r = self.lyrics_contract_table.rowCount()
+        self.lyrics_contract_table.insertRow(r)
+        self.lyrics_contract_table.setItem(r, 0, QTableWidgetItem(""))
+        self.lyrics_contract_table.setItem(r, 1, QTableWidgetItem(""))
+
+    def _lyrics_remove_contract_row(self):
+        row = self.lyrics_contract_table.currentRow()
+        if row >= 0:
+            self.lyrics_contract_table.removeRow(row)
+
+    def _lyrics_reset_contracts(self):
+        """Restore the master table to the shipped defaults."""
+        from modules.lyrics_normalizer import DEFAULT_CONTRACTIONS, DEFAULT_ING_EXCEPTIONS
+        from ui.lyrics_tab import _fill_contract_table
+
+        self.config["lyrics_contractions"] = dict(DEFAULT_CONTRACTIONS)
+        self.config["lyrics_ing_exceptions"] = sorted(DEFAULT_ING_EXCEPTIONS)
+        _fill_contract_table(self)
+        self.lyrics_ing_exceptions_edit.setText(", ".join(sorted(DEFAULT_ING_EXCEPTIONS)))
+        self.lyrics_profile_combo.setCurrentIndex(0)
+        self.lyrics_profile_status.setText(
+            "Master table reset to the shipped defaults; no profile loaded."
+        )
+        self.status_label.setText("Master lyrics rules reset to defaults.")
+
+    def init_bulk_edit_panel(self, parent):
+        """Add the "Set All Tracks" bulk-edit panel to the Studio layout."""
+        from ui.bulk_edit_panel import build_bulk_edit_panel
+        build_bulk_edit_panel(self, parent)
+        self.bulk_apply_btn.clicked.connect(self.apply_bulk_edits)
+        self.bulk_language_apply_btn.clicked.connect(self.apply_language_to_all)
+
+    def apply_language_to_all(self):
+        """One-click: set the chosen language on every track."""
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Add audio tracks first.")
+            return
+        lang = self.bulk_language_combo.currentText().strip()
+        if not lang or lang.startswith("\u2014"):
+            QMessageBox.information(
+                self, "Pick a Language",
+                "Choose a language in the box first, then press Apply language to ALL.",
+            )
+            return
+        if QMessageBox.question(
+            self, "Apply Language",
+            f"Set language = '{lang}' on all {len(samples)} track(s)?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        self.record_snapshot()
+        for s in samples:
+            s["language"] = lang
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.status_label.setText(f"Language set to '{lang}' on {len(samples)} track(s).")
+
+    def _bulk_update_pending(self, *_):
+        """Keep the pending-field count and Apply button state in sync."""
+        ticked = [k for k, box in self.bulk_include.items() if box.isChecked()]
+        if not ticked:
+            self.bulk_pending_label.setText("No fields ticked.")
+        else:
+            self.bulk_pending_label.setText(
+                "Will apply: " + ", ".join(t.replace("_", " ") for t in ticked)
+            )
+        self.bulk_apply_btn.setEnabled(bool(ticked))
+
+    def _bulk_untick_all(self):
+        for box in self.bulk_include.values():
+            box.setChecked(False)
+        self._bulk_update_pending()
+
+    def apply_bulk_edits(self):
+        """Apply the ticked bulk fields to every track, after confirmation."""
+        from ui.bulk_edit_panel import read_bulk_edits
+
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Add audio tracks first.")
+            return
+
+        values, meta, rewrite = read_bulk_edits(self)
+        if not values and not meta and not rewrite:
+            QMessageBox.information(
+                self, "Nothing To Apply",
+                "Tick at least one field and give it a value, then press Apply.",
+            )
+            return
+
+        # Build a plain-language summary so the confirmation is unambiguous.
+        lines = []
+        for field, value in values.items():
+            shown = "clear" if value in (None, "") else repr(value)
+            lines.append(f"&bull; <b>{field.replace('_', ' ')}</b> → {shown}")
+        for field, value in meta.items():
+            lines.append(f"&bull; <b>{field.replace('_', ' ')}</b> (dataset) → {value}")
+        if rewrite:
+            lines.append(
+                f"&bull; <b>audio path</b> → replace {rewrite[0]!r} with {rewrite[1]!r}"
+            )
+
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("Confirm Bulk Edit")
+        confirm.setIcon(QMessageBox.Warning)
+        confirm.setText(
+            f"Apply {len(lines)} change(s) to <b>all {len(samples)} track(s)</b>?"
+        )
+        confirm.setInformativeText("<br>".join(lines))
+        confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        confirm.setDefaultButton(QMessageBox.Cancel)  # deliberate: default is cancel
+        if confirm.exec() != QMessageBox.Yes:
+            self.status_label.setText("Bulk edit cancelled; nothing changed.")
+            return
+
+        self.record_snapshot()
+        changed = 0
+        rewrites = 0
+
+        for s in samples:
+            for field, value in values.items():
+                s[field] = value
+            if rewrite:
+                path = s.get("audio_path", "") or ""
+                if rewrite[0] in path:
+                    s["audio_path"] = path.replace(rewrite[0], rewrite[1])
+                    rewrites += 1
+            changed += 1
+
+        if meta:
+            md = self.dataset.setdefault("metadata", {})
+            md.update(meta)
+            # Keep the legacy 3-state string in step with the boolean/mode.
+            if "all_instrumental" in values or "is_instrumental" in values:
+                any_vocal = any(not t.get("is_instrumental") for t in samples)
+                md["all_instrumental"] = not any_vocal
+
+        self.refresh_table()
+        self.on_table_selection_changed()
+        note = f"Bulk edit applied to {changed} track(s)."
+        if rewrites:
+            note += f" {rewrites} audio path(s) rewritten."
+        self.status_label.setText(note)
+
+    # --- All-lyrics block (whole dataset in one editable view) -----------
+
+    def load_all_lyrics(self, silent=False):
+        """Pull every track's lyrics into the editable block."""
+        from ui.lyrics_tab import build_all_lyrics_block
+
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            if not silent:
+                QMessageBox.warning(self, "No Tracks", "Add audio tracks first.")
+            return
+        self.lyrics_all_edit.setPlainText(build_all_lyrics_block(samples))
+        with_lyrics = sum(
+            1 for s in samples
+            if (s.get("raw_lyrics") or s.get("formatted_lyrics") or s.get("lyrics") or "").strip()
+        )
+        if not silent:
+            self.status_label.setText(
+                f"Loaded {len(samples)} track(s) into the lyrics block "
+                f"({with_lyrics} with lyrics)."
+            )
+
+    def tidy_all_lyrics_block(self):
+        """Run the tidy options over the whole editable block (tags untouched)."""
+        from modules.lyrics_normalizer import normalize_lyrics
+
+        text = self.lyrics_all_edit.toPlainText()
+        if not text.strip():
+            self.status_label.setText("Nothing to tidy — load the lyrics block first.")
+            return
+        new_text, report = normalize_lyrics(text, **self._lyrics_options())
+        self.lyrics_all_edit.setPlainText(new_text)
+        self.status_label.setText(
+            f"Tidied the block: {report['lines_changed']} line(s) changed, "
+            f"{len(report['contractions'])} contraction(s) mapped."
+        )
+
+    def write_back_all_lyrics(self):
+        """Split the block on its filename markers and save to each track."""
+        from ui.lyrics_tab import parse_all_lyrics_block
+
+        text = self.lyrics_all_edit.toPlainText()
+        if not text.strip():
+            self.status_label.setText("Nothing to write back — load the block first.")
+            return
+        by_name = parse_all_lyrics_block(text)
+        if not by_name:
+            QMessageBox.warning(
+                self, "No Markers Found",
+                "Could not find any “---- filename ----” markers in the block.\n\n"
+                "Press “Load All Lyrics” first so the markers are present.",
+            )
+            return
+
+        samples = self.dataset.get("samples", [])
+        self.record_snapshot()
+        written = 0
+        unmatched = []
+        for s in samples:
+            name = s.get("filename", "?")
+            if name not in by_name:
+                unmatched.append(name)
+                continue
+            new_text = by_name[name]
+            if not s.get("raw_lyrics"):
+                prev = s.get("formatted_lyrics") or s.get("lyrics") or ""
+                if prev:
+                    s["raw_lyrics"] = prev
+            s["formatted_lyrics"] = new_text
+            s["lyrics"] = new_text
+            written += 1
+
+        self.refresh_table()
+        self.on_table_selection_changed()
+        note = f"Wrote lyrics back to {written} track(s)."
+        if unmatched:
+            note += f" {len(unmatched)} track(s) had no marker: " + ", ".join(unmatched[:3])
+            if len(unmatched) > 3:
+                note += "…"
+        self.status_label.setText(note)
+
     def init_settings_tab(self, parent):
         from ui.settings_tab import build_settings_tab
         build_settings_tab(self, parent)
+
+    def init_caption_tab(self, parent):
+        """Build the 🎤 Caption tab and connect its actions."""
+        from ui.caption_tab import build_caption_tab
+        build_caption_tab(self, parent)
+        self.caption_blend_slider.valueChanged.connect(self.on_caption_blend_changed)
+        self.caption_selected_btn.clicked.connect(self.caption_selected_track)
+        self.caption_missing_btn.clicked.connect(self.caption_missing_tracks)
+        self.caption_all_btn.clicked.connect(self.caption_all_tracks)
+        self.caption_edit_btn.clicked.connect(self.open_caption_editor)
+        self.caption_override_btn.clicked.connect(self.set_track_caption_override)
+        self.caption_clear_override_btn.clicked.connect(self.clear_track_caption_override)
+
+    def on_caption_blend_changed(self, value):
+        """Dataset-wide prose/tags blend ratio (persisted with other defaults)."""
+        self.config["tag_caption_ratio"] = int(value)
+        self.status_label.setText(
+            f"Dataset caption blend: {100 - int(value)}% prose / {int(value)}% tags."
+        )
+
+    def caption_selected_track(self):
+        """Run the captioner on the track(s) selected in the Studio table."""
+        if not self.get_selected_sample():
+            QMessageBox.warning(self, "No Track Selected", "Select a track in the Dataset Studio table first.")
+            return
+        self.start_ai_captioning(scope="selected")
+
+    def caption_missing_tracks(self):
+        """Run the captioner on every track that has no caption yet."""
+        self.start_ai_captioning(scope="missing")
+
+    def caption_all_tracks(self):
+        """Re-caption every track after confirmation."""
+        self.start_ai_captioning(scope="all")
+
+    def open_caption_editor(self):
+        """Edit the selected track's caption / lyrics without leaving the tab."""
+        s = self.get_selected_sample()
+        if not s:
+            QMessageBox.warning(self, "No Track Selected", "Select a track in the Dataset Studio table first.")
+            return
+        self.review_ai_caption_result(s)
+
+    def set_track_caption_override(self):
+        """Store a per-track blend ratio on the selected sample."""
+        s = self.get_selected_sample()
+        if not s:
+            QMessageBox.warning(self, "No Track Selected", "Select a track in the Dataset Studio table first.")
+            return
+        current = s.get("prompt_override")
+        default = self.caption_blend_slider.value() if current is None else int(current)
+        value, ok = QInputDialog.getInt(
+            self, "Track Caption Blend",
+            f"Tags ratio for '{s.get('filename', '?')}' (0 = prose, 100 = tags):",
+            default, 0, 100,
+        )
+        if not ok:
+            return
+        self.record_snapshot()
+        s["prompt_override"] = int(value)
+        self.status_label.setText(
+            f"Track override set: {100 - int(value)}% prose / {int(value)}% tags "
+            f"for '{s.get('filename', '?')}'."
+        )
+
+    def clear_track_caption_override(self):
+        """Drop the per-track override so the track follows the dataset value."""
+        s = self.get_selected_sample()
+        if not s:
+            QMessageBox.warning(self, "No Track Selected", "Select a track in the Dataset Studio table first.")
+            return
+        if s.get("prompt_override") is None:
+            self.status_label.setText("This track already follows the dataset caption blend.")
+            return
+        self.record_snapshot()
+        s["prompt_override"] = None
+        self.status_label.setText(f"Cleared caption override for '{s.get('filename', '?')}'.")
 
     # -----------------------------------------------------------------------
     # AI Assistant Tab
@@ -985,6 +1676,12 @@ class DatasetManager(QMainWindow):
     def _on_tab_changed(self, index):
         if index == self.tag_tab_index and hasattr(self, "tag_stats_table"):
             self.refresh_tag_manager()
+        # Auto-populate the Lyrics tab so it shows the selected track on arrival
+        # instead of requiring a Preview click. Uses a remembered row, so the
+        # selection survives the tab switch.
+        if hasattr(self, "lyrics_tab_index") and index == self.lyrics_tab_index:
+            self.preview_lyrics_tidy(silent=True)
+            self.load_all_lyrics(silent=True)
 
     def refresh_tag_manager(self):
         self._populate_tag_track_list()
@@ -2394,7 +3091,8 @@ class DatasetManager(QMainWindow):
         self.config["caption_max_tokens"] = self.max_tokens_spin.value()
         self.config["caption_max_audio_duration"] = self.max_dur_spin.value()
         self.config["caption_batch_size"] = self.batch_size_spin.value()
-        self.config["tag_caption_ratio"] = self.tag_ratio_spin.value()
+        # tag_caption_ratio is owned by the 🎤 Caption tab's blend slider
+        # (on_caption_blend_changed writes it); no spin box to read here.
         self.config["use_clap_tagger"] = {
             "auto (use CLAP if installed)": "auto",
             "on": "on",
@@ -2596,26 +3294,27 @@ class DatasetManager(QMainWindow):
 
             # 0 Filename (read-only)
             self.table.setItem(row, 0, _cell(s.get("filename", ""), False))
-            # 1 Tag, 2 Genre, 3 Key — free text, always editable
+            # 1 Tag, 2 Genre, 3 Language, 4 Key — free text, always editable
             self.table.setItem(row, 1, _cell(s.get("custom_tag", "")))
             self.table.setItem(row, 2, _cell(s.get("genre", "")))
-            self.table.setItem(row, 3, _cell(s.get("keyscale", "")))
-            # 4 BPM
+            self.table.setItem(row, 3, _cell(s.get("language", "")))
+            self.table.setItem(row, 4, _cell(s.get("keyscale", "")))
+            # 5 BPM
             bpm = s.get("bpm", 0)
-            self.table.setItem(row, 4, _cell(str(bpm) if bpm else ""))
-            # 5 Time signature
-            self.table.setItem(row, 5, _cell(s.get("timesignature", "")))
-            # 6 Duration (seconds)
+            self.table.setItem(row, 5, _cell(str(bpm) if bpm else ""))
+            # 6 Time signature
+            self.table.setItem(row, 6, _cell(s.get("timesignature", "")))
+            # 7 Duration (seconds)
             dur = s.get("duration", 0)
-            self.table.setItem(row, 6, _cell(f"{dur}s" if dur else ""))
+            self.table.setItem(row, 7, _cell(f"{dur}s" if dur else ""))
 
-            # 7 Actions: edit-metadata dialog + delete.
+            # 8 Actions: edit-metadata dialog + delete.
             actions = QWidget()
             actions_layout = QHBoxLayout(actions)
             actions_layout.setContentsMargins(2, 0, 2, 0)
             actions_layout.setSpacing(4)
             edit_btn = QPushButton("✏️")
-            edit_btn.setToolTip("Edit this track's tag / genre / key / BPM / time / duration")
+            edit_btn.setToolTip("Edit this track's tag / genre / language / key / BPM / time / duration")
             edit_btn.setMaximumWidth(36)
             edit_btn.clicked.connect(lambda _=False, i=idx: self.open_metadata_editor(i))
             del_btn = QPushButton("🗑")
@@ -2624,7 +3323,7 @@ class DatasetManager(QMainWindow):
             del_btn.clicked.connect(lambda _=False, i=idx: self.confirm_delete_sample(i))
             actions_layout.addWidget(edit_btn)
             actions_layout.addWidget(del_btn)
-            self.table.setCellWidget(row, 7, actions)
+            self.table.setCellWidget(row, 8, actions)
 
         self._loading_table = False
         self.exceptions_view_btn.setText(f"⚠ Missing Captions ({exceptions_count})")
@@ -2664,7 +3363,16 @@ class DatasetManager(QMainWindow):
         self.filter_captioned_check.setChecked(False)
 
     def get_selected_sample(self):
+        """Return the currently selected sample.
+
+        Uses a remembered selection index rather than the table's live
+        ``currentRow()``: switching to another top-level tab clears the table's
+        current row, which previously made every other tab (Lyrics, Caption)
+        report "no track selected" even though a track was clearly highlighted.
+        """
         row = self.table.currentRow()
+        if row < 0:
+            row = getattr(self, "_last_selected_row", -1)
         if 0 <= row < len(self._table_sample_indices):
             return self.dataset["samples"][self._table_sample_indices[row]]
         return None
@@ -2725,15 +3433,16 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(f"Removed '{fname}' from the dataset.")
 
     # Column index -> ("field", parser) for inline manual edits in the table.
-    # Matches the header set in init_ui: 0 Filename, 1 Tag, 2 Genre, 3 Key,
-    # 4 BPM, 5 Time signature, 6 Duration, 7 Actions.
+    # Matches the header set in init_ui: 0 Filename, 1 Tag, 2 Genre, 3 Language,
+    # 4 Key, 5 BPM, 6 Time signature, 7 Duration, 8 Actions.
     _MANUAL_COLS = {
         1: ("custom_tag", str),
         2: ("genre", str),
-        3: ("keyscale", str),
-        4: ("bpm", int),
-        5: ("timesignature", str),
-        6: ("duration", int),
+        3: ("language", str),
+        4: ("keyscale", str),
+        5: ("bpm", int),
+        6: ("timesignature", str),
+        7: ("duration", int),
     }
 
     def _parse_manual_value(self, field, text):
@@ -2813,6 +3522,7 @@ class DatasetManager(QMainWindow):
 
         tag_edit = _txt(s.get("custom_tag", ""))
         genre_edit = _txt(s.get("genre", ""))
+        lang_edit = _txt(s.get("language", ""))
         key_edit = _txt(s.get("keyscale", ""))
         bpm_edit = _txt(s.get("bpm", 0))
         time_edit = _txt(s.get("timesignature", ""))
@@ -2820,6 +3530,7 @@ class DatasetManager(QMainWindow):
 
         form.addRow("Trigger Tag:", tag_edit)
         form.addRow("Genre:", genre_edit)
+        form.addRow("Language (e.g. en):", lang_edit)
         form.addRow("Key (e.g. C, Gm):", key_edit)
         form.addRow("BPM:", bpm_edit)
         form.addRow("Time signature (e.g. 3/4):", time_edit)
@@ -2840,6 +3551,7 @@ class DatasetManager(QMainWindow):
             for field, widget in (
                 ("custom_tag", tag_edit),
                 ("genre", genre_edit),
+                ("language", lang_edit),
                 ("keyscale", key_edit),
                 ("bpm", bpm_edit),
                 ("timesignature", time_edit),
@@ -2858,6 +3570,11 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(f"Saved metadata for '{fname}'.")
 
     def on_table_selection_changed(self):
+        # Remember the row so other tabs (Lyrics / Caption) keep working after a
+        # tab switch clears the table's current row.
+        row = self.table.currentRow()
+        if row >= 0:
+            self._last_selected_row = row
         s = self.get_selected_sample()
         self._load_track_preview(s)
         if s:
@@ -3448,6 +4165,9 @@ class DatasetManager(QMainWindow):
             with open(path, "r", encoding="utf-8") as f:
                 self.dataset = json.load(f)
 
+            # Backfill any fields this file predates (never overwrites values).
+            normalize_dataset(self.dataset)
+
             self.current_dataset_path = path
             self.record_snapshot()
 
@@ -3471,7 +4191,16 @@ class DatasetManager(QMainWindow):
 
         try:
             self.on_general_prop_changed()
-            self.dataset["metadata"]["num_samples"] = len(self.dataset["samples"])
+            meta = self.dataset.setdefault("metadata", {})
+            meta["num_samples"] = len(self.dataset["samples"])
+            # Stamp created_at for a dataset that predates the field.
+            if not meta.get("created_at"):
+                normalize_dataset(self.dataset)
+            # Keep the derived/legacy fields consistent with the source of truth.
+            meta["all_instrumental"] = self.radio_all_inst.isChecked()
+            meta["instrumental_mode"] = derive_instrumental_mode(
+                meta["all_instrumental"], self.dataset["samples"]
+            )
             backup = self._backup_file(path)  # never replace an existing file silently
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self.dataset, f, indent=2)
@@ -3628,28 +4357,14 @@ class DatasetManager(QMainWindow):
                 continue
             existing.add(p)
             fname = Path(p).name
-            self.dataset["samples"].append({
-                "id": uuid.uuid4().hex[:8],
-                "audio_path": p,
-                "filename": fname,
-                "caption": "",
-                "genre": "",
-                "lyrics": "",
-                "formatted_lyrics": "",
-                "bpm": 0,
-                "keyscale": "",
-                "timesignature": "",
-                "duration": 0,
-                "language": "en",
-                "is_instrumental": is_all_inst,
-                "custom_tag": global_tag,
-                "locked": False,
-                # Spatial fields
-                "structural_segments": [],
-                "spatial_tokens": {},
-                "stem_paths": {},
-                "chunk_paths": []
-            })
+            self.dataset["samples"].append(new_sample(
+                id=uuid.uuid4().hex[:8],
+                audio_path=p,
+                filename=fname,
+                language="en",
+                is_instrumental=is_all_inst,
+                custom_tag=global_tag,
+            ))
             added += 1
         self.refresh_table()
         msg = f"Added {added} audio track(s)."
@@ -3661,17 +4376,30 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # AI Captioning (with DeepSeek backend option)
     # -----------------------------------------------------------------------
-    def start_ai_captioning(self):
+    def start_ai_captioning(self, checked=False, scope=None):
+        """Run the captioner.
+
+        ``scope`` may be passed programmatically ("selected" / "missing" / "all")
+        by the 🎤 Caption tab; otherwise the user is asked.
+        """
         all_samples = self.dataset.get("samples", [])
         if not all_samples:
             QMessageBox.warning(self, "No Tracks", "Add audio tracks before captioning.")
             return
 
-        scope_choices = ["Selected Track", "Tracks Missing Captions", "All Tracks — Review Every Result"]
-        scope, accepted = QInputDialog.getItem(self, "Choose Captioning Scope", "Which tracks should ACE-Step Captioner process?", scope_choices, 0, False)
-        if not accepted or not scope:
-            self.status_label.setText("AI captioning cancelled.")
-            return
+        if scope is None:
+            scope_choices = ["Selected Track", "Tracks Missing Captions", "All Tracks — Review Every Result"]
+            scope, accepted = QInputDialog.getItem(self, "Choose Captioning Scope", "Which tracks should ACE-Step Captioner process?", scope_choices, 0, False)
+            if not accepted or not scope:
+                self.status_label.setText("AI captioning cancelled.")
+                return
+
+        # Normalise programmatic scope values onto the dialog's labels.
+        scope = {
+            "selected": "Selected Track",
+            "missing": "Tracks Missing Captions",
+            "all": "All Tracks — Review Every Result",
+        }.get(scope, scope)
 
         if scope == "Selected Track":
             selected_sample = self.get_selected_sample()
