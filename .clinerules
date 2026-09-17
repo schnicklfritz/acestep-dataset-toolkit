@@ -23,6 +23,81 @@
   changed. Never `cat` a 5000-line file to find a delta.
 - Once changes are committed to git, empty `.changed_markers` (loop has absorbed).
 
+# ------------------------------------------------------------
+# INDEX VALIDITY — a stale index is worse than no index
+# ------------------------------------------------------------
+# The marker file is only useful if it agrees with reality. If it disagrees with
+# `git status`, an agent scopes its work off stale information and never finds
+# out — the same silent-wrong-answer failure the UNKNOWN rule guards against,
+# but applied to the index itself rather than to an anchor.
+- BEFORE scoping any task, compare `.changed_markers` against `git status`:
+    * every dirty/untracked file in `git status` must be listed in the index, and
+    * every file the index lists must actually be dirty.
+- On ANY disagreement: STOP. Do not scope, do not edit, do not "work around it".
+  Regenerate the index first using the recipe below. Then re-read it and continue.
+- NEVER invent a scope. If the index is empty while `git status` is not, that is
+  not "nothing changed" — it is a broken index.
+- After a successful commit, regenerate the index (not just empty it) so the
+  next session starts from a file that matches HEAD.
+
+# INDEX GENERATION RECIPE (verified)
+# ---------------------------------------------------------------------------
+#   {
+#     echo "# AUTO-GENERATED — do not edit"
+#     git add -A 2>/dev/null
+#     git diff -U3 -p HEAD -- '*.py' '*.md' '*.json' '*.txt' '*.toml' '*.ini' \
+#                                 '*.cfg' '*.yaml' '*.yml' '*.sh' '*.html' '*.css'
+#   } > .changed_markers
+#
+# Why the pathspec list: `-diff` in .gitattributes marks a file as binary but
+# git STILL emits a one-line "Binary files ... differ" header for it. A single
+# added .flac therefore injects noise for every binary in the working tree, and
+# that is exactly how this index was corrupted once before (69KB of binary
+# lines). Restricting the diff to text pathspecs removes the header entirely and
+# shrinks the index. Verified: a changed .flac produces zero output this way,
+# and one "Binary files ... differ" line without it.
+# When adding a new text format, add its extension to this list.
+
+
+# ------------------------------------------------------------
+# RENAME SAFETY — git diff is blind to cross-file fallout
+# ------------------------------------------------------------
+# A rename commit looks clean. The breakage is in the CALLERS, which did not
+# change and therefore do not appear in any diff.
+- After any rename, before committing:
+      git log --diff-filter=R --summary -1   # did a rename even happen?
+      git grep -n "old_name"                 # who still points at the old name?
+      git grep -n "new_name"                 # did the new name actually land?
+- If rename detection and those greps DISAGREE, stop and ask. Do not reconstruct
+  callers from memory — that is how live code gets deleted.
+- An anchor with no `git grep` hits means UNKNOWN, not "gone". Investigate
+  before editing or removing anything.
+
+# ------------------------------------------------------------
+# BOUNDARIES — the contracts a local hunk cannot show you
+# ------------------------------------------------------------
+# Some breakage is invisible in a per-file diff: shared types, field/format
+# names at an export or API boundary, schemas, migrations. Changing these can
+# break a consumer in another repository with no error on this side.
+- Keep a short ALWAYS-READ allowlist for such files (e.g. schema/contract
+  modules). Reading those few files is cheaper than unbounded exploration and
+  prevents "the diff is green so the interface must be fine".
+- Field/format names are a CONTRACT the moment data leaves the app (export,
+  training loader, API). Pin the mapping in ONE module and cover it with a test;
+  internal names are free to change, boundary names are not.
+
+# ------------------------------------------------------------
+# SCOPE DECLARATION — make context growth visible
+# ------------------------------------------------------------
+- Before opening anything, STATE the paths you intend to read and why.
+  Declared scope makes accidental context growth obvious, to the user and to
+  yourself, instead of it happening silently over many tool calls.
+- Stay inside that declared scope. If the task genuinely needs more, say so and
+  get agreement before expanding it.
+- Keep the generated index OUT of source directories and out of the diff it
+  describes (binary/data extensions should be `-diff` in `.gitattributes` so a
+  stray asset cannot flood the index).
+
 # ============================================================
 # TWO-MODE MAINTENANCE (fix for historical dead code / tech debt)
 # ============================================================

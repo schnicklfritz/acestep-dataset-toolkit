@@ -1,1 +1,18 @@
+# Show the function a Python change belongs to (readable, anchored hunks).
 *.py diff=python
+
+# Mark binary assets so git never attempts a textual diff of them.
+# NOTE: `-diff` alone is NOT sufficient — git still prints a one-line
+# "Binary files ... differ" header for the file. The marker-generation command
+# restricts the diff to text pathspecs (see .clinerules), which removes it
+# entirely. These attributes remain as a second line of defence.
+*.flac -diff
+*.mp3  -diff
+*.wav  -diff
+*.ogg  -diff
+*.m4a  -diff
+*.aiff -diff
+*.pdf  -diff
+*.zip  -diff
+*.png  -diff
+*.jpg  -diff
