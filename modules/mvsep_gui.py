@@ -3,7 +3,6 @@ import os
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -15,6 +14,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QVBoxLayout,
 )
+# Scroll-wheel-guarded combo (see modules/wheel_guard.py).
+from modules.wheel_guard import GuardedComboBox as QComboBox
 
 from modules.mvsep_api import (
     create_separation,

@@ -14,8 +14,17 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QScrollArea, QFrame, QWidget,
-    QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QTextEdit,
-    QSpinBox, QDoubleSpinBox, QSlider, QFontComboBox, QPushButton,
+    QGroupBox, QLabel, QLineEdit, QCheckBox, QTextEdit,
+    QFontComboBox, QPushButton,
+)
+# Scroll-wheel-guarded value widgets (see modules/wheel_guard.py): the wheel
+# only changes these after the control has been clicked, so scrolling this pane
+# past a combo/spin/slider cannot silently alter a setting.
+from modules.wheel_guard import (
+    GuardedComboBox as QComboBox,
+    GuardedDoubleSpinBox as QDoubleSpinBox,
+    GuardedSlider as QSlider,
+    GuardedSpinBox as QSpinBox,
 )
 
 from modules.model_manager import leaderboards
@@ -114,21 +123,8 @@ def build_settings_tab(manager, parent):
     sec_note.setStyleSheet("color: #aaa; font-size: 9px; padding: 2px;")
     c_form.addRow(sec_note)
 
-    # ---- Caption backend (pluggable providers) ----
-    manager.caption_backend_combo = QComboBox()
-    manager.caption_backend_combo.setToolTip("Which model captions the audio.")
-    manager.caption_backend_combo.addItems([
-        "ace_step — ACE-Step captioner (Kaggle GPU, default)",
-        "gemini — Google Gemini (audio-native)",
-        "deepseek — DeepSeek LLM",
-        "custom — OpenAI-compatible endpoint (local/rented GPU)",
-    ])
-    cur_backend = (manager.config.get("caption_backend") or "ace_step").strip().lower()
-    for i in range(manager.caption_backend_combo.count()):
-        if manager.caption_backend_combo.itemText(i).startswith(cur_backend):
-            manager.caption_backend_combo.setCurrentIndex(i)
-            break
-    c_form.addRow("Caption Backend:", manager.caption_backend_combo)
+    # NOTE: caption backend / prompt / limits live in the 🎤 Caption tab.
+    # Only the credentials for those backends belong here.
 
     manager.gemini_key = QLineEdit(manager.config.get("gemini_api_key", ""))
     manager.gemini_key.setEchoMode(QLineEdit.Password)
@@ -138,31 +134,8 @@ def build_settings_tab(manager, parent):
     manager.remember_gemini.setChecked(bool(manager.config.get("remember_gemini_key", True)))
     c_form.addRow("", manager.remember_gemini)
 
-    manager.gemini_model_combo = QComboBox()
-    manager.gemini_model_combo.setToolTip("Gemini model used for audio captioning.")
-    manager.gemini_model_combo.setEditable(True)
-    manager.gemini_model_combo.addItems(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"])
-    cur_model = (manager.config.get("gemini_model") or "gemini-2.5-flash").strip()
-    idx = manager.gemini_model_combo.findText(cur_model)
-    if idx >= 0:
-        manager.gemini_model_combo.setCurrentIndex(idx)
-    else:
-        manager.gemini_model_combo.setEditText(cur_model)
-    c_form.addRow("Gemini Model:", manager.gemini_model_combo)
-
-    manager.custom_url_edit = QLineEdit(manager.config.get("custom_caption_url", ""))
-    manager.custom_url_edit.setToolTip("OpenAI-compatible base URL for the custom caption backend.")
-    manager.custom_url_edit.setPlaceholderText("e.g. http://localhost:8000/v1 (vLLM/Ollama/runpod)")
-    c_form.addRow("Custom Endpoint Base URL:", manager.custom_url_edit)
-
-    manager.custom_model_edit = QLineEdit(manager.config.get("custom_caption_model", ""))
-    manager.custom_model_edit.setToolTip("Model name served by the custom endpoint.")
-    manager.custom_model_edit.setPlaceholderText("model name served by the endpoint")
-    c_form.addRow("Custom Endpoint Model:", manager.custom_model_edit)
-
-    manager.custom_audio_check = QCheckBox("Send audio to the endpoint (OpenAI input_audio)")
-    manager.custom_audio_check.setChecked(bool(manager.config.get("custom_caption_audio", False)))
-    c_form.addRow("", manager.custom_audio_check)
+    # Gemini model / custom endpoint / caption prompt / limits all live in the
+    # 🎤 Caption tab now — this group keeps only credentials.
 
     save_cloud_btn = QPushButton("Save Cloud Credentials")
     save_cloud_btn.clicked.connect(manager.save_cloud_config)
@@ -261,37 +234,8 @@ def build_settings_tab(manager, parent):
     p_form = QFormLayout(pipe_grp)
     p_form.setContentsMargins(8, 18, 8, 8)
 
-    manager.prompt_edit = QTextEdit()
-    manager.prompt_edit.setToolTip("The instruction given to the caption model for every chunk. Edit to steer descriptions.")
-    manager.prompt_edit.setPlainText(manager.config.get("caption_prompt", ""))
-    manager.prompt_edit.setMaximumHeight(120)
-    manager.prompt_edit.setPlaceholderText("Prompt used by the caption backends (ACE-Step / Gemini / custom).")
-    p_form.addRow("Caption Prompt:", manager.prompt_edit)
-
-    manager.max_tokens_spin = QSpinBox()
-    manager.max_tokens_spin.setToolTip("Maximum tokens the captioner may generate per chunk.")
-    manager.max_tokens_spin.setRange(32, 2048)
-    manager.max_tokens_spin.setValue(int(manager.config.get("caption_max_tokens", 512)))
-    p_form.addRow("Caption Max Tokens:", manager.max_tokens_spin)
-
-    manager.max_dur_spin = QSpinBox()
-    manager.max_dur_spin.setRange(0, 600)
-    manager.max_dur_spin.setValue(int(manager.config.get("caption_max_audio_duration", 120)))
-    manager.max_dur_spin.setToolTip("Max audio length fed to the captioner in seconds (0 = whole file).")
-    p_form.addRow("Max Audio Duration (s):", manager.max_dur_spin)
-
-    manager.batch_size_spin = QSpinBox()
-    manager.batch_size_spin.setRange(1, 8)
-    manager.batch_size_spin.setValue(int(manager.config.get("caption_batch_size", 1)))
-    manager.batch_size_spin.setToolTip("Chunks processed per captioner forward pass on the Kaggle GPU. 1 is safest; 2-4 is faster when VRAM allows (32 GB total across both T4s).")
-    p_form.addRow("Caption Batch Size:", manager.batch_size_spin)
-
-    manager.tag_ratio_spin = QSpinBox()
-    manager.tag_ratio_spin.setRange(0, 100)
-    manager.tag_ratio_spin.setSuffix("%")
-    manager.tag_ratio_spin.setValue(int(manager.config.get("tag_caption_ratio", 0)))
-    manager.tag_ratio_spin.setToolTip("Hybrid captions: 0% = prose only (default), 100% = tag block only, in between = both.")
-    p_form.addRow("Hybrid Tag Ratio:", manager.tag_ratio_spin)
+    # Caption prompt / tokens / duration / batch size / hybrid ratio now live in
+    # the 🎤 Caption tab. This group keeps the structure & DSP pipeline defaults.
 
     manager.clap_tagger_combo = QComboBox()
     manager.clap_tagger_combo.addItems(["auto (use CLAP if installed)", "on", "off"])
