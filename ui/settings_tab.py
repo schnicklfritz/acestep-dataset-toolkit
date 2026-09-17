@@ -211,10 +211,15 @@ def build_settings_tab(manager, parent):
         prov.setToolTip(f"Provider used by the {role} (the master-caption aggregator, the LLM captioner, or the AI assistant).")
         mod = QComboBox()
         mod.setEditable(True)
-        mod.addItems(["", "deepseek-chat", "gemini-2.5-flash", "gemini-3.7-flash",
-                      "llama-3.3-70b-versatile", "meta-llama/llama-3.3-70b-instruct:free"])
+        mod.addItems(["", "deepseek-chat", "gemini-2.5-flash", "gemini-2.5-pro",
+                      "llama-3.3-70b-versatile",
+                      "meta-llama/llama-3.3-70b-instruct:free"])
         mod.setCurrentText(manager.config.get(f"llm_model_{role}", ""))
-        mod.setToolTip(f"Model used by the {role}; empty = the provider default.")
+        mod.setToolTip(
+            f"Model used by the {role}. Leave EMPTY to follow the provider's "
+            "default (recommended) — naming a model here pins it and will break "
+            "if you later switch the provider."
+        )
         manager.role_provider_combo[role] = prov
         manager.role_model_combo[role] = mod
         row.addWidget(prov, 1)

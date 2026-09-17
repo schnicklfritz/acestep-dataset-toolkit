@@ -3013,12 +3013,22 @@ class DatasetManager(QMainWindow):
         name = self.llm_provider_combo.currentText().split(" ")[0]
         info = PROVIDERS.get(name, PROVIDERS["deepseek"])
         self.llm_model_combo.clear()
+        # Empty first = "use the provider's default model". Listed names are
+        # real, currently-served models only.
         self.llm_model_combo.addItems([
-            info["model"], "deepseek-chat", "gemini-2.5-flash", "gemini-3.7-flash",
-            "llama-3.3-70b-versatile", "meta-llama/llama-3.3-70b-instruct:free",
+            "",
+            info["model"],
+            "deepseek-chat",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "llama-3.3-70b-versatile",
+            "meta-llama/llama-3.3-70b-instruct:free",
         ])
+        # Show the stored value, or the provider default as a hint — but do NOT
+        # write the hint back (that would pin one provider's model name and
+        # break after switching provider; see save_cloud_config).
         cfg_model = (self.config.get("llm_model") or "").strip()
-        self.llm_model_combo.setCurrentText(cfg_model or info["model"])
+        self.llm_model_combo.setCurrentText(cfg_model or "")
         self.llm_base_url_edit.setText(
             (self.config.get("llm_base_url") or "").strip() or info["base_url"]
         )
