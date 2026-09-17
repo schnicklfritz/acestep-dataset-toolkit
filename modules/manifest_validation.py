@@ -2,14 +2,14 @@
 
 Checks the schema ACE-Step 1.5XL training expects (per-track required fields
 and sane values) and returns a list of human-readable issues.
-"""
-REQUIRED_META_FIELDS = ["name", "custom_tag", "tag_position", "instrumental_mode", "num_samples"]
 
-REQUIRED_SAMPLE_FIELDS = [
-    "id", "audio_path", "filename", "caption", "genre", "lyrics",
-    "formatted_lyrics", "bpm", "keyscale", "timesignature", "duration",
-    "language", "is_instrumental", "custom_tag",
-]
+The field lists live in ``modules/dataset_schema.py`` so the schema has a single
+source of truth shared with the app's own dataset construction.
+"""
+from modules.dataset_schema import (
+    REQUIRED_METADATA_FIELDS as REQUIRED_META_FIELDS,
+    REQUIRED_SAMPLE_FIELDS,
+)
 
 
 def validate_manifest(dataset):

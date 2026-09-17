@@ -111,5 +111,14 @@ def export_folders(samples, dest_dir, val_ratio=0.2, seed=42, stratify=True):
 
 
 def export_json(samples, path):
+    """Write the dataset as ACE-Step training JSON.
+
+    Uses the authoritative field names (``file_name``, ``instrumental``) via
+    modules.dataset_schema.to_export_sample — emitting the app's internal names
+    here would make the training preprocessor silently mis-parse those values.
+    """
+    from modules.dataset_schema import to_export_sample
+
+    payload = {"metadata": {}, "samples": [to_export_sample(s) for s in samples]}
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"metadata": {}, "samples": samples}, f, indent=2, ensure_ascii=False)
+        json.dump(payload, f, indent=2, ensure_ascii=False)
