@@ -306,6 +306,10 @@ def normalize_lyrics(
         before = body
         body = apply_contractions(body, contractions or {})
         if body != before:
+            # Count apostrophes consumed by the table too: from the user's
+            # point of view this line DID have apostrophes handled, and a
+            # report of "0" next to "She'll -> Sheel" reads like a failure.
+            report["apostrophes"] += before.count("'") - body.count("'")
             for key, val in lowered.items():
                 if re.search(r"\b" + re.escape(key) + r"\b", before, re.IGNORECASE):
                     if (key, val) not in report["contractions"]:
