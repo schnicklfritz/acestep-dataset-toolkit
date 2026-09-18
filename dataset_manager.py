@@ -2884,6 +2884,24 @@ class DatasetManager(QMainWindow):
         self.struct_progress.setValue(pct)
         self.struct_status.setText(msg)
 
+    def on_struct_batch_done(self):
+        """Called when the structural BATCH worker finishes every track.
+
+        ``StructuralPipelineBatchWorker.all_done`` is ``Signal()`` -- no
+        arguments. This handler was connected in two places but never defined,
+        and because ``.connect(self.on_struct_batch_done)`` evaluates the
+        attribute immediately, starting a batch structural run raised
+        AttributeError before the worker even began.
+        """
+        self.struct_progress.setVisible(False)
+        self.struct_status.setText("Structural pipeline completed for all tracks.")
+        self.status_label.setText(
+            "Structural pipeline finished for the batch. Review the captions "
+            "and lyrics."
+        )
+        self.refresh_table()
+        self.on_table_selection_changed()
+
     def on_struct_step(self, step_name, data):
         self.struct_status.setText(f"Completed step: {step_name}")
 
@@ -4531,6 +4549,24 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # AI Captioning (with DeepSeek backend option)
     # -----------------------------------------------------------------------
+    def _set_caption_busy(self, busy):
+        """Enable/disable the captioning triggers while a run is in flight.
+
+        ``run_ai_btn`` (the Studio's old "Run AI Captioner" button) no longer
+        exists -- it was removed in 15520af when the Caption tab took over, but
+        three toggles were left behind referencing it. Reaching any of them
+        raised AttributeError, and nothing did until the Caption tab started
+        calling start_ai_captioning().
+
+        Toggling by NAME means the state applies to whichever triggers actually
+        exist, so a future extraction or rename cannot reintroduce the crash.
+        """
+        for name in ("caption_selected_btn", "caption_missing_btn",
+                     "caption_all_btn", "run_ai_btn"):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                btn.setEnabled(not busy)
+
     def start_ai_captioning(self, checked=False, scope=None):
         """Run the captioner.
 
@@ -4572,7 +4608,7 @@ class DatasetManager(QMainWindow):
             return
 
         self.record_snapshot()
-        self.run_ai_btn.setEnabled(False)
+        self._set_caption_busy(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
 
@@ -4604,7 +4640,7 @@ class DatasetManager(QMainWindow):
                 break
 
     def on_caption_finished(self):
-        self.run_ai_btn.setEnabled(True)
+        self._set_caption_busy(False)
         self.progress_bar.setVisible(False)
         self.status_label.setText("AI Captioning completed.")
         self.refresh_table()
@@ -5363,19 +5399,28 @@ class DatasetManager(QMainWindow):
             out.append((s.get("filename", ""), new))
         return out
 
+    def _get_rename_scope_targets(self, scope):
+        """Resolve a bulk-rename scope string to the list of target samples.
+
+        `_apply_bulk_rename` called this by NAME while `_bulk_rename_targets`
+        inlined the same logic -- and the method did not exist, so actually
+        running a bulk rename raised AttributeError. Extracted here so both
+        paths share one implementation.
+        """
+        samples = self.dataset.get("samples", [])
+        if scope == "Selected tracks":
+            rows = sorted({r.row() for r in self.table.selectionModel().selectedRows()})
+            return [samples[self._table_sample_indices[r]]
+                    for r in rows if 0 <= r < len(self._table_sample_indices)]
+        if scope == "Filtered (visible) tracks":
+            return [samples[i] for i in self._table_sample_indices
+                    if 0 <= i < len(samples)]
+        return list(samples)
+
     def _bulk_rename_targets(self, scope_combo, mode_combo, find_edit, repl_edit,
                              prefix_edit, suffix_edit, pattern_edit, start_spin):
         """Return ``[(sample, new_filename), ...]`` — never mutates samples."""
-        samples = self.dataset.get("samples", [])
-        scope = scope_combo.currentText()
-        if scope == "Selected tracks":
-            rows = sorted({r.row() for r in self.table.selectionModel().selectedRows()})
-            targets = [samples[self._table_sample_indices[r]]
-                       for r in rows if 0 <= r < len(self._table_sample_indices)]
-        elif scope == "Filtered (visible) tracks":
-            targets = [samples[i] for i in self._table_sample_indices if 0 <= i < len(samples)]
-        else:
-            targets = list(samples)
+        targets = self._get_rename_scope_targets(scope_combo.currentText())
 
         mode = mode_combo.currentText()
         result = []
@@ -5756,7 +5801,7 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(msg)
 
     def on_worker_error(self, err_msg):
-        self.run_ai_btn.setEnabled(True)
+        self._set_caption_busy(False)
         self.normalize_btn.setEnabled(True)
         self.progress_bar.setVisible(False)      
         self.status_label.setText("Operation error.")
