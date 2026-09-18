@@ -71,15 +71,22 @@ def _top_level_function(source, name):
     """Return a whole top-level ``def name(...)`` block.
 
     Reviews the source as text, so this deliberately stops at the next
-    top-level ``def`` rather than trying to parse (the raw kernel contains
+    top-level statement rather than trying to parse (the raw kernel contains
     placeholders and will not parse).
 
-    The naive ``def name\\(.*?return`` pattern is NOT enough: it stops at the
-    first early ``return ""`` and silently truncates the body, which makes a
-    presence assertion pass for the wrong reason.
+    Two traps this avoids:
+
+    * ``def name\\(.*?return`` stops at the first early ``return ""`` and
+      silently truncates the body, making a presence assertion pass for the
+      wrong reason.
+    * Stopping only at ``^def |\\Z`` swallows everything after the LAST function
+      (the module-level main loop), so an exec of that block fails on names the
+      body never used.
     """
-    match = re.search(rf"^def {re.escape(name)}\(.*?(?=^def |\Z)",
-                      source, re.S | re.M)
+    # Stop at a newline followed by a non-indented, non-comment character:
+    # that is the start of the next top-level statement.
+    pattern = rf"^def {re.escape(name)}\(.*?(?=\n[^\s#]|\Z)"
+    match = re.search(pattern, source, re.S | re.M)
     return match.group(0) if match else ""
 
 
@@ -225,6 +232,71 @@ class TestDeterminism:
     def test_sampling_is_disabled(self, kernel_source):
         # Annotation should be reproducible; sampling makes re-runs differ.
         assert "do_sample=False" in kernel_source
+
+
+class TestAudioLoadedOnce:
+    """Both passes must share one decode, not decode the same file twice."""
+
+    def test_both_passes_accept_preloaded_audio(self, kernel_source):
+        for name in ("style_for_track", "lyrics_for_track"):
+            body = _top_level_function(kernel_source, name)
+            assert "audio=None" in body, f"{name} no longer accepts preloaded audio"
+            assert "if audio is None:" in body, f"{name} lost its loader guard"
+
+    def test_supplied_audio_is_not_reloaded(self, substituted):
+        import numpy as np
+
+        calls = {"n": 0}
+
+        def fake_load(_path):
+            calls["n"] += 1
+            return np.zeros(1000, dtype="float32")
+
+        ns = {
+            "MEL_SR": 16000,
+            "CHUNK_SECONDS": 110,
+            "STYLE_PROMPT": "s",
+            "LYRICS_PROMPT": "l",
+            "CUSTOM_TAG": "",
+            "_load_mono": fake_load,
+            "_chunk": lambda a, _s: [(0, a)],
+            "_generate": lambda _a, _p: "text",
+            "_strip_think": lambda t: t,
+            "_mmss": lambda _s: "00:00",
+        }
+        for name in ("style_for_track", "lyrics_for_track"):
+            exec(_top_level_function(substituted, name), ns)
+
+        audio = np.zeros(1000, dtype="float32")
+        ns["style_for_track"]("track.flac", audio)
+        ns["lyrics_for_track"]("track.flac", audio)
+        assert calls["n"] == 0, "a pass reloaded audio that was already supplied"
+
+    def test_passes_still_load_when_called_standalone(self, substituted):
+        # The optional param must not break a direct call with no audio.
+        import numpy as np
+
+        calls = {"n": 0}
+
+        def fake_load(_path):
+            calls["n"] += 1
+            return np.zeros(1000, dtype="float32")
+
+        ns = {
+            "MEL_SR": 16000,
+            "CHUNK_SECONDS": 110,
+            "STYLE_PROMPT": "s",
+            "LYRICS_PROMPT": "l",
+            "CUSTOM_TAG": "",
+            "_load_mono": fake_load,
+            "_chunk": lambda a, _s: [(0, a)],
+            "_generate": lambda _a, _p: "text",
+            "_strip_think": lambda t: t,
+            "_mmss": lambda _s: "00:00",
+        }
+        exec(_top_level_function(substituted, "style_for_track"), ns)
+        ns["style_for_track"]("track.flac")
+        assert calls["n"] == 1
 
 
 class TestOutputContract:

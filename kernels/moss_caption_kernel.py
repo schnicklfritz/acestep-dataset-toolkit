@@ -261,9 +261,13 @@ def _strip_think(text):
 # ---------------------------------------------------------------------------
 # Two passes per track
 # ---------------------------------------------------------------------------
-def style_for_track(path):
+# Both passes take the already-loaded audio so a track is decoded and resampled
+# ONCE. Loading twice (the original shape of this code) meant two
+# torchaudio.load + two resamples per track for no reason.
+def style_for_track(path, audio=None):
     """Style pass: the first window is representative of the whole song."""
-    audio = _load_mono(path)
+    if audio is None:
+        audio = _load_mono(path)
     if audio.shape[0] == 0:
         return ""
     _, first = _chunk(audio, CHUNK_SECONDS)[0]
@@ -273,13 +277,14 @@ def style_for_track(path):
     return text
 
 
-def lyrics_for_track(path):
+def lyrics_for_track(path, audio=None):
     """Lyrics pass: transcribe every window in order, prefixing timestamps.
 
     Non-overlapping windows are deliberate -- overlapping would duplicate
     words across the join, and the model emits its own time markers.
     """
-    audio = _load_mono(path)
+    if audio is None:
+        audio = _load_mono(path)
     if audio.shape[0] == 0:
         return ""
     windows = _chunk(audio, CHUNK_SECONDS)
@@ -318,20 +323,36 @@ for index, path in enumerate(audio_files, start=1):
     name = os.path.basename(path)
     print(f"[moss] ({index}/{len(audio_files)}) {name}", flush=True)
     entry = {"file": name, "style": "", "lyrics": ""}
+    # Decode + resample ONCE and share it between both passes. Loading inside
+    # each pass doubled the audio I/O per track for no benefit.
+    audio = None
     try:
-        entry["style"] = style_for_track(path)
+        audio = _load_mono(path)
+    except Exception as exc:                           # noqa: BLE001
+        import traceback                            # noqa: PLC0415
+        traceback.print_exc()
+        entry["style"] = f"ERROR: {exc}"
+        entry["lyrics"] = f"ERROR: {exc}"
+        results.append(entry)
+        with open("/kaggle/working/moss_out.json", "w", encoding="utf-8") as out:
+            json.dump({"results": results}, out, indent=2, ensure_ascii=False)
+        continue
+
+    try:
+        entry["style"] = style_for_track(path, audio)
         print("   style :", entry["style"][:120], flush=True)
     except Exception as exc:                       # noqa: BLE001
         import traceback                        # noqa: PLC0415
         traceback.print_exc()
         entry["style"] = f"ERROR: {exc}"
     try:
-        entry["lyrics"] = lyrics_for_track(path)
+        entry["lyrics"] = lyrics_for_track(path, audio)
         print("   lyrics:", entry["lyrics"][:120].replace("\n", " "), flush=True)
     except Exception as exc:                       # noqa: BLE001
         import traceback                        # noqa: PLC0415
         traceback.print_exc()
         entry["lyrics"] = f"ERROR: {exc}"
+    del audio          # free before the next track
     results.append(entry)
 
     # Persist after every track so a later crash still leaves usable work.
