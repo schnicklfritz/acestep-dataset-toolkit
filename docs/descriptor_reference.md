@@ -82,7 +82,8 @@ fade in, fade out, abrupt cut, swell, drop out, reverb-heavy, dry, filtered,
 tape stop, sidechain kick, analog warmth, lo-fi, hi-fi, raw production,
 polished production, live feel, room reverb, plate reverb, spring reverb,
 tape delay, digital delay, chorus effect, flanger, phaser, distortion,
-overdrive, fuzz, compression, gated reverb, monaural, stereo, wall of sound
+overdrive, fuzz, compression, gated reverb, monaural, stereo, wall of sound,
+overdubbed
 
 ---
 
@@ -219,7 +220,7 @@ seductive, menacing, ecstatic, desperate
 Vox Continental organ, Fender Rhodes piano, Gibson SG guitar,
 no bass guitar (organ left-hand bass), organ bass pedals,
 jazz-influenced drums, brushed drums, ride cymbal, flamenco guitar,
-slide guitar, wah-wah lead, feedback
+slide guitar, wah-wah lead, feedback, saxophone
 
 ### Mood & atmosphere
 psychedelic, ominous, nocturnal, hypnotic, cinematic, theatrical, brooding,
@@ -278,6 +279,9 @@ acoustic guitar, flamenco guitar, slide guitar
 distorted bass, thick bass tone, rumbling bass, jazz-influenced drums,
 swinging drums, thunderous drums, dynamic drumming, tom-heavy fills,
 ride cymbal, crash cymbal
+
+### Additional instruments (Iommi)
+flute
 
 ### Mood & atmosphere
 doom-laden, ominous, apocalyptic, sinister, occult, evil, dark, heavy,

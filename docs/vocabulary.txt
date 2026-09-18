@@ -122,6 +122,7 @@ gated reverb
 monaural
 stereo
 wall of sound
+overdubbed
 twangy vocals
 Tennessee twang
 Southern drawl
@@ -265,6 +266,7 @@ jazz-influenced drums
 ride cymbal
 flamenco guitar
 feedback
+saxophone
 psychedelic
 ominous
 nocturnal
@@ -315,6 +317,7 @@ thunderous drums
 dynamic drumming
 tom-heavy fills
 crash cymbal
+flute
 doom-laden
 occult
 evil

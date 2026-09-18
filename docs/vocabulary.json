@@ -127,7 +127,8 @@
       "gated reverb",
       "monaural",
       "stereo",
-      "wall of sound"
+      "wall of sound",
+      "overdubbed"
     ]
   },
   "artists": {
@@ -343,7 +344,8 @@
         "flamenco guitar",
         "slide guitar",
         "wah-wah lead",
-        "feedback"
+        "feedback",
+        "saxophone"
       ],
       "Mood & atmosphere": [
         "psychedelic",
@@ -450,6 +452,9 @@
         "tom-heavy fills",
         "ride cymbal",
         "crash cymbal"
+      ],
+      "Additional instruments (Iommi)": [
+        "flute"
       ],
       "Mood & atmosphere": [
         "doom-laden",

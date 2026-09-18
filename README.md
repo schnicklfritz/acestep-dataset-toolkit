@@ -155,6 +155,21 @@ The app ships **two** MCP servers (both optional, both need `pip install "mcp[cl
    is enforced in `modules/research_tools.py`, so connecting an agent to a
    multi-megabyte corpus cannot blow its context window.
 
+The corpus itself is built by `scripts/gather_corpus.py`: give it a manifest of
+source URLs (Wikipedia pages, album reviews, interviews, session write-ups) and it
+downloads each one, strips the HTML down to prose only, and writes
+`docs/research/<artist>/*.txt`. Provenance goes to a sidecar `sources.json`, so
+URLs and citation debris never reach the n-gram counts. A fetch that fails (403,
+PDF, thin page) is reported rather than hidden, and already-present files are
+skipped, so re-running is cheap. The corpus is gitignored — regenerate it, don't
+commit it.
+
+```bash
+# Add new URLs to the END of an artist's list (filenames are positional).
+.venv/bin/python scripts/gather_corpus.py --manifest docs/research/sources.json --dry-run
+.venv/bin/python scripts/gather_corpus.py --manifest docs/research/sources.json
+```
+
 Build the descriptor vocabulary from the master reference doc with:
 
 ```bash
@@ -165,7 +180,7 @@ which writes three generated artifacts, all read at prompt time:
 
 | File | Contents |
 |---|---|
-| `docs/vocabulary.txt` | 390 descriptors, one per line (flat) |
+| `docs/vocabulary.txt` | 393 descriptors, one per line (flat) |
 | `docs/vocabulary.json` | the same terms grouped **by artist** and facet |
 | `docs/section_markers.txt` | `[Marker]` names for the lyrics block |
 
