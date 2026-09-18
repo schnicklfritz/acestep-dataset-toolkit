@@ -13,9 +13,16 @@ from ui.caption_tab import TrackPickerButton
 from workers.kaggle_moss import (
     DEFAULT_CHUNK_SECONDS,
     DEFAULT_MODEL_ID,
+    KERNEL_SCRIPT,
     _fill_placeholders,
     _moss_prompts,
 )
+
+@pytest.fixture(scope="module")
+def kernel_source():
+    """The real kernel source, for tests that check the worker/kernel contract."""
+    with open(KERNEL_SCRIPT, encoding="utf-8") as f:
+        return f.read()
 
 
 class TestMossPrompts:
@@ -300,6 +307,123 @@ class TestPlaceholderGuard:
         assert "fetch_kernel_logs" in src
         assert "log tail" in src
         assert "Open the run log in Kaggle" not in src
+
+
+class TestKernelStdoutParsing:
+    """Results come from the log, because kernels_output hung outright."""
+
+    def test_joins_only_stdout_events(self, monkeypatch):
+        from modules import kaggle
+
+        events = [
+            {"stream_name": "stdout", "time": 1, "data": "hello "},
+            {"stream_name": "stderr", "time": 2, "data": "WARNING noise"},
+            {"stream_name": "stdout", "time": 3, "data": "world"},
+        ]
+        monkeypatch.setattr(
+            kaggle, "fetch_kernel_logs", lambda *a, **k: json.dumps(events)
+        )
+        assert kaggle.kernel_stdout({}, "k") == "hello world"
+
+    def test_falls_back_to_raw_text_when_not_json(self, monkeypatch):
+        from modules import kaggle
+
+        monkeypatch.setattr(
+            kaggle, "fetch_kernel_logs", lambda *a, **k: "plain log text"
+        )
+        assert kaggle.kernel_stdout({}, "k") == "plain log text"
+
+    def test_empty_log_gives_empty_string(self, monkeypatch):
+        from modules import kaggle
+
+        monkeypatch.setattr(kaggle, "fetch_kernel_logs", lambda *a, **k: "")
+        assert kaggle.kernel_stdout({}, "k") == ""
+
+    def test_handles_a_json_object_instead_of_an_array(self, monkeypatch):
+        from modules import kaggle
+
+        monkeypatch.setattr(
+            kaggle, "fetch_kernel_logs", lambda *a, **k: json.dumps({"status": "X"})
+        )
+        # Not a list -> treated as raw text rather than crashing.
+        assert "status" in kaggle.kernel_stdout({}, "k")
+
+
+class TestExtractMarkedJson:
+    def test_extracts_the_payload_between_markers(self):
+        from modules.kaggle import extract_marked_json
+
+        text = (
+            "[moss] (1/1) Iron_Man.mp3\n"
+            "MOSS_RESULTS_BEGIN\n"
+            '{"results": [{"file": "Iron_Man.mp3", "style": "s", "lyrics": "l"}]}\n'
+            "MOSS_RESULTS_END\n"
+            "trailing noise\n"
+        )
+        payload = extract_marked_json(text, "MOSS_RESULTS_BEGIN", "MOSS_RESULTS_END")
+        assert payload["results"][0]["file"] == "Iron_Man.mp3"
+
+    def test_survives_progress_bars_before_the_payload(self):
+        from modules.kaggle import extract_marked_json
+
+        text = ("\r 50%|███ | 3.6/3.6 MB\n"
+                "MOSS_RESULTS_BEGIN\n{\"results\": []}\nMOSS_RESULTS_END\n")
+        assert extract_marked_json(text, "MOSS_RESULTS_BEGIN",
+                                   "MOSS_RESULTS_END") == {"results": []}
+
+    def test_returns_none_when_markers_are_absent(self):
+        from modules.kaggle import extract_marked_json
+
+        assert extract_marked_json("no markers here", "A_BEGIN", "A_END") is None
+
+    def test_returns_none_on_malformed_payload(self):
+        from modules.kaggle import extract_marked_json
+
+        assert extract_marked_json(
+            "A_BEGIN\n{not json\nA_END", "A_BEGIN", "A_END"
+        ) is None
+
+    def test_returns_none_for_empty_text(self):
+        from modules.kaggle import extract_marked_json
+
+        assert extract_marked_json("", "A_BEGIN", "A_END") is None
+
+
+class TestKernelPrintsResultsBlock:
+    def test_kernel_prints_the_markers(self, kernel_source):
+        assert '"MOSS_RESULTS_BEGIN"' in kernel_source
+        assert '"MOSS_RESULTS_END"' in kernel_source
+
+    def test_markers_are_printed_once_at_the_end(self, kernel_source):
+        # Printing per-track would bloat the log for a 20-track run.
+        assert kernel_source.count('"MOSS_RESULTS_BEGIN"') == 1
+
+    def test_results_still_written_to_a_file(self, kernel_source):
+        # The file remains the fallback path.
+        assert "/kaggle/working/moss_out.json" in kernel_source
+
+    def test_worker_reads_the_log_before_the_outputs_api(self):
+        import inspect
+        from workers import kaggle_moss
+        src = inspect.getsource(kaggle_moss.run_kaggle_moss)
+        assert src.index("extract_marked_json") < \
+            src.index("download_kernel_output("), (
+                "the log is the primary source; outputs is the fallback"
+            )
+
+    def test_markers_round_trip_through_the_extractor(self):
+        # Compose what the kernel prints, parse it with the worker's extractor,
+        # so the two halves cannot drift apart.
+        import json as _json
+
+        from modules.kaggle import extract_marked_json
+
+        payload = {"results": [{"file": "Iron_Man.mp3", "style": "s", "lyrics": "l"}]}
+        printed = ("noise before\r 50%|███\nMOSS_RESULTS_BEGIN\n"
+                   + _json.dumps(payload)
+                   + "\nMOSS_RESULTS_END\nnoise after")
+        assert extract_marked_json(printed, "MOSS_RESULTS_BEGIN",
+                                   "MOSS_RESULTS_END") == payload
 
 
 @pytest.fixture

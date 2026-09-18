@@ -196,6 +196,58 @@ def kernel_status_text(config, kernel_slug):
         return ""
 
 
+def kernel_stdout(config, kernel_slug):
+    """Return what a kernel PRINTED to stdout, parsed from its log.
+
+    ``kernels_logs`` returns a JSON array of stream events::
+
+        [{"stream_name": "stdout", "time": 7.9, "data": "..."}, ...]
+
+    Joining the ``stdout`` events gives the kernel's actual console output,
+    which is how results are retrieved. This exists because ``kernels_output``
+    turned out to be unreliable: it HUNG outright on a completed kernel (a 90s
+    timeout with no output), which is what made an earlier run report "no
+    moss_out.json" when the file had in fact been written.
+
+    Falls back to the raw log text when it is not parseable as events.
+    """
+    raw = fetch_kernel_logs(config, kernel_slug, max_chars=10 ** 9)
+    if not raw:
+        return ""
+    try:
+        events = json.loads(raw)
+    except ValueError:
+        return raw
+    if not isinstance(events, list):
+        return raw
+    return "".join(
+        event.get("data", "")
+        for event in events
+        if isinstance(event, dict) and event.get("stream_name") == "stdout"
+    )
+
+
+def extract_marked_json(text, begin, end):
+    """Return the JSON payload printed between two markers, or None.
+
+    Markers beat scraping a log for a filename: the payload survives reordering,
+    progress bars and unrelated output.
+    """
+    if not text:
+        return None
+    start = text.find(begin)
+    if start < 0:
+        return None
+    start += len(begin)
+    stop = text.find(end, start)
+    if stop < 0:
+        return None
+    try:
+        return json.loads(text[start:stop].strip())
+    except ValueError:
+        return None
+
+
 def download_kernel_output(config, kernel_slug, out_dir):
     """Download the kernel output folder. Returns out_dir."""
     api, user = _get_api(config)

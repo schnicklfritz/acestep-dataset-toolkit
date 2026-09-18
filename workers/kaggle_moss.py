@@ -213,7 +213,7 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
         with open(os.path.join(kernel_dir, "kernel-metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
 
-        progress_cb(12, "Pushing the MOSS-Audio kernel to Kaggle...")
+        progress_cb(12, "Pushing the MOSS kernel to Kaggle...")
         kernel_ref = push_kernel(config, kernel_dir, kernel_slug)
         global LAST_KERNEL_REF, LAST_DATASET_REF
         LAST_KERNEL_REF = kernel_ref
@@ -242,32 +242,50 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
                 f"--- log tail ---\n{tail or '(log unavailable)'}"
             )
 
-        progress_cb(85, "Downloading results...")
-        out_dir = os.path.join(temp_dir, "output")
-        download_kernel_output(config, kernel_slug, out_dir)
+        progress_cb(85, "Retrieving results...")
+        from modules.kaggle import (
+            download_kernel_output,
+            extract_marked_json,
+            kernel_stdout,
+        )
 
-        result_path = None
-        for base, _dirs, names in os.walk(out_dir):
-            if "moss_out.json" in names:
-                result_path = os.path.join(base, "moss_out.json")
-                break
-        if not result_path:
-            # List what WAS downloaded: "no output" alone gives nothing to act
-            # on, and this failure has already happened once unexplained.
-            found = sorted(
-                os.path.relpath(os.path.join(base, n), out_dir)
-                for base, _dirs, names in os.walk(out_dir)
-                for n in names
-            )
-            raise RuntimeError(
-                "Kaggle job finished but no moss_out.json was downloaded.\n\n"
-                f"Files actually downloaded ({len(found)}):\n  "
-                + ("\n  ".join(found[:40]) or "(none)")
-                + "\n\nThe kernel normally writes /kaggle/working/moss_out.json. "
-                  "Check the run log for the real cause."
-            )
-        with open(result_path, encoding="utf-8") as f:
-            payload = json.load(f)
+        # PRIMARY: the marked JSON block on stdout.
+        # kernels_output hung indefinitely on a completed kernel, which is what
+        # made an earlier run report "no moss_out.json" when the file HAD been
+        # written. The log stream is reliable and small.
+        payload = extract_marked_json(
+            kernel_stdout(config, kernel_slug),
+            "MOSS_RESULTS_BEGIN",
+            "MOSS_RESULTS_END",
+        )
+
+        if payload is None:
+            # FALLBACK: the written file, for older kernels or a truncated log.
+            progress_cb(88, "No results block in the log; falling back to "
+                            "kernel outputs...")
+            out_dir = os.path.join(temp_dir, "output")
+            download_kernel_output(config, kernel_slug, out_dir)
+            result_path = None
+            for base, _dirs, names in os.walk(out_dir):
+                if "moss_out.json" in names:
+                    result_path = os.path.join(base, "moss_out.json")
+                    break
+            if not result_path:
+                found = sorted(
+                    os.path.relpath(os.path.join(base, n), out_dir)
+                    for base, _dirs, names in os.walk(out_dir)
+                    for n in names
+                )
+                raise RuntimeError(
+                    "No results could be retrieved from the Kaggle run.\n\n"
+                    "The log contained no MOSS_RESULTS_BEGIN/END block, and the "
+                    "outputs API returned nothing usable.\n"
+                    f"Files downloaded ({len(found)}):\n  "
+                    + ("\n  ".join(found[:40]) or "(none)")
+                    + "\n\nCheck the run log for the real cause."
+                )
+            with open(result_path, encoding="utf-8") as f:
+                payload = json.load(f)
 
         results = {}
         for entry in payload.get("results", []):

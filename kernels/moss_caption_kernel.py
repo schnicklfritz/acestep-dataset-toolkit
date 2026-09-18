@@ -120,7 +120,7 @@ def _install():
     reinstalling them risks breaking the GPU stack.
     """
     _pip("safetensors", "numpy", "soundfile", "tiktoken", "einops",
-         "scipy", "tqdm", "accelerate")
+         "scipy", "tqdm", "accelerate", "bitsandbytes")
     _pip("transformers==4.57.1")
 
 
@@ -256,7 +256,30 @@ else:
 # Load model + processor
 # ---------------------------------------------------------------------------
 # fp16, not bf16: config.json declares bfloat16, but Kaggle T4s (Turing) have
-# no native bfloat16. fp16 is native and also what makes the 8B fit.
+# no native bfloat16. fp16 is native.
+#
+# ---------------------------------------------------------------------------
+# SINGLE GPU + 4-BIT. Both parts are required; here is why.
+# ---------------------------------------------------------------------------
+# The first real run failed during generation with:
+#
+#   MOSS-Music/src/modeling_moss_music.py line 500, in forward
+#       inputs_embeds.masked_scatter_(mask_expanded, audio_embeds)
+#   RuntimeError: Expected all tensors to be on the same device, but got source
+#   is on cuda:1, different from other tensors on cuda:0
+#
+# MOSS's deepstack injection scatters the audio embeddings into the text
+# embeddings and requires both on the SAME device. `device_map="balanced"`
+# shards the model across both T4s, so the audio encoder and the language model
+# end up on different GPUs and that call cannot succeed. The model must
+# therefore live on ONE device.
+#
+# But 8B at fp16 is ~17 GiB and one T4 has ~15.6 GiB, so it does not fit on a
+# single card either. 4-bit lands near 5 GiB, which fits comfortably and leaves
+# headroom for the audio encoder and the long context.
+#
+# On a bigger single GPU (L4 24 GiB, A100 40 GiB) drop the quantization_config
+# and load fp16 on that one device instead -- better precision, same code path.
 #
 # attn_implementation is only passed when explicitly requested. MOSS's audio
 # encoder config pins "_attn_implementation": "eager" for the Whisper layers and
@@ -266,7 +289,21 @@ else:
 # Note flash-attn does NOT support Turing (T4, sm_75): its README sends Turing
 # users to a separate fork with only a subset of features. It is only worth
 # requesting on an Ampere+ allocation.
-_load_kwargs = {"trust_remote_code": True, "device_map": "balanced"}
+from transformers import BitsAndBytesConfig  # noqa: E402
+
+_QUANT_CONFIG = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True,
+)
+
+# ``{"": 0}`` pins the whole model to cuda:0. Not "balanced", not "auto".
+_load_kwargs = {
+    "trust_remote_code": True,
+    "device_map": {"": 0},
+    "quantization_config": _QUANT_CONFIG,
+}
 if ATTN_IMPL:
     _load_kwargs["attn_implementation"] = ATTN_IMPL
 try:
@@ -279,7 +316,8 @@ except TypeError:
         MODEL_SOURCE, torch_dtype=torch.float16, **_load_kwargs
     )
 model.eval()
-print(f"[moss] attn_implementation={ATTN_IMPL or '(model default)'}", flush=True)
+print(f"[moss] loaded on a single device in 4-bit; "
+      f"attn_implementation={ATTN_IMPL or '(model default)'}", flush=True)
 
 # enable_time_marker must be EXPLICIT: from_pretrained defaults it to False
 # even though __init__ defaults to True. Timestamps are the reason we want
@@ -493,4 +531,17 @@ for index, path in enumerate(audio_files, start=1):
         json.dump({"results": results}, out, indent=2, ensure_ascii=False)
 
 print(f"DONE {len(results)} track(s) -> /kaggle/working/moss_out.json", flush=True)
+
+# ---------------------------------------------------------------------------
+# Machine-readable copy ON STDOUT, between markers.
+# ---------------------------------------------------------------------------
+# The file above is still written, but the worker reads results from HERE.
+# Kaggle's outputs API proved unreliable: `kernels_output` HUNG indefinitely on
+# a completed kernel (90s with no output), which made an earlier run report
+# "no moss_out.json" when the file had in fact been written. The log stream is
+# reliable and cheap (this whole log was ~11 KB), so results travel that way,
+# with the file as a fallback.
+print("MOSS_RESULTS_BEGIN", flush=True)
+print(json.dumps({"results": results}, ensure_ascii=False), flush=True)
+print("MOSS_RESULTS_END", flush=True)
 

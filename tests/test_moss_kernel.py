@@ -397,6 +397,56 @@ class TestAudioDiscovery:
         assert found[0].endswith("School_Days.flac")
 
 
+class TestLoadPlacement:
+    """MOSS's deepstack injection cannot work across two GPUs.
+
+    The real failure:
+        modeling_moss_music.py line 500, in forward
+            inputs_embeds.masked_scatter_(mask_expanded, audio_embeds)
+        RuntimeError: Expected all tensors to be on the same device, but got
+        source is on cuda:1, different from other tensors on cuda:0
+
+    ``device_map="balanced"`` sharded the model across both T4s, putting the
+    audio encoder and the language model on different cards. The model must
+    live on ONE device -- and since 8B fp16 is ~17 GiB against a T4's ~15.6 GiB,
+    it must also be quantized.
+    """
+
+    def test_does_not_use_balanced_device_map(self, substituted):
+        # Check string LITERALS via the AST, not the raw text: the comment
+        # explaining why balanced is wrong necessarily quotes it. (Text-based
+        # "X is absent" assertions have now tripped on comments three times in
+        # this file -- always use the AST for absence checks.)
+        literals = {
+            node.value
+            for node in ast.walk(ast.parse(substituted))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        assert "balanced" not in literals
+        assert "auto" not in literals
+
+    def test_pins_the_model_to_a_single_device(self, kernel_source):
+        assert '"device_map": {"": 0}' in kernel_source
+
+    def test_uses_4bit_quantization(self, kernel_source):
+        assert "BitsAndBytesConfig" in kernel_source
+        assert "load_in_4bit=True" in kernel_source
+
+    def test_installs_bitsandbytes(self, kernel_source):
+        for call in re.findall(r"_pip\(([^)]*)\)", kernel_source):
+            if "accelerate" in call:
+                assert "bitsandbytes" in call, "4-bit needs bitsandbytes installed"
+                break
+        else:
+            pytest.fail("accelerate install line not found")
+
+    def test_explains_the_device_reason_in_the_source(self, kernel_source):
+        # Without the reason, someone will "optimise" this back to balanced and
+        # reintroduce a failure that only shows up on multiple GPUs.
+        assert "masked_scatter_" in kernel_source
+        assert "same device" in kernel_source
+
+
 class TestDiagnostics:
     """A failed Kaggle run must explain itself in its own log."""
 
