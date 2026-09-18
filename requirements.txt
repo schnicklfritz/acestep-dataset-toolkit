@@ -8,6 +8,8 @@ soundfile>=0.12.1
 pyloudnorm>=0.1.1
 openai>=1.0.0
 # google-genai>=1.0.0   # optional — only needed for the Gemini caption backend (pip install google-genai)
+# mcp[cli]>=1.0         # optional — only needed for the MCP servers (pip install "mcp[cli]";
+#                       #            works with both mcp 1.x FastMCP and 2.x MCPServer)
 kaggle>=1.6.0
 pillow>=10.0.0
 requests>=2.31.0

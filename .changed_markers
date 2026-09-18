@@ -4,7 +4,7 @@
 #
 # RULE (see .clinerules): Everything committed at HEAD is an IMMUTABLE CACHE HIT.
 # Only open files / hunks listed under [UNREVIEWED] below.
-# When you (the user) commit a change, EMPTY this file — the loop has absorbed it.
+# When you commit a change, EMPTY this file — the loop has absorbed it.
 #
 # STALE LINE PROTECTION: bind notes to function/class names + hunk context,
 # not raw line numbers (they go stale).
@@ -16,46 +16,86 @@
 
 [UNREVIEWED]
 # ---------------------------------------------------------------------------
-# FIX: "Add Single Song" did not recognize audio files (2026-09-15)
-#   ROOT CAUSE: the QFileDialog filter was built as bare extensions
-#   ("Audio Files (.wav .flac ...)"). Qt filter grammar requires globs
-#   ("*.wav"); a bare extension matches nothing, so the picker hid every
-#   audio file (users had to manually pick "All Files (*)").
-#   FIX (dataset_manager.py::add_audio_files):
-#     globs = " ".join(f"*{e}" for e in AUDIO_EXTS_ORDERED)
-#     -> "Audio Files (*.wav *.flac ...);;All Files (*)"
+# FEATURE: dedicated corpus-research MCP server (2026-09-18)
+#   WHY: a previous session died at the context limit having DESIGNED this but
+#   written none of it — it existed only in the session transcript. Recovered
+#   from ~/.cline/data/sessions/ and built. Nothing was ever lost from disk:
+#   verified there was no write_to_file call for research_tools /
+#   mcp_research_server, and no such file existed anywhere.
 #
-# BROADENED FORMAT SUPPORT (user: "allow them all — never know what a person
-# will use"). AUDIO_EXTS / AUDIO_EXTS_ORDERED now cover 26 formats:
-#   lossless: .wav .flac .aiff .aif .aifc .alac .ape .wv .tta .au .caf .rf64 .bwf
-#   lossy   : .mp3 .m4a .aac .ogg .oga .opus .wma .ac3 .amr .mp2
-#   other   : .webm .mkv .mp4
-# New helper sets: LOSSLESS_EXTS, LOSSY_EXTS (disjoint; both ⊂ AUDIO_EXTS).
+#   The user's idea it serves: gather historical/amateur/production/journalistic
+#   descriptions of an artist, then induct the vocabulary those sources actually
+#   use, so MOSS-Music picks from a grounded, bounded attribute set instead of
+#   inventing descriptors.
 #
-# NEW "Before You Add Tracks — Read This" warnings dialog
-#   dataset_manager.py::_show_add_track_warnings(count)
-#   Shown on both add paths (single song + folder) BEFORE importing. Covers:
-#     1. Prefer lossless sources (recommended) — lossy caps achievable quality
-#     2. Keep sources consistent (sample rate / mono-stereo / loudness / era)
-#     3. Common problems: clipping, mixed sample rates, mono+stereo, fake
-#        lossless, duplicates/re-rips, short clips, silence/count-ins,
-#        inconsistent loudness
-#     4. Aim for a coherent single-sound dataset
-#   Has a "Don't show this warning again" checkbox -> persists
-#   config["suppress_add_track_warnings"] (added to DEFAULT_CONFIG; False).
-#   Cancel aborts the import (returns False; status label reports cancellation).
+# NEW (all untracked):
+#   modules/research_tools.py     ALL logic, no Qt, no `mcp` import (testable)
+#   modules/mcp_compat.py         load_server_class() — mcp 1.x FastMCP / 2.x MCPServer
+#   mcp_research_server.py        thin MCP layer; build_server() + main()
+#   scripts/build_lexicon.py      CLI: descriptor doc -> docs/vocabulary.txt
+#   tests/test_research_tools.py  31 tests
+#   tests/test_mcp_servers.py     14 tests (call tools through the MCP boundary)
+#   docs/vocabulary.txt           GENERATED (390 terms) — do not hand-edit
+#   docs/section_markers.txt      GENERATED (63 markers) — do not hand-edit
 #
-# VERIFIED (offscreen):
-#   - filter string has *. on all 26 globs; ordered == set; lossless/lossy
-#     disjoint and both subset of AUDIO_EXTS
-#   - app boots; suppressed path returns True without dialog
-#   - dialog: Warning icon, checkbox text correct, Cancel -> False (aborts),
-#     all 10 content keywords present, 1743-char body
-#   - real .wav added end-to-end (samples == 1)
+# MODIFIED:
+#   mcp_server.py     import switched to modules.mcp_compat.load_server_class.
+#     REASON: installing `mcp[cli]` pulled mcp 2.2.0, which RENAMED FastMCP ->
+#     MCPServer. The old `from mcp.server.fastmcp import FastMCP` now raises
+#     ModuleNotFoundError, and because that IS an ImportError it was being
+#     swallowed into a misleading "pip install mcp[cli]" message. The shim keeps
+#     both majors working and reports one honest error.
+#   requirements.txt  added a commented `mcp[cli]>=1.0` optional line (house style).
+#   .gitignore        added docs/research/ — third-party article text must not be
+#                     committed; the corpus lives outside version control.
+#   README.md         MCP section now documents BOTH servers + the file tree.
 # ---------------------------------------------------------------------------
 
 [UNREVIEWED — previous]
-(daily iterative mode — currently no dirty hunks pending)
+# (daily iterative mode — no other dirty hunks pending)
+
+[DESIGN RULES FOR THE NEW CODE — do not weaken these]
+# 1. NO RESEARCH TOOL RETURNS RAW DOCUMENT TEXT.
+#    corpus_stats = counts only. grep_corpus = only lines an explicit regex
+#    matched, capped, each line also truncated (MAX_LINE_CHARS). Every
+#    list-returning function takes a cap. This is what makes it safe to point an
+#    agent at a multi-megabyte corpus.
+#    Guarded by: test_no_tool_returns_raw_corpus_text,
+#                test_token_discipline_holds_across_the_mcp_boundary.
+#
+# 2. THE LEXICON PARSER MUST SURVIVE documents that mix vocabulary with EXAMPLE
+#    CAPTIONS and lyric snippets (docs/descriptor_reference.md does exactly this).
+#    extract_descriptor_terms() harvests ONLY `###` term-list blocks (plus the
+#    labelled `Genre: ...` form) and skips blockquotes, fenced code blocks and
+#    tables. Naive comma-splitting would ingest half a sentence as a "term" and
+#    then feed that garbage to the model. _looks_like_prose() is the tripwire;
+#    `scripts/build_lexicon.py --check` exits 1 if anything trips it.
+
+[VERIFIED — real runs, not estimates]
+#   - full suite green: 314 passed (269 before this work)
+#   - scripts/build_lexicon.py --check -> 390 descriptors, 63 markers, exit 0;
+#     no term >45 chars, no sentence leaked; LRC metadata tags ([ti:], [ar:],
+#     [offset:]) excluded from markers
+#   - real stdio handshake against mcp_research_server.py: initialize OK,
+#     tools/list -> 9 tools, tools/call corpus_stats(docs) summarized 68,584
+#     chars of corpus in ~400 chars of output
+#   - registered as "acestep-research" in
+#     ~/.cline/data/settings/cline_mcp_settings.json (backup written alongside;
+#     verified by diff that nothing else was removed)
+#   - Kaggle tools deliberately NOT in autoApprove: they hit the network and
+#     spend GPU quota.
+
+[OUTSTANDING / NEXT]
+#   - Kaggle tools need credentials from app Settings (outside the repo) before
+#     they will do anything but report "No Kaggle credentials".
+#   - The corpus does not exist yet. Point --corpus at a folder of prose ABOUT the
+#     artist (e.g. /home/fritz/42/Datasets/research/<band>/). Candidate sources
+#     already catalogued in docs/master_track_research.md (isolated-tracks.com
+#     channel lists, box-set session notes, Clone Hero chart spreadsheets).
+#   - The stale VS Code extension MCP config still exists in the OLD format at
+#     ~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/
+#     cline_mcp_settings.json and its filesystem server entry is malformed
+#     (`npx -y` followed by directory paths and no package name). Repair or delete.
 
 [BASELINE SWEEP]
 # RUN 2026-09-15 — first pass complete. Tools: vulture 2.16, flake8 7.3.0
@@ -64,113 +104,20 @@
 #   .venv/bin/python -m flake8 --select=F401 . --exclude=.venv,kernels,__pycache__,scripts,.git
 #
 # RESULT: 3906 net lines of dead code removed; app boots clean (offscreen test).
-
-[FLAGGED - REVIEW / NOT AUTO-FIXED]
-# ---------------------------------------------------------------------------
-# HEALTH AUDIT REMOVED (2026-09-15, user request — "can be added later as a module")
-# Deleted files:
-#   workers/health_audit.py      (HealthAuditorWorker)
-#   workers/health.py            (legacy duplicate)
-#   modules/audit.py             (aggregate_health_summary)
-#   modules/homogeneity.py       (HomogeneityEngine)
-#   kernels/health_audit_kernel.py
-# dataset_manager.py: removed import, state (health_reports,
-#   startup_scan_notice_shown), UI (quality_badge, scan_btn, audit_backend_combo),
-#   methods (start_health_audit / on_file_audited / on_audit_completed),
-#   the save/load persistence of metadata.health_reports, the export quality
-#   gate, and all auto-fill/restore-detected-values paths that depended on it.
-#   Assistant tool `scan_health` now returns a friendly "not available" string.
-# config.py: dropped the stale "audit_backend" default key.
-# Docs updated: README.md, SPECIFICATION.md, docs/workflow.md.
-#
-# STILL PRESENT / INTENTIONALLY KEPT:
-#   core/kaggle_worker.py + workers/kaggle_consolidated.py — the REMOTE Kaggle
-#     pipeline writes its own audit_results.json artifact. Unrelated to the
-#     removed LOCAL audit; left intact.
-#
-# MCP health_audit tool ALSO REMOVED (2026-09-15, user: "will remake later fresh"):
-#   mcp_server.py       -> dropped the @mcp.tool health_audit() definition + docstring word.
-#   modules/mcp_tools.py -> deleted tool_health_audit() and its private helper
-#     _file_stats(); removed now-unused `os` + `wave` imports; docstring updated.
-#   Remaining MCP tools: list_tracks, dataset_summary, tag_track, curate_dataset.
-#   VERIFIED: both files parse; mcp_tools imports; `mcp_server.py --help` runs;
-#   grep project-wide for health_audit/tool_health/_file_stats = 0 hits.
-#
-# BACKWARD COMPAT VERIFIED: loading a legacy dataset.json that still contains
-#   metadata.health_reports does NOT crash (key is simply ignored).
-# VERIFIED: app boots; add/save/settings/assistant-tool flows all pass offscreen.
-# ---------------------------------------------------------------------------
-# (1) FALSE POSITIVES — do NOT remove (verified):
-#   Behavior CONFIRMED intentional by user = add is INSTANT, no auto-audit.
-#   dataset_manager.py:
-#     - _add_audio_paths docstring corrected (it falsely promised "kicks off
-#       the initial quality audit"; the audit call had been removed). Now
-#       documents: blank metadata, unlocked/editable, no audit on add.
-#     - Added module constant AUDIO_EXTS_ORDERED (deterministic tuple) for the
-#       file-dialog filter + folder error message. AUDIO_EXTS (set) previously
-#       fed " ".join(sorted(...)) -> the "; ;All Files (*)" filter lost.
-#     - add_audio_files now offers "Audio Files (...);;All Files (*)" so files
-#       with unusual extensions remain selectable.
-#   New tracks stay "locked": False by design (editable inline). Safe: the only
-#   "locked" readers are toggle_track_lock / status text / on_file_audited.
-#   VERIFIED: offscreen test added 2 wavs (2 added, re-add deduped to 0),
-#   locked=False, bpm/key/dur blank, table rows=2, app boots.
-# ---------------------------------------------------------------------------
-# (1) FALSE POSITIVES — do NOT remove (verified):
-modules/exporters.py:62  'name_fn' -> function parameter (public signature).
-workers/structural.py:557 'step'    -> lambda parameter in signal connect.
-#     (closeEvent / save_dataset_as also flagged at conf-60 — Qt overrides /
-#      menu-wired; NOT dead.)
-#
-# (2) REMAINING F401 (41 unused imports, peripheral files — next pass):
-workers/advanced.py(6) workers/structural.py(5) stem_separator.py(5)
-workers/health.py(4) workers/caption.py(3) workers/spatial.py(2)
-workers/kaggle_stems.py(2) workers/assistant.py(2) workers/kaggle_consolidated.py(1)
-widgets.py(1) modules/audit.py(1) modules/audio_analysis.py(1)
-core/kaggle_worker.py(1) dataset_manager.py(7 nested/lazy)
-#     NOTE: do NOT blindly strip — verify each; several modules(workers/health.py,
-#     workers/caption.py, workers/structural.py) import names that are re-imported
-#     lazily inside functions.
-#
-# (3) CANDIDATE FEATURE REMOVALS STATUS (2026-09-15):
-#   REMOVED: modules/dependency_installer.py  (ensure_package, runtime pip hazard; 0 importers)
-#   REMOVED: ui/secret_prompt.py              (SecretPromptDialog; 0 references)
-#   KEPT (LIVE — would break features if removed):
-#     modules/web_research.py  -> imported at module level by modules/musicbrainz.py:10
-#                                 and modules/rockstar_lookup.py:20 (fetch_page).
-#                                 Powers MusicBrainz + Rockstar lookups.
-#     modules/recommender.py   -> recommend_mvsep_models() used in workers/spatial.py:122,
-#                                 workers/structural.py:125, workers/instrument_detect.py:76.
-#                                 Powers content-aware MVSEP model recommendation.
-#   NOTE: these two were originally flagged as removal candidates but are NOT dead.
-#
-# (1) FALSE POSITIVES — do NOT remove (verified):
+# OUTSTANDING: 41 unused imports in peripheral files (workers/advanced.py(6),
+#   workers/structural.py(5), stem_separator.py(5), workers/health.py(4),
+#   workers/caption.py(3), ...). Do NOT blindly strip — several of those modules
+#   re-import names lazily inside functions. Verify each before removing.
 
 [RESOLVED / CACHE HIT]
-# 2026-09-15 audit pass:
-#   core/kaggle_worker.py  -> LIVE (invoked by start_remote_consolidated_pipeline
-#       via `kaggle kernels push -p core/kaggle_worker.py`; wired to kaggle_master_btn
-#       at dataset_manager.py:442). Prior marker note claiming it removable was WRONG.
-#   kaggle_health.py       -> REMOVED (0 references anywhere)
-#   modules/analyze_track.py -> REMOVED (0 importers, 308 lines)
-#   ui/main_window.py      -> REMOVED (orphaned stale DatasetManager fork, 2638 lines)
-#   ui/mvsep_tab.py        -> REMOVED (MVSepTab class, 0 refs, 577 lines; live MVSEP
-#       flow uses modules/mvsep_gui.py MVSEPDialog instead)
-#   modules/stats.py       -> RESTORED from HEAD. Working tree had been mangled into
-#       invalid Python (class method spliced at module level, 4-space indent) which
-#       crashed `show_stats_report` with SyntaxError. Now 65 lines, parses + imports.
-#   dataset_manager.py     -> FIXED unreachable `return` in execute_assistant_tool
-#       (dead branch after scan_health). Restored missing `detect_instruments` tool
-#       handler, which was declared in workers/assistant.py:182 but unhandled ->
-#       assistant fell through to "Unknown tool".
-#   dataset_manager.py     -> TRIMMED import block: removed ~20 unused imports
-#       (sys/tempfile/subprocess/math/struct/wave/zipfile/librosa/numpy/soundfile/
-#       OpenAI/QThread/Signal/QSize/QTime/QFont.../QPalette/leaderboards/
-#       TranscribeLyricsWorker/build_settings_tab) + de-duplicated a repeated
-#       QtWidgets import group.
-#   modules/homogeneity.py -> removed unused imports (asdict/json/Dict/Optional).
-#   project_backups/       -> untracked + deleted from disk (~200MB binary audio);
-#       added to .gitignore along with *.save.
-#   .changed_markers       -> was corrupted (raw git-diff dump + Binary flac lines,
-#       69KB). Reset to this marker index.
+# The detailed per-change notes that used to live here (Sep 15-16: the audio-format
+# expansion, the "Before You Add Tracks" warning dialog, the dead-code removal
+# list, the MOSS device_map=balanced multi-GPU crash and the kernels_output hang)
+# all described state that was ALREADY COMMITTED, i.e. cache hits. They are
+# recoverable verbatim from git if ever needed:
+#     git show HEAD:.changed_markers
+#     git show HEAD~N:.changed_markers
+# Keep this file transient: it should only ever describe changes NOT yet
+# committed. A stale index is worse than no index — it makes an agent scope its
+# work off information that no longer matches reality.
 

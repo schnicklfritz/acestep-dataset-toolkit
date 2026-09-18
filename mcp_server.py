@@ -22,14 +22,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
-        from mcp.server.fastmcp import FastMCP
-    except ImportError:
-        print("MCP server needs:  pip install 'mcp[cli]'", file=sys.stderr)
+        from modules.mcp_compat import load_server_class
+        ServerClass = load_server_class()
+    except ImportError as exc:
+        print(exc, file=sys.stderr)
         sys.exit(1)
 
     from modules import mcp_tools
 
-    mcp = FastMCP("ACE-Step Dataset Toolkit")
+    mcp = ServerClass("ACE-Step Dataset Toolkit")
 
     @mcp.tool()
     def list_tracks() -> str:

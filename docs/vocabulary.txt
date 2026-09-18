@@ -1,0 +1,393 @@
+# Extracted from descriptor_reference.md -- do not hand-edit.
+# Regenerate with: .venv/bin/python scripts/build_lexicon.py
+# Descriptor vocabulary: one term per line.
+whispered
+belted
+falsetto
+spoken word
+layered
+harmonized
+call-and-response
+ad-lib
+raspy vocal
+powerful belting
+breathy
+clean vocals
+screamed vocals
+shouted vocals
+harmony layer
+falsetto verse
+growl
+vibrato
+yodel
+blue yodel
+nasal
+strained
+wailing
+crooning
+sneering
+snarling
+chanting
+moaning
+humming
+spoken/shouted
+operatic
+theatrical
+conversational
+narrative
+declarative
+mournful
+pleading
+taunting
+celebratory
+quiet
+sparse
+building
+rising
+peak
+intense
+stripped back
+full
+low energy
+high energy
+explosive
+driving
+relentless
+swaggering
+menacing
+hypnotic
+frenzied
+furious
+triumphant
+somber
+eerie
+synth lead
+guitar solo
+organ solo
+drum fill
+bass groove
+strings swell
+brass stabs
+808 bass
+acoustic rhythm
+riff-driven
+power chords
+palm-muted riffs
+wah-wah lead
+slide guitar
+fingerpicked
+flatpicked
+strummed
+arpeggiated
+double-stop
+bend
+vibrato bar
+tremolo picking
+galloping rhythm
+blast beat
+half-time
+shuffle
+straight
+syncopated
+polyrhythmic
+fade in
+fade out
+abrupt cut
+swell
+drop out
+reverb-heavy
+dry
+filtered
+tape stop
+sidechain kick
+analog warmth
+lo-fi
+hi-fi
+raw production
+polished production
+live feel
+room reverb
+plate reverb
+spring reverb
+tape delay
+digital delay
+chorus effect
+flanger
+phaser
+distortion
+overdrive
+fuzz
+compression
+gated reverb
+monaural
+stereo
+wall of sound
+twangy vocals
+Tennessee twang
+Southern drawl
+Texan twang
+Appalachian nasal
+Carolina smooth
+raspy male vocal
+storytelling vocals
+heartfelt vocals
+raw emotive vocal
+conversational male vocals
+powerhouse raspy male vocal
+warm female vocals
+falsetto lead
+close-mic male
+acoustic guitar
+steel guitar
+pedal steel
+lap steel guitar
+fiddle
+banjo
+mandolin
+harmonica
+dobro
+upright bass
+acoustic piano
+organ
+autoharp
+jug
+washboard
+electric guitar (clean)
+Telecaster twang
+hard-hitting country drums
+brushed drums
+808 sub bass
+baritone guitar
+pedal steel swells
+fiddle melody
+acoustic guitar strumming
+acoustic guitar picking
+banjo picking
+flat-picking
+polished Nashville production
+radio-ready
+radio-friendly
+DIY-rough recording
+intimate acoustic production
+vinyl crackle
+warm production
+nostalgic production
+polished country-radio production
+era-standard production
+heartfelt
+nostalgic
+warm
+earnest
+uplifting
+reflective
+storytelling
+honky-tonk
+outlaw country
+country-soul
+Americana
+bluegrass
+country-folk
+country-pop crossover
+lonesome
+weary
+wistful
+defiant
+playful
+rowdy
+tender
+bittersweet
+haunting
+sincere hillbilly vocals
+high nasal strained timbre
+lonesome conservative
+delivery
+narrow melodic range
+naturally breaking half-yodel
+blues-drenched
+singing
+sincere declarative vocals
+joyful upbeat delivery
+with backing vocals
+weathered vocal
+plaintive delivery
+storytelling vocal
+piercing high-pitched steel guitar
+high whining sound
+visceral mournfulness
+non-pedal steel guitar
+treble-string focused
+plays high on the neck
+singing almost-vocal counter-line
+weeping guitar
+celebratory steel fills
+shouted steel guitar interjections
+double-stop fiddle style
+"garden seed" fiddle
+short fiddle fills
+supports the harmonic movement
+mournful fiddle
+lively driving fiddle
+fiddle intro
+peppy fiddle breaks
+single-string melody
+driving melodic fiddle lead
+bright declarative fiddle phrase
+Tommy Jackson-style fiddle
+sparse stripped-down arrangement
+honky-tonk and country blues
+voice-steel-and-fiddle at the center
+steel and fiddle trade short fills
+radio-friendly compact arrangement
+acoustic guitar and bass three-beat pulse
+monaural era-standard production
+simple driving chord progression
+upbeat energetic tempo
+country gospel / gospel-country
+deep baritone vocal
+brooding delivery
+poetic delivery
+theatrical delivery
+drunken slur
+bluesy shout
+screaming
+hypnotic repetition
+lizard-king intensity
+sinister
+seductive
+ecstatic
+desperate
+Vox Continental organ
+Fender Rhodes piano
+Gibson SG guitar
+no bass guitar (organ left-hand bass)
+organ bass pedals
+jazz-influenced drums
+ride cymbal
+flamenco guitar
+feedback
+psychedelic
+ominous
+nocturnal
+cinematic
+brooding
+mysterious
+desert-like
+rain-soaked
+carnival-like
+funereal
+apocalyptic
+erotic
+drug-induced
+1960s analog production
+extended instrumental
+sections
+organ-driven
+guitar-driven
+dynamic shifts
+tempo changes
+spoken word passages
+theatrical builds
+psychedelic rock
+acid rock
+blues rock
+art rock
+garage rock
+jazz rock
+nasal vocal
+high-pitched wail
+haunting delivery
+eerie vocal
+melodic vocal
+sorrowful
+haunting harmonies
+double-tracked vocals
+reverb-drenched vocals
+downtuned guitar
+heavy riffing
+blues-based leads
+sustained notes
+trilling
+distorted bass
+thick bass tone
+rumbling bass
+swinging drums
+thunderous drums
+dynamic drumming
+tom-heavy fills
+crash cymbal
+doom-laden
+occult
+evil
+dark
+heavy
+industrial
+bleak
+1970s analog production
+heavy low-end
+riff-based
+extended instrumental sections
+acoustic interludes
+atmospheric intros
+heavy metal
+doom metal
+hard rock
+proto-metal
+progressive rock
+gritty delivery
+high-pitched snarl
+sneering delivery
+swaggering delivery
+cheeky delivery
+aggressive
+raucous
+anthemic
+growled vocals
+strained vocal
+whooping
+clean-to-crunchy guitar
+open chords
+pull-off
+hammer-on
+driving rhythm guitar
+tight rhythm section
+simple riffs
+simple bass lines
+driving bass
+tight drums
+straight beat
+hard-hitting
+drums
+snare-heavy
+kick-drum driven
+hi-hat work
+no frills
+energetic
+rebellious
+party
+raw
+cheeky
+punchy
+in-your-face
+simple verse-chorus
+guitar solos
+breakdowns
+rock and roll
+heavy rock
+pub rock
+honky-tonk country
+country gospel
+country blues
+sincere hillbilly
+high nasal strained
+weathered
+plaintive
+double-stop fiddle
+sincere
+era-standard
+stripped-down
+deep baritone
+poetic
+1960s analog
+melodic
+1970s analog
+raspy

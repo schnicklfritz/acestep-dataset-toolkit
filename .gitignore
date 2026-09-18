@@ -52,3 +52,7 @@ project_backups/
 
 # Local lyrics normalization profiles (per-band rules — user data, not source)
 lyrics_profiles/
+
+# Research corpus for the MCP research server: third-party article/review text,
+# gathered locally. Never commit it; regenerate with the tools instead.
+docs/research/

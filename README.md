@@ -131,12 +131,35 @@ caption audit, manifest validation, health scan, instrument detection, **sound
 profile**, and **curate dataset for a target sound** (picks the genre/artist/
 instrument gaps to fill so the dataset converges on a specific sound).
 
-### MCP server
-The app can run as a **Model Context Protocol server**
-(`python mcp_server.py --dataset path/to/dataset.json`), exposing dataset
-summary, tagging, and curation tools to any MCP
-client (Claude Desktop, Cursor, custom agents). Requires `pip install mcp`.
-This is rare in dataset apps — your dataset becomes directly steerable by AI.
+### MCP servers
+The app ships **two** MCP servers (both optional, both need `pip install "mcp[cli]"`):
+
+1. **Dataset server** — `python mcp_server.py --dataset path/to/dataset.json`.
+   Exposes dataset summary, tagging, and curation tools to any MCP client
+   (Claude Desktop, Cursor, Cline, custom agents). This is rare in dataset apps —
+   your dataset becomes directly steerable by AI.
+
+2. **Research server** — `python mcp_research_server.py --corpus <dir>`. Points an
+   agent at a folder of prose about your artists (reviews, session notes,
+   interviews, liner notes) and inducts the vocabulary those sources actually
+   use, so captions are grounded in evidence rather than guesswork:
+   * `corpus_stats`, `grep_corpus` — census and line-level evidence
+   * `induct_terms` — which known descriptors real sources use, ranked by how many
+     *distinct files* use them (one file repeating a term is one person's idiolect)
+   * `unlisted_terms` — community terms your vocabulary is missing
+   * `vocab_diff`, `spec_coverage` — compare vocabularies, find spec gaps
+   * `kaggle_kernel_status` / `kaggle_kernel_log` — diagnose a failed Kaggle run
+
+   **No research tool returns raw document text.** `corpus_stats` returns counts
+   only; `grep_corpus` returns only lines an explicit regex matched, capped. That
+   is enforced in `modules/research_tools.py`, so connecting an agent to a
+   multi-megabyte corpus cannot blow its context window.
+
+Build the descriptor vocabulary from the master reference doc with:
+
+```bash
+.venv/bin/python scripts/build_lexicon.py --check   # -> docs/vocabulary.txt
+```
 
 ## 🔐 Configurability & security
 
@@ -191,7 +214,8 @@ pip install transformers torch      # CLAP zero-shot instrument tagging
 dataset_manager.py          Entry point (PySide6 desktop app)
 config.py                   Defaults + secret-key policy + settings.json
 stem_separator.py           MVSEP 3-stage separation (PolarFormer first stage)
-mcp_server.py               MCP server (optional, needs `mcp`)
+mcp_server.py               MCP server — dataset tools (optional, needs `mcp`)
+mcp_research_server.py      MCP server — corpus research / vocabulary induction
 models.json                 Curated model catalog (sources, backend, notes, leaderboards)
 modules/
   tagger.py                 BPM/key + spectral/CLAP instrument tagging, hybrid captions
@@ -202,6 +226,8 @@ modules/
   llm_client.py             Pluggable LLM providers (DeepSeek/Gemini/Groq/OpenRouter/local)
   model_manager.py          Catalog downloader (HF / GitHub)
   mcp_tools.py              Headless tools for the MCP server
+  mcp_compat.py             mcp 1.x FastMCP / 2.x MCPServer import shim
+  research_tools.py         Corpus research: census, grep, vocabulary induction
   kaggle.py                 Private audio-dataset upload + kernel push/wait/download
   mvsep_api.py              MVSEP live algorithm list + separation jobs
   config_store.py           settings.json + encrypted secrets
