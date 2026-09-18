@@ -248,6 +248,60 @@ class TestAudioLimit:
         assert windows[0][0] == 0
 
 
+class TestAudioDiscovery:
+    """Kaggle mounts private datasets in more than one place.
+
+    A real run found nothing because the dataset landed at
+    /kaggle/input/datasets/<owner>/<slug>/ while the kernel looked in
+    /kaggle/input/<slug>/. kernels/stem_separation_kernel.py had already solved
+    this; the MOSS kernel assumed the old single path.
+    """
+
+    def test_walks_the_tree_instead_of_one_folder(self, kernel_source):
+        assert "def _walk_for_audio(base):" in kernel_source
+        assert "os.walk(base)" in kernel_source
+
+    def test_falls_back_to_the_whole_input_mount(self, kernel_source):
+        assert '_walk_for_audio("/kaggle/input")' in kernel_source
+        assert "was empty; found audio elsewhere" in kernel_source
+
+    def test_does_not_assume_the_old_mount_layout(self, kernel_source):
+        # The old code did Path(AUDIO_FOLDER).rglob("*") only.
+        assert "Path(AUDIO_FOLDER)" not in kernel_source
+
+    def test_no_audio_is_a_hard_failure_not_an_empty_result(self, kernel_source):
+        # Writing a zero-track result made the app report a confusing "no
+        # output" error instead of "there was no audio".
+        assert "NO AUDIO FOUND" in kernel_source
+        assert "No supported audio found under" in kernel_source
+
+    def test_empty_result_would_have_hidden_the_cause(self, kernel_source):
+        # Guard against a regression to the silent-empty behaviour: the raise
+        # must come BEFORE the results loop.
+        assert kernel_source.index("No supported audio found under") < \
+            kernel_source.index("results = []")
+
+    def test_walk_helper_finds_nested_audio(self, substituted, tmp_path):
+        # Use the shared extractor, not a hand-rolled regex: `.*?\n\n` stops at
+        # the first blank line, which falls INSIDE this helper's docstring and
+        # truncates it into an unterminated string literal.
+        ns = {"os": __import__("os"),
+              "SUPPORTED_FORMATS": {".flac", ".mp3", ".wav"}}
+        body = _top_level_function(substituted, "_walk_for_audio")
+        assert body, "_walk_for_audio not found"
+        exec(body, ns)
+
+        # Reproduce the real mount layout that broke the run.
+        nested = tmp_path / "datasets" / "owner" / "ace-audio-abc123"
+        nested.mkdir(parents=True)
+        (nested / "School_Days.flac").write_bytes(b"x")
+        (nested / "notes.txt").write_text("ignore me")
+
+        found = ns["_walk_for_audio"](str(tmp_path))
+        assert len(found) == 1
+        assert found[0].endswith("School_Days.flac")
+
+
 class TestDiagnostics:
     """A failed Kaggle run must explain itself in its own log."""
 

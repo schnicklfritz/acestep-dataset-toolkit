@@ -252,9 +252,19 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
                 result_path = os.path.join(base, "moss_out.json")
                 break
         if not result_path:
+            # List what WAS downloaded: "no output" alone gives nothing to act
+            # on, and this failure has already happened once unexplained.
+            found = sorted(
+                os.path.relpath(os.path.join(base, n), out_dir)
+                for base, _dirs, names in os.walk(out_dir)
+                for n in names
+            )
             raise RuntimeError(
-                "Kaggle job finished but produced no moss_out.json -- check "
-                "the kernel output."
+                "Kaggle job finished but no moss_out.json was downloaded.\n\n"
+                f"Files actually downloaded ({len(found)}):\n  "
+                + ("\n  ".join(found[:40]) or "(none)")
+                + "\n\nThe kernel normally writes /kaggle/working/moss_out.json. "
+                  "Check the run log for the real cause."
             )
         with open(result_path, encoding="utf-8") as f:
             payload = json.load(f)

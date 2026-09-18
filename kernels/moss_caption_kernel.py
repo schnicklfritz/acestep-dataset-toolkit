@@ -59,7 +59,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 SUPPORTED_FORMATS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
 
@@ -357,16 +356,47 @@ def lyrics_for_track(path, audio=None):
 # ---------------------------------------------------------------------------
 # Discover audio
 # ---------------------------------------------------------------------------
-audio_files = sorted(
-    str(p) for p in Path(AUDIO_FOLDER).rglob("*")
-    if p.is_file() and p.suffix.lower() in SUPPORTED_FORMATS
-)
-print(f"[moss] {len(audio_files)} audio file(s) under {AUDIO_FOLDER}", flush=True)
+def _walk_for_audio(base):
+    """Every supported audio file under ``base``, recursively.
+
+    Kaggle mounts private datasets inconsistently: sometimes at
+    ``/kaggle/input/<slug>``, other times nested under
+    ``/kaggle/input/datasets/<owner>/<slug>``. AUDIO_FOLDER names the expected
+    location, but the mount is what it is -- so if that folder is empty the
+    whole input tree is searched rather than guessing at a path.
+
+    This mirrors kernels/stem_separation_kernel.py, which hit the same problem
+    first.
+    """
+    return sorted(
+        os.path.join(root, name)
+        for root, _dirs, names in os.walk(base)
+        for name in names
+        if os.path.splitext(name)[1].lower() in SUPPORTED_FORMATS
+    )
+
+
+audio_files = _walk_for_audio(AUDIO_FOLDER)
+if not audio_files and os.path.isdir("/kaggle/input"):
+    audio_files = _walk_for_audio("/kaggle/input")
+    if audio_files:
+        print(f"[moss] {AUDIO_FOLDER} was empty; found audio elsewhere under "
+              f"/kaggle/input instead.", flush=True)
+
+print(f"[moss] {len(audio_files)} audio file(s) to process", flush=True)
+
 if not audio_files:
+    # FAIL LOUDLY. Writing a zero-track result would surface in the app as a
+    # confusing "no output" problem instead of "there was no audio to read".
+    print("[moss] NO AUDIO FOUND. Input tree:", flush=True)
     for root, _dirs, names in os.walk("/kaggle/input"):
         print("  DIR:", root, flush=True)
-        for n in names[:20]:
+        for n in names[:50]:
             print("  FILE:", os.path.join(root, n), flush=True)
+    raise SystemExit(
+        f"No supported audio found under {AUDIO_FOLDER} or /kaggle/input. "
+        f"Supported extensions: {sorted(SUPPORTED_FORMATS)}"
+    )
 
 
 # ---------------------------------------------------------------------------
