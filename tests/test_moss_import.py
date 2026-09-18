@@ -104,11 +104,36 @@ class TestApplyMossOutput:
         s = [x for x in dataset["samples"] if x["filename"] == "song_a.mp3"][0]
         assert LYRICS_BACKUP in s
 
-    def test_unmatched_tracks_are_reported_not_blanked(self, dataset):
+    def test_unknown_results_are_reported_not_blanked(self, dataset):
+        # A result the dataset has never heard of (e.g. the dataset changed
+        # while the Kaggle run was in flight) must be reported, not applied.
         before = [dict(s) for s in dataset["samples"]]
         report = apply_moss_output(dataset, {"nonexistent.mp3": {"style": "x"}})
-        assert "song_a.mp3" in report["unmatched"]
+        assert "nonexistent.mp3" in report["unknown_results"]
         assert dataset["samples"][0]["caption"] == before[0]["caption"]
+
+    def test_tracks_with_no_result_are_reported_separately(self, dataset):
+        # Two DIFFERENT problems, kept apart so a failure is diagnosable:
+        # results the dataset doesn't know vs dataset tracks with no result.
+        report = apply_moss_output(dataset, {"nonexistent.mp3": {"style": "x"}})
+        assert report["unknown_results"] == ["nonexistent.mp3"]
+        assert "song_a.mp3" in report["no_result"]
+        assert report["matched"] == 0
+
+    def test_matches_by_basename_of_audio_path_too(self):
+        # The kernel stages files by basename(audio_path), so that is the name
+        # MOSS reports back. A dataset whose filename differs still matches.
+        from modules.dataset_schema import new_sample
+
+        ds = {"samples": [new_sample(
+            filename="School Days.flac",          # display name, with a space
+            audio_path="/music/School_Days.flac",  # real file on disk
+        )]}
+        report = apply_moss_output(
+            ds, {"School_Days.flac": {"style": "doom", "lyrics": ""}}
+        )
+        assert report["matched"] == 1
+        assert ds["samples"][0]["caption"] == "doom"
 
     def test_matched_counts_only_real_results(self, dataset, moss_results):
         report = apply_moss_output(dataset, moss_results)

@@ -102,8 +102,14 @@ def get_client(config, provider=None, role=None):
     key = _key_value(config, info)
     if name != "local" and not key:
         raise ValueError(
-            f"{info['label']} needs an API key — set it in ⚙ Settings. "
-            f"{info.get('note', '')}"
+            f"No LLM is configured for this step ({info['label']} has no key).\n\n"
+            "Open ⚙ Settings → LLM Provider and either pick a provider or paste "
+            "a key.\n\n"
+            "Free tiers (no card needed):\n"
+            "  • Groq      — console.groq.com/keys\n"
+            "  • Gemini    — aistudio.google.com/apikey\n"
+            "  • OpenRouter— openrouter.ai/keys\n\n"
+            f"What this provider needs: {info.get('note', '')}"
         )
     from openai import OpenAI
 

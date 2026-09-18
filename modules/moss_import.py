@@ -110,25 +110,41 @@ def apply_moss_output(dataset, results, dry_run=False):
     Returns a report dict:
         matched, unmatched, overwritten, filled, errored, prompt_override_fixed
 
-    Matching is by ``filename`` (not index) so a reordered dataset still maps
-    correctly. A track with no result is left untouched and reported as
-    unmatched -- never silently blanked.
+    Matching keys on BOTH ``filename`` and ``basename(audio_path)``, because the
+    kernel names each result after the staged file (``basename(audio_path)``)
+    while a dataset may store a different ``filename``. Keying on only one of
+    them silently produced "0 tracks written" with no clue why.
+
+    A track with no result is left untouched -- never silently blanked.
     """
     report = {
-        "matched": 0, "unmatched": [], "overwritten": 0,
-        "filled": 0, "errored": [], "prompt_override_fixed": 0,
+        "matched": 0,
+        "unknown_results": [],   # MOSS returned files this dataset does not have
+        "no_result": [],         # dataset tracks MOSS returned nothing for
+        "overwritten": 0, "filled": 0, "errored": [],
+        "prompt_override_fixed": 0,
     }
 
     by_name = {}
     for sample in dataset.get("samples", []):
-        if isinstance(sample, dict):
-            by_name[sample.get("filename", "")] = sample
+        if not isinstance(sample, dict):
+            continue
+        name = (sample.get("filename") or "").strip()
+        if name:
+            by_name.setdefault(name, sample)
+        # Also index the on-disk basename: the kernel stages files by
+        # basename(audio_path), so this is the name MOSS reports back.
+        base = os.path.basename((sample.get("audio_path") or "").strip())
+        if base:
+            by_name.setdefault(base, sample)
 
+    consumed = set()
     for filename, payload in results.items():
         sample = by_name.get(filename)
         if sample is None:
-            report["unmatched"].append(filename)
+            report["unknown_results"].append(filename)
             continue
+        consumed.add(id(sample))
         if payload.get("error"):
             report["errored"].append(filename)
             continue
@@ -162,10 +178,13 @@ def apply_moss_output(dataset, results, dry_run=False):
         if not dry_run:
             sample["prompt_override"] = True
 
-    # Tracks with no MOSS result: report, do not touch, do not blank.
-    for filename in by_name:
-        if filename and filename not in results:
-            report["unmatched"].append(filename)
+    # Dataset tracks MOSS returned nothing for: report, do not touch.
+    for sample in dataset.get("samples", []):
+        if not isinstance(sample, dict) or id(sample) in consumed:
+            continue
+        name = (sample.get("filename") or "").strip()
+        if name:
+            report["no_result"].append(name)
 
     report["prompt_override_fixed"] = normalize_prompt_override(
         dataset, dry_run=dry_run
@@ -205,9 +224,12 @@ def _main(argv=None):
     print(f"filled (was blank): {report['filled']}")
     print(f"errored entries  : {len(report['errored'])}")
     print(f"prompt_override  : {report['prompt_override_fixed']} coerced to bool")
-    if report["unmatched"]:
-        print(f"unmatched ({len(report['unmatched'])}): "
-              + ", ".join(report["unmatched"][:10]))
+    if report["unknown_results"]:
+        print(f"results with no matching track ({len(report['unknown_results'])}): "
+              + ", ".join(report["unknown_results"][:10]))
+    if report["no_result"]:
+        print(f"tracks with no result ({len(report['no_result'])}): "
+              + ", ".join(report["no_result"][:10]))
 
     if args.dry_run:
         print("\n--dry-run: nothing written")

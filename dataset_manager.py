@@ -1397,23 +1397,52 @@ class DatasetManager(QMainWindow):
         self.on_table_selection_changed()
         self.refresh_moss_track_picker()
 
+        if report["matched"] == 0:
+            # Say WHY, with names. A silent "0 written" is what made this take
+            # several rounds to diagnose: the results were for a different set
+            # of tracks than the dataset currently loaded.
+            got = list(results)[:3]
+            have = [s.get("filename", "?")
+                    for s in self.dataset.get("samples", [])][:3]
+            QMessageBox.warning(
+                self, "MOSS Returned Nothing Usable",
+                f"MOSS returned {len(results)} result(s), but none matched the "
+                "currently-loaded dataset.\n\n"
+                f"MOSS returned:\n    {chr(10) + '    '.join(got)}\n\n"
+                f"Dataset has:\n    {chr(10) + '    '.join(have)}\n\n"
+                "If those look like different songs, a different dataset was "
+                "loaded while the run was in progress — re-run MOSS with the "
+                "right dataset open.",
+            )
+            self.moss_status.setText(
+                f"0 of {len(results)} result(s) matched this dataset — see the "
+                "dialog for the names."
+            )
+            return
+
         self.moss_status.setText(
             f"Done — {report['matched']} track(s) written "
             f"({report['overwritten']} replaced, previous kept in "
             f"caption_before_moss). {report['prompt_override_fixed']} "
             f"prompt_override value(s) normalised to bool."
-            + (f" No result for {len(report['unmatched'])} track(s)."
-               if report["unmatched"] else "")
+            + (f" No result for {len(report['no_result'])} track(s)."
+               if report["no_result"] else "")
+            + (f" {len(report['unknown_results'])} result(s) matched no track."
+               if report["unknown_results"] else "")
         )
         self.status_label.setText(
-            "MOSS finished. Run the Structural Tag Creator to format the "
-            "captions and lyrics into [Section] tags."
+            "MOSS finished. Next: 🎶 Structural Pipeline tab → "
+            "✨ Structural Tag Creator."
         )
         QMessageBox.information(
             self, "MOSS Captioning Complete",
             f"Wrote raw style + lyrics for {report['matched']} track(s).\n\n"
-            "Next: run the Structural Tag Creator to format them into the "
-            "ACE-Step caption and [Section]-tagged lyrics.\n\n"
+            "Next step — format them into the ACE-Step caption and "
+            "[Section]-tagged lyrics:\n\n"
+            "    🎶 Structural Pipeline tab → ✨ Structural Tag Creator\n\n"
+            "That step uses an LLM. If none is configured, open "
+            "⚙ Settings → LLM Provider and pick one (Groq, Gemini and "
+            "OpenRouter all have free tiers).\n\n"
             "Nothing was destroyed — previous values are in "
             "caption_before_moss / raw_lyrics_before_moss.",
         )
