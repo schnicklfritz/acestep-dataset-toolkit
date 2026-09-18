@@ -47,7 +47,9 @@ CAPTION_RULES = (
     "6. No headings, no field labels, no bullet points, no markdown. Output ONLY "
     "the caption text.\n"
     "7. Do not transcribe, quote, or repeat lyrics — describe the vocal delivery "
-    "instead. Never repeat a word or phrase for emphasis."
+    "instead. Never repeat a word or phrase for emphasis.\n"
+    f"8. Keep the WHOLE caption to the keywords plus 2-3 sentences: about 70-90 "
+    f"words, and NEVER more than {120}. A long essay is not a caption."
 )
 
 # §2 lyrics architecture + §3 descriptor limits. Consumed by the Tag Creator and
@@ -59,6 +61,15 @@ TAG_HARD_MAX = 15            # §1.1 absolute maximum
 LYRIC_MIN_SYLLABLES = 6      # §2 syllable cadence
 LYRIC_MAX_SYLLABLES = 10
 LYRIC_FLAG_SYLLABLES = 12    # §2: flag lines exceeding this
+
+# The schema is 5-12 keywords plus 2-3 sentences, i.e. roughly 70-90 words.
+# Anything far beyond that is not a caption: a 2000+ word output is either a
+# decoding runaway or a provider ignoring max_tokens (observed: a caption ran to
+# ~2000 words on an endpoint configured with max_tokens=512), and it is unusable
+# as training data. Enforced in caption_quality, and enforced by trimming in the
+# backends because a provider's token cap cannot be trusted.
+CAPTION_MAX_WORDS = 120
+CAPTION_MAX_CHARS = 900
 
 LYRICS_RULES = (
     "- Every section starts with a Capitalized marker in square brackets: "

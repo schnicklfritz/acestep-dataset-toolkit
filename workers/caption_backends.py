@@ -14,6 +14,8 @@ import os
 
 from pathlib import Path
 
+from modules.caption_quality import trim_to_caption
+
 AUDIO_MIME = {
     ".wav": "audio/wav",
     ".mp3": "audio/mpeg",
@@ -78,7 +80,8 @@ class GeminiBackend:
             response = client.models.generate_content(
                 model=self.model, contents=[audio_part, prompt], config=gen_config
             )
-            return (response.text or "").strip()
+            # Trim: a provider may ignore max_tokens entirely and return a tome.
+            return trim_to_caption((response.text or "").strip())
         except ImportError:
             pass
         except Exception as e:  # noqa: BLE001 — real API errors surface clearly
@@ -94,7 +97,7 @@ class GeminiBackend:
                 self.model, system_instruction=system_prompt or None
             )
             response = model.generate_content([uploaded, prompt])
-            return (response.text or "").strip()
+            return trim_to_caption((response.text or "").strip())
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(
                 "Gemini SDK not installed or failed. Install with: "
@@ -158,4 +161,6 @@ class CustomOpenAICompatBackend:
                 self.config.get("caption_presence_penalty", 0.0) or 0
             ),
         )
-        return (response.choices[0].message.content or "").strip()
+        return trim_to_caption(
+            (response.choices[0].message.content or "").strip()
+        )

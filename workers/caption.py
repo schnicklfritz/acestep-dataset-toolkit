@@ -4,6 +4,7 @@ from PySide6.QtCore import QThread, Signal
 from workers.deepseek import DeepSeekMusicOrchestrator
 from workers.caption_backends import GeminiBackend, CustomOpenAICompatBackend
 from modules import caption_spec
+from modules.caption_quality import trim_to_caption
 from modules.tagger import analyze_audio, compose_caption
 
 # ---------------------------------------------------------------------------
@@ -341,7 +342,9 @@ class RemoteCaptionWorker(QThread):
                         self.config.get("caption_frequency_penalty", 0.3) or 0
                     ),
                 )
-                caption = response.choices[0].message.content.strip()
+                caption = trim_to_caption(
+                    (response.choices[0].message.content or "").strip()
+                )
             except Exception as e:
                 caption = f"LLM error: {e}"
             self.finished_sample.emit(sid, self._blend(sid, caption))

@@ -18,10 +18,12 @@ from modules.caption_quality import (
     is_conforming,
     max_consecutive_repeat,
     tag_prefix,
+    trim_to_caption,
 )
 from modules.caption_spec import (
     BUILTIN_SYSTEM_PROMPT,
     CAPTION_FORMULA,
+    CAPTION_MAX_WORDS,
     COUNTER_EXAMPLE,
     DEFAULT_TASK_PROMPT,
     GOLD_EXAMPLE,
@@ -167,6 +169,41 @@ def test_helpers_behave():
     assert is_conforming(GOLD_EXAMPLE) is True
     assert is_conforming(COUNTER_EXAMPLE) is False
     assert MAX_DESCRIPTORS == 3
+
+
+def test_trim_is_a_no_op_for_a_conforming_caption():
+    assert trim_to_caption(GOLD_EXAMPLE) == GOLD_EXAMPLE
+
+
+TAGS = "hard rock, drums, bass, male vocal, raw production, 1970s analog"
+TOME = TAGS + ". " + "The band plays with conviction and the guitars ring out. " * 40
+
+
+def test_an_over_long_caption_is_flagged():
+    """A 2000-word caption is unusable; the token cap could not be trusted."""
+    issues = check_caption(TOME)
+    assert any("flow sentences" in i for i in issues)
+    assert any("words" in i for i in issues)
+
+
+def test_trim_brings_a_tome_back_to_the_schema():
+    trimmed = trim_to_caption(TOME)
+    assert len(trimmed.split()) <= CAPTION_MAX_WORDS
+    assert trimmed.startswith("hard rock, drums, bass, male vocal")
+    assert trimmed.endswith(".")          # whole sentences only, never a cut
+
+
+def test_trim_caps_a_runaway_tag_list():
+    head = ", ".join(f"tag{i}" for i in range(40))
+    out = trim_to_caption(head + ". It builds to a peak and fades out now.")
+    assert len(out.split(".")[0].split(",")) <= TAG_MAX
+
+
+def test_trim_keeps_flow_from_a_single_run_on_sentence():
+    """A model that emits one 500-word 'sentence' must still yield a caption."""
+    out = trim_to_caption(TAGS + ". " + "word " * 500 + "end.")
+    assert len(out.split()) <= CAPTION_MAX_WORDS
+    assert out.count(".") >= 2            # tag list + at least one flow sentence
 
 
 # --------------------------------------------------------------------------

@@ -16,6 +16,8 @@ not repeat. Pass captions only.
 import re
 
 from modules.caption_spec import (
+    CAPTION_MAX_CHARS,
+    CAPTION_MAX_WORDS,
     TAG_HARD_MAX,
     TAG_MAX,
     TAG_MIN,
@@ -135,6 +137,20 @@ def check_caption(text):
             f"{sentences} flow sentence(s); the schema requires "
             f"{MIN_FLOW_SENTENCES}-{MAX_FLOW_SENTENCES} after the tag list"
         )
+    elif sentences > MAX_FLOW_SENTENCES:
+        issues.append(
+            f"{sentences} flow sentences; the schema allows at most "
+            f"{MAX_FLOW_SENTENCES} — a caption is not an essay"
+        )
+
+    words = len(body.split())
+    if words > CAPTION_MAX_WORDS:
+        issues.append(
+            f"{words} words; the schema allows {CAPTION_MAX_WORDS} "
+            f"(keywords + 2-3 sentences)"
+        )
+    if len(body) > CAPTION_MAX_CHARS:
+        issues.append(f"{len(body)} characters; the schema allows {CAPTION_MAX_CHARS}")
 
     count, phrase = max_ngram_repeat(body)
     if count >= REPEAT_MIN:
@@ -149,3 +165,42 @@ def check_caption(text):
 def is_conforming(text):
     """True when a caption satisfies every schema check."""
     return not check_caption(text)
+
+
+def trim_to_caption(text, max_words=CAPTION_MAX_WORDS):
+    """Trim an over-long caption back to the schema shape.
+
+    Keeps the front-loaded tag list (capped at ``TAG_MAX`` keywords) and then as
+    many whole sentences as fit the word budget. Whole sentences only — never a
+    cut mid-sentence — so the result is still usable training data.
+
+    This exists because the provider's ``max_tokens`` cannot be trusted: a caption
+    came back at ~2000 words from an endpoint configured with 512.
+    """
+    body = (text or "").strip()
+    head, _, tail = body.partition(".")
+    tags = [t.strip() for t in head.split(",") if t.strip()]
+
+    # Nothing to do? Return the original string untouched, byte for byte.
+    if len(body.split()) <= max_words and len(tags) <= TAG_MAX:
+        return body
+
+    keep = tags[:TAG_MAX]
+    parts = [", ".join(keep) + "."] if keep else []
+    budget = max_words - len(", ".join(keep).split())
+
+    for sentence in re.split(r"(?<=[.!?])\s+", tail.strip()):
+        sentence = sentence.strip()
+        cost = len(sentence.split())
+        if not cost:
+            continue
+        if cost > budget:
+            # One run-on sentence larger than the whole budget: keep as many
+            # words as fit rather than dropping the flow narrative entirely.
+            keep_words = sentence.split()[:max(0, budget)]
+            if keep_words:
+                parts.append(" ".join(keep_words).rstrip(",;:") + ".")
+            break
+        parts.append(sentence if sentence.endswith((".", "!", "?")) else sentence + ".")
+        budget -= cost
+    return " ".join(parts).strip()
