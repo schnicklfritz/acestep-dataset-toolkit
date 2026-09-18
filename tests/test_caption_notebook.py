@@ -77,6 +77,19 @@ def test_build_refuses_to_emit_an_unfilled_placeholder(monkeypatch, tmp_path):
         bcn.build(str(tmp_path / "out.ipynb"))
 
 
+def test_a_plain_py_copy_is_also_emitted(tmp_path):
+    """An .ipynb is JSON; the .py is what actually gets pasted into Kaggle."""
+    path = tmp_path / "cell.ipynb"
+    bcn.build(str(path), tag="acdc")
+    py_path = tmp_path / "cell.py"
+    assert py_path.is_file()
+    text = py_path.read_text(encoding="utf-8")
+    ast.parse(text)
+    assert "{{" not in text
+    assert "Run All" in text
+    assert bcn.DEFAULT_PY.endswith("kaggle_caption_cell.py")
+
+
 def test_a_missing_anchor_is_reported_not_ignored(monkeypatch, tmp_path):
     bad = tmp_path / "kernel.py"
     bad.write_text("X = 1\n", encoding="utf-8")
