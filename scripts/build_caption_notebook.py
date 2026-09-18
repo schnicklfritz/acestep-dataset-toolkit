@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Build a ready-to-run Kaggle notebook for ACE-Step captioning.
+
+``kernels/caption_kernel.py`` is a TEMPLATE: its ``{{PLACEHOLDER}}`` tokens are
+filled by ``workers/caption.py`` at push time. Pasting it into a Kaggle notebook by
+hand does not work, and because ``{{X}}`` is VALID PYTHON (a set containing a set)
+it fails late with a bare ``NameError`` rather than a syntax error.
+
+This script performs the same substitution offline and writes a complete ``.ipynb``
+with the GPU/internet flags set, so the notebook can be imported straight into
+Kaggle. The audio folder is AUTO-RESOLVED at runtime, so nothing needs editing
+after import.
+
+    .venv/bin/python scripts/build_caption_notebook.py
+
+Writes ``docs/kaggle_caption_cell.ipynb``. Values come from
+``modules/caption_spec.py`` (the ACE-Step 1.5XL schema), so regenerating keeps the
+notebook in step with the app's captioner.
+"""
+import argparse
+import ast
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from modules import caption_spec                                    # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+KERNEL = os.path.join(ROOT, "kernels", "caption_kernel.py")
+DEFAULT_OUT = os.path.join(ROOT, "docs", "kaggle_caption_cell.ipynb")
+
+# Audio folder resolution: /kaggle/input/<slug> depends on how the data was
+# attached, so fall back to the first input directory that holds audio. Inserted
+# right after SUPPORTED_FORMATS so that extension set already exists -- and BEFORE
+# audio_files is built, so it must not reference it.
+AUTO_RESOLVE_ANCHOR = "SUPPORTED_FORMATS = {"
+AUTO_RESOLVE = '''
+# ---- AUTO-RESOLVED AUDIO FOLDER -------------------------------------------------
+# Kaggle mounts inputs at /kaggle/input/<slug>, and the slug depends on how the
+# dataset was attached. If the path above does not exist, use the first input
+# directory that actually contains audio files.
+if not os.path.isdir(AUDIO_FOLDER):
+    for _root, _dirs, _files in os.walk("/kaggle/input"):
+        if any(os.path.splitext(_f)[1].lower() in SUPPORTED_FORMATS for _f in _files):
+            AUDIO_FOLDER = _root
+            break
+print("AUDIO_FOLDER =", AUDIO_FOLDER)
+# ---------------------------------------------------------------------------------
+'''
+
+HEADER_MD = """# ACE-Step 1.5XL captioning (generated)
+
+**Before running:** Session options -> Accelerator = **GPU T4 x2**, Internet = **On**.
+The kernel loads with `device_map="balanced"` (10 GiB per GPU) and pip-installs a
+transformers fork from GitHub, so neither can be skipped.
+
+Then **Run All**. Results land in `/kaggle/working/captions_out.json`:
+
+```json
+{"results": [{"file": "Song.mp3", "caption": "..."}]}
+```
+
+Captions follow the ACE-Step 1.5XL annotation schema (front-loaded 5-12 keywords,
+a mandatory vocal descriptor, 2-3 sentences of flow, no BPM/key/time signature).
+An over-long caption is trimmed back to the schema.
+
+Regenerate with `.venv/bin/python scripts/build_caption_notebook.py` — do not
+hand-edit the cell.
+"""
+
+
+def fill_kernel(source, prompt=None, tag="", max_tokens=512, max_duration=120,
+                batch_size=1, audio_folder="/kaggle/input/acestep-audio"):
+    """Substitute every {{PLACEHOLDER}} and inject the audio auto-resolve."""
+    config = {"caption_prompt": prompt} if prompt else {}
+    values = {
+        "{{AUDIO_DATASET_PATH}}": audio_folder,
+        "{{CAPTION_PROMPT}}": json.dumps(caption_spec.task_prompt_from_config(config)),
+        "{{SYSTEM_PROMPT}}": json.dumps(caption_spec.system_prompt_from_config(config)),
+        "{{MAX_NEW_TOKENS}}": str(int(max_tokens)),
+        "{{MAX_AUDIO_DURATION}}": str(int(max_duration)),
+        "{{BATCH_SIZE}}": str(int(batch_size)),
+        "{{CUSTOM_TAG}}": json.dumps(tag or ""),
+        "{{REPETITION_PENALTY}}": "1.15",
+        "{{NO_REPEAT_NGRAM}}": "6",
+    }
+    out = source
+    for key, value in values.items():
+        out = out.replace(key, value)
+
+    lines = out.splitlines()
+    index = next((i for i, ln in enumerate(lines)
+                  if ln.startswith(AUTO_RESOLVE_ANCHOR)), None)
+    if index is None:
+        raise SystemExit(f"anchor not found in the kernel: {AUTO_RESOLVE_ANCHOR}")
+    lines[index + 1:index + 1] = AUTO_RESOLVE.splitlines()
+    return "\n".join(lines)
+
+
+def _lines(text):
+    """Notebook source is a list of lines, each keeping its newline."""
+    body = text.rstrip("\n").split("\n")
+    return [ln + "\n" for ln in body[:-1]] + [body[-1]]
+
+
+def _md_cell(text):
+    return {"cell_type": "markdown", "metadata": {}, "source": _lines(text)}
+
+
+def _code_cell(text):
+    return {"cell_type": "code", "execution_count": None, "metadata": {},
+            "outputs": [], "source": _lines(text)}
+
+
+def build(out_path, **kwargs):
+    """Fill the kernel, refusal-check it, and write the notebook."""
+    with open(KERNEL, encoding="utf-8") as fh:
+        source = fh.read()
+    script = fill_kernel(source, **kwargs)
+
+    # REFUSE to emit a cell that would fail on Kaggle minutes later: an unfilled
+    # {{X}} is valid Python, so ast.parse alone would not catch it.
+    if "{{" in script or "}}" in script:
+        raise SystemExit("unfilled placeholder remains in the generated cell")
+    ast.parse(script)
+
+    notebook = {
+        "cells": [_md_cell(HEADER_MD), _code_cell(script)],
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python",
+                           "name": "python3"},
+            "language_info": {"name": "python", "version": "3.12.13"},
+            "kaggle": {
+                "accelerator": "nvidiaTeslaT4x2",
+                "dataSources": [],
+                "isGpuEnabled": True,
+                "isInternetEnabled": True,
+                "language": "python",
+                "sourceType": "notebook",
+            },
+        },
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(notebook, fh, indent=1)
+        fh.write("\n")
+    return script
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--out", default=DEFAULT_OUT)
+    parser.add_argument("--tag", default="", help="trigger tag, e.g. acdc")
+    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--max-audio-duration", type=int, default=120)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--audio-folder", default="/kaggle/input/acestep-audio")
+    args = parser.parse_args(argv)
+
+    script = build(
+        args.out, tag=args.tag, max_tokens=args.max_tokens,
+        max_duration=args.max_audio_duration, batch_size=args.batch_size,
+        audio_folder=args.audio_folder,
+    )
+    print(f"wrote {args.out}")
+    print(f"  cell lines: {len(script.splitlines())}")
+    print("  placeholders left: 0 | ast.parse: ok")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
