@@ -5055,6 +5055,20 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Structural Tag Creator
     # -----------------------------------------------------------------------
+    def _tag_creator_artist(self):
+        """Which artist vocabulary the tag creator should offer.
+
+        An explicit ``tag_creator_artist`` setting wins; otherwise the dataset
+        name is used as a loose hint ("sabbath" resolves to Black Sabbath,
+        "Doorsdata" to The Doors). Empty or unrecognised means the cross-artist
+        fundamentals only -- never another artist's signature terms.
+        """
+        explicit = (self.config.get("tag_creator_artist") or "").strip()
+        if explicit:
+            return explicit
+        meta = self.dataset.get("metadata") or {}
+        return (meta.get("name") or "").strip()
+
     def start_structural_tag_creator(self):
         row = self.table.currentRow()
         if not (0 <= row < len(self._table_sample_indices)):
@@ -5073,7 +5087,10 @@ class DatasetManager(QMainWindow):
             return
         self.tag_creator_btn.setEnabled(False)
         self.status_label.setText(f"Generating structural tags for {sample.get('filename', '')}…")
-        self.tag_creator_worker = TagCreatorWorker(index, sample, self.config, parent=self)
+        self.tag_creator_worker = TagCreatorWorker(
+            index, sample, self.config, artist=self._tag_creator_artist(),
+            parent=self,
+        )
         self.tag_creator_worker.finished_ok.connect(self.on_tag_creator_done)
         self.tag_creator_worker.failed.connect(self.on_tag_creator_failed)
         self.tag_creator_worker.start()

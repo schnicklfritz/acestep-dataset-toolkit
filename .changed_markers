@@ -16,86 +16,86 @@
 
 [UNREVIEWED]
 # ---------------------------------------------------------------------------
-# FEATURE: dedicated corpus-research MCP server (2026-09-18)
-#   WHY: a previous session died at the context limit having DESIGNED this but
-#   written none of it — it existed only in the session transcript. Recovered
-#   from ~/.cline/data/sessions/ and built. Nothing was ever lost from disk:
-#   verified there was no write_to_file call for research_tools /
-#   mcp_research_server, and no such file existed anywhere.
+# FIX: the Structural Tag Creator was handed the WRONG vocabulary (2026-09-18)
 #
-#   The user's idea it serves: gather historical/amateur/production/journalistic
-#   descriptions of an artist, then induct the vocabulary those sources actually
-#   use, so MOSS-Music picks from a grounded, bounded attribute set instead of
-#   inventing descriptors.
+#   SYMPTOM: modules/tag_creator.py built its prompt from a hardcoded
+#   ACE_STEP_VOCABULARY constant (34 generic terms) and told the model
+#   "Choose tags ONLY from the vocabulary below". Measured against the
+#   project's authoritative doc (docs/descriptor_reference.md) it shared
+#   only 14 of 34 terms, and it offered "mumble rap" / "chopper rap" /
+#   "trap flow" for 1970s hard rock while omitting "downtuned guitar".
+#   The doc itself states the precedence rule: "Where it disagrees ... this
+#   file wins". The code was contradicting the project's own spec.
 #
-# NEW (all untracked):
-#   modules/research_tools.py     ALL logic, no Qt, no `mcp` import (testable)
-#   modules/mcp_compat.py         load_server_class() — mcp 1.x FastMCP / 2.x MCPServer
-#   mcp_research_server.py        thin MCP layer; build_server() + main()
-#   scripts/build_lexicon.py      CLI: descriptor doc -> docs/vocabulary.txt
-#   tests/test_research_tools.py  31 tests
-#   tests/test_mcp_servers.py     14 tests (call tools through the MCP boundary)
-#   docs/vocabulary.txt           GENERATED (390 terms) — do not hand-edit
-#   docs/section_markers.txt      GENERATED (63 markers) — do not hand-edit
+#   ROOT CAUSE: docs/descriptor_reference.md was documentation only —
+#   referenced by ZERO python files. The vocabulary the model actually saw
+#   was a generic leftover.
 #
-# MODIFIED:
-#   mcp_server.py     import switched to modules.mcp_compat.load_server_class.
-#     REASON: installing `mcp[cli]` pulled mcp 2.2.0, which RENAMED FastMCP ->
-#     MCPServer. The old `from mcp.server.fastmcp import FastMCP` now raises
-#     ModuleNotFoundError, and because that IS an ImportError it was being
-#     swallowed into a misleading "pip install mcp[cli]" message. The shim keeps
-#     both majors working and reports one honest error.
-#   requirements.txt  added a commented `mcp[cli]>=1.0` optional line (house style).
-#   .gitignore        added docs/research/ — third-party article text must not be
-#                     committed; the corpus lives outside version control.
-#   README.md         MCP section now documents BOTH servers + the file tree.
+#   FIX: the constant is GONE. The prompt is now built from the generated
+#   lexicon, scoped per artist.
+#
+# CHANGED FILES
+#   modules/tag_creator.py    ACE_STEP_VOCABULARY removed; load_vocabulary()
+#     + load_markers() read docs/vocabulary.json / .txt / section_markers.txt.
+#     tag_creator_messages(sample, artist="") gains the artist arg.
+#     Prompt gains the doc's spec rules: max 3 descriptors per bracket, and
+#     NEVER put BPM/key/time-signature in the caption (Phase 0 saw MOSS
+#     volunteer "136 BPM, G major, I-IV-V-vi").
+#   workers/tag_creator.py    TagCreatorWorker(..., artist="") passes it through.
+#   dataset_manager.py        _tag_creator_artist(): explicit
+#     config["tag_creator_artist"] wins, else the dataset metadata name is used
+#     as a loose hint. Called from start_structural_tag_creator (the ONE
+#     TagCreatorWorker construction site).
+#   config.py                 new "tag_creator_artist" default ("").
+#   modules/research_tools.py extract_grouped_terms(), resolve_artist(),
+#     terms_for_artist(), load_vocabulary_groups(); _add_terms() now dedupes
+#     per target list (needed so a term can live in two artists' facets).
+#   docs/vocabulary.json      NEW generated artifact (artist -> facet -> terms).
+#     docs/vocabulary.txt is BYTE-IDENTICAL to the previous commit — the flat
+#     extractor was not disturbed, only the grouping was added.
+#   tests/test_tag_creator.py NEW (19 tests). tests/test_research_tools.py +8.
 # ---------------------------------------------------------------------------
 
 [UNREVIEWED — previous]
-# (daily iterative mode — no other dirty hunks pending)
+# (none)
 
-[DESIGN RULES FOR THE NEW CODE — do not weaken these]
-# 1. NO RESEARCH TOOL RETURNS RAW DOCUMENT TEXT.
-#    corpus_stats = counts only. grep_corpus = only lines an explicit regex
-#    matched, capped, each line also truncated (MAX_LINE_CHARS). Every
-#    list-returning function takes a cap. This is what makes it safe to point an
-#    agent at a multi-megabyte corpus.
-#    Guarded by: test_no_tool_returns_raw_corpus_text,
-#                test_token_discipline_holds_across_the_mcp_boundary.
-#
-# 2. THE LEXICON PARSER MUST SURVIVE documents that mix vocabulary with EXAMPLE
-#    CAPTIONS and lyric snippets (docs/descriptor_reference.md does exactly this).
-#    extract_descriptor_terms() harvests ONLY `###` term-list blocks (plus the
-#    labelled `Genre: ...` form) and skips blockquotes, fenced code blocks and
-#    tables. Naive comma-splitting would ingest half a sentence as a "term" and
-#    then feed that garbage to the model. _looks_like_prose() is the tripwire;
-#    `scripts/build_lexicon.py --check` exits 1 if anything trips it.
+# PARSER RULES THAT MATTER (all now covered by tests)
+#   - get out of "Complete examples" BEFORE handling bold labels, or
+#     **Caption** / **Section tags** become phantom "artists". A blank line
+#     must NOT clear the block heading (the example block spans blanks).
+#   - outside a `###` block only a labelled line ("Genre: ...") is a term
+#     list, or section 10's prose rules get comma-split into fake terms.
+#   - reject pieces containing a backtick ("Locales `en`" leaked once).
+#   - only register a facet that actually received a term (no empty groups).
+#   - _SECTION_ARTIST_OVERRIDES: section 4 is the COUNTRY vocabulary and maps
+#     to Hank Williams Sr., not to "general". Without this, pedal steel/banjo
+#     were offered to Black Sabbath. General = sections 1-3 only.
 
-[VERIFIED — real runs, not estimates]
-#   - full suite green: 314 passed (269 before this work)
-#   - scripts/build_lexicon.py --check -> 390 descriptors, 63 markers, exit 0;
-#     no term >45 chars, no sentence leaked; LRC metadata tags ([ti:], [ar:],
-#     [offset:]) excluded from markers
-#   - real stdio handshake against mcp_research_server.py: initialize OK,
-#     tools/list -> 9 tools, tools/call corpus_stats(docs) summarized 68,584
-#     chars of corpus in ~400 chars of output
-#   - registered as "acestep-research" in
-#     ~/.cline/data/settings/cline_mcp_settings.json (backup written alongside;
-#     verified by diff that nothing else was removed)
-#   - Kaggle tools deliberately NOT in autoApprove: they hit the network and
-#     spend GPU quota.
+[VERIFIED 2026-09-18]
+#   - full suite 341 passed (was 314)
+#   - build_lexicon --check: 390 descriptors, 56 markers, 4 artists
+#     (Hank 142, Sabbath 78, AC/DC 77, Doors 66); zero prose terms; no empty
+#     facets; no rap styles anywhere
+#   - live prompt: 'sabbath' -> "ARTIST VOCABULARY — Black Sabbath" with
+#     downtuned guitar / palm-muted riffs / thunderous drums (4,788 chars);
+#     'hank_sr' -> steel guitar / pedal steel / fiddle (6,357 chars)
+#   - app boots offscreen with the real DatasetManager; _tag_creator_artist()
+#     returns '' on an empty dataset and the config key is present
 
-[OUTSTANDING / NEXT]
-#   - Kaggle tools need credentials from app Settings (outside the repo) before
-#     they will do anything but report "No Kaggle credentials".
-#   - The corpus does not exist yet. Point --corpus at a folder of prose ABOUT the
-#     artist (e.g. /home/fritz/42/Datasets/research/<band>/). Candidate sources
-#     already catalogued in docs/master_track_research.md (isolated-tracks.com
-#     channel lists, box-set session notes, Clone Hero chart spreadsheets).
+[OUTSTANDING]
+#   - The corpus does not exist yet. Point the research server at a folder of
+#     prose ABOUT an artist (e.g. /home/fritz/42/Datasets/research/<band>/).
+#     Candidate sources are catalogued in docs/master_track_research.md.
+#   - Phase 1 of the MOSS work (the spec conduit for MOSS's own output shape)
+#     is only PARTLY addressed: the tag-creator prompt now carries the shape
+#     rules, but MOSS still returns markdown and nothing reformats it yet.
 #   - The stale VS Code extension MCP config still exists in the OLD format at
 #     ~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/
 #     cline_mcp_settings.json and its filesystem server entry is malformed
 #     (`npx -y` followed by directory paths and no package name). Repair or delete.
+#   - /home/fritz/42/Datasets/sabbath/mp3_throwaway is 9-of-15 unusable: 8
+#     zero-byte files plus Iron_Man.mp3 truncated to 43.2s (should be ~355s).
+#     Regenerate from the FLACs before any captioning run. Verified 2026-09-18.
 
 [BASELINE SWEEP]
 # RUN 2026-09-15 — first pass complete. Tools: vulture 2.16, flake8 7.3.0
@@ -108,16 +108,4 @@
 #   workers/structural.py(5), stem_separator.py(5), workers/health.py(4),
 #   workers/caption.py(3), ...). Do NOT blindly strip — several of those modules
 #   re-import names lazily inside functions. Verify each before removing.
-
-[RESOLVED / CACHE HIT]
-# The detailed per-change notes that used to live here (Sep 15-16: the audio-format
-# expansion, the "Before You Add Tracks" warning dialog, the dead-code removal
-# list, the MOSS device_map=balanced multi-GPU crash and the kernels_output hang)
-# all described state that was ALREADY COMMITTED, i.e. cache hits. They are
-# recoverable verbatim from git if ever needed:
-#     git show HEAD:.changed_markers
-#     git show HEAD~N:.changed_markers
-# Keep this file transient: it should only ever describe changes NOT yet
-# committed. A stale index is worse than no index — it makes an agent scope its
-# work off information that no longer matches reality.
 

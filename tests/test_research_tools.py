@@ -14,11 +14,15 @@ from modules.research_tools import (
     build_lexicon,
     corpus_stats,
     extract_descriptor_terms,
+    extract_grouped_terms,
     extract_section_markers,
     grep_corpus,
     induct_terms,
     load_vocabulary,
+    load_vocabulary_groups,
+    resolve_artist,
     spec_coverage,
+    terms_for_artist,
     unlisted_terms,
     vocab_diff,
 )
@@ -357,6 +361,125 @@ def test_build_lexicon_missing_source_raises(tmp_path):
         build_lexicon(str(tmp_path / "absent.md"))
 
 
+# --------------------------------------------------------------------------
+# Artist grouping -- sections 5-8 are per-artist, 1-4 cross-artist, 13 labelled
+# --------------------------------------------------------------------------
+
+GROUPED_DOC = """\
+# Reference
+
+## Section 3: Architectural Descriptors
+
+### Vocal style
+whispered, belted, raspy vocal
+
+## Section 7: Black Sabbath (pre-Never Say Die)
+
+### Guitar (Tony Iommi)
+downtuned guitar, palm-muted riffs, power chords
+
+### Complete examples
+**Caption**
+> heavy metal, doom-laden, downtuned heavy riffing
+
+**Section tags**
+```
+[Intro - slow, ominous]
+```
+
+## Section 8: AC/DC (Bon Scott years)
+
+### Vocal (Bon Scott)
+raspy vocal, sneering, snarling
+
+## Section 13: Quick reference
+
+**Hank Williams Sr.**
+Genre: honky-tonk country.
+Instruments: steel guitar, fiddle.
+
+## Section 10: Key Rules
+
+1. **Max 3 descriptors per bracket.** More risks the model singing tag names.
+8. **Front-load conditioning keywords** in captions (5-12 keywords, max 15).
+Locales `en`, `en-US`, `en-GB`.
+"""
+
+
+def test_grouped_terms_split_by_artist():
+    groups = extract_grouped_terms(GROUPED_DOC)
+    artists = groups["artists"]
+    assert "Black Sabbath" in artists             # parenthetical stripped
+    assert "AC/DC" in artists
+    assert "Hank Williams Sr." in artists
+    assert "general" in groups
+
+
+def test_grouped_example_labels_do_not_become_artists():
+    artists = extract_grouped_terms(GROUPED_DOC)["artists"]
+    assert "Caption" not in artists
+    assert "Section tags" not in artists
+
+
+def test_grouped_terms_do_not_leak_prose_or_backticks():
+    groups = extract_grouped_terms(GROUPED_DOC)
+    every = [t for facets in groups["artists"].values()
+             for terms in facets.values() for t in terms]
+    every += [t for terms in groups["general"].values() for t in terms]
+    assert not [t for t in every if _looks_like_prose(t)], every
+    assert not [t for t in every if "`" in t or "]" in t], every
+    assert "en-US" not in every
+
+
+def test_grouped_terms_no_empty_facets():
+    groups = extract_grouped_terms(GROUPED_DOC)
+    for facets in list(groups["artists"].values()) + [groups["general"]]:
+        assert not [k for k, v in facets.items() if not v]
+
+
+def test_resolve_artist_handles_real_dataset_names():
+    groups = {"artists": {"Black Sabbath": {}, "The Doors": {}, "AC/DC": {},
+                          "Hank Williams Sr.": {}}, "general": {}}
+    assert resolve_artist(groups, "sabbath") == "Black Sabbath"
+    assert resolve_artist(groups, "Doorsdata") == "The Doors"
+    assert resolve_artist(groups, "hank_sr") == "Hank Williams Sr."
+    assert resolve_artist(groups, "acdc") == "AC/DC"
+    assert resolve_artist(groups, "Nirvana") is None
+    assert resolve_artist(groups, "") is None
+
+
+def test_terms_for_artist_keeps_buckets_separate():
+    groups = extract_grouped_terms(GROUPED_DOC)
+    artist_facets, general_facets, name = terms_for_artist(groups, "sabbath")
+    assert name == "Black Sabbath"
+    artist_terms = [t for ts in artist_facets.values() for t in ts]
+    assert "downtuned guitar" in artist_terms
+    # Another artist's signatures must not appear in the artist bucket.
+    assert "sneering" not in artist_terms
+    assert "steel guitar" not in artist_terms
+    # Cross-artist fundamentals remain available in their own bucket.
+    assert "whispered" in [t for ts in general_facets.values() for t in ts]
+
+
+def test_terms_for_artist_unmatched_is_general_only():
+    groups = extract_grouped_terms(GROUPED_DOC)
+    artist_facets, general_facets, name = terms_for_artist(groups, "Nonexistent")
+    assert name is None
+    assert artist_facets == {}
+    assert general_facets
+
+
+def test_build_lexicon_writes_grouped_json(tmp_path):
+    src = tmp_path / "doc.md"
+    src.write_text(GROUPED_DOC, encoding="utf-8")
+    out = build_lexicon(str(src), str(tmp_path / "out"))
+    import os
+    assert os.path.isfile(out["groups_path"])
+    loaded = load_vocabulary_groups(out["groups_path"])
+    assert "Black Sabbath" in loaded["artists"]
+    assert "Artists:" in out["report"]
+
+
 def test_real_descriptor_doc_extracts_cleanly():
     """Integration guard on the actual reference document."""
     import os
@@ -389,3 +512,23 @@ def test_real_descriptor_doc_extracts_cleanly():
     gen_markers = os.path.join(root, "docs", "section_markers.txt")
     if os.path.isfile(gen_markers):
         assert load_vocabulary(gen_markers) == markers
+
+    # Grouped vocabulary: exactly the four artists, and the generic/rap terms
+    # that used to be hardcoded into the tag creator must be absent entirely.
+    groups = extract_grouped_terms(open(doc, encoding="utf-8").read())
+    assert set(groups["artists"]) == {
+        "Hank Williams Sr.", "The Doors", "Black Sabbath", "AC/DC"
+    }
+    every = [t.lower() for facets in groups["artists"].values()
+             for terms in facets.values() for t in terms]
+    every += [t.lower() for terms in groups["general"].values() for t in terms]
+    for unwanted in ("mumble rap", "chopper rap", "trap flow", "auto-tune"):
+        assert unwanted not in every
+
+    # Artist scoping must exclude other artists' signatures.
+    sabbath_terms, _general, name = terms_for_artist(groups, "sabbath")
+    sabbath = [t.lower() for ts in sabbath_terms.values() for t in ts]
+    assert name == "Black Sabbath"
+    assert "downtuned guitar" in sabbath
+    assert "steel guitar" not in sabbath
+    assert "vox continental organ" not in sabbath

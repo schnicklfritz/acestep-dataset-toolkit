@@ -18,6 +18,7 @@ entry point serves it. That is enforced here rather than by asking politely.
 Matching is deterministic: case-insensitive, non-alphanumeric-bounded literal
 terms. No embeddings, no LLM, no network, fully reproducible.
 """
+import json
 import os
 import re
 from collections import Counter, defaultdict
@@ -372,7 +373,12 @@ def spec_coverage(spec_path, vocab_path):
 # --------------------------------------------------------------------------
 
 # `###` headings whose body is prose or examples, never a term list.
-NON_TERM_BLOCKS = {"complete examples", "architectural descriptors", "sources"}
+NON_TERM_BLOCKS = {
+    "complete examples",
+    "architectural descriptors",
+    "sources",
+    "country tips",
+}
 
 # Section 1 documents LRC/ID3 *file metadata* tags ([ti:], [ar:], [offset:]) which
 # are bracketed like markers but are not structural markers. Markers drive lyric
@@ -398,8 +404,14 @@ def _looks_like_prose(term):
 _SKIP_PREFIXES = ("|", ">", "**", "*", "-", "+", "`", "1.", "2.", "3.", "4.")
 
 
-def _add_terms(out, seen, text):
-    """Split one comma-list line into clean terms, rejecting non-terms."""
+def _add_terms(out, text):
+    """Split one comma-list line into clean terms, appending to ``out``.
+
+    Deduplicates against ``out`` itself rather than a shared set: a caller that
+    wants per-facet lists gets per-facet dedupe, while the flat caller (one list
+    for the whole doc) still gets one entry per term.
+    """
+    existing = {t.lower() for t in out}
     for piece in text.split(","):
         piece = piece.strip().strip("`*_ ").rstrip(".").strip()
         if not piece:
@@ -407,21 +419,20 @@ def _add_terms(out, seen, text):
         # A real descriptor is short, has few words and no markdown/brackets.
         if len(piece) > MAX_TERM_LEN:
             continue
-        if "**" in piece or "[" in piece or "]" in piece:
+        if "**" in piece or "[" in piece or "]" in piece or "`" in piece:
             continue
         if len(piece.split()) > 6:
             continue
         key = piece.lower()
-        if key in seen:
+        if key in existing:
             continue
-        seen.add(key)
+        existing.add(key)
         out.append(piece)
 
 
 def extract_descriptor_terms(text):
     """Harvest descriptor terms from a descriptor-reference document."""
     terms = []
-    seen = set()
     block = None          # current `###` heading, or None
     in_fence = False
 
@@ -445,13 +456,13 @@ def extract_descriptor_terms(text):
             # `###` headings, e.g. "Genre: honky-tonk country, country blues."
             match = re.match(r"^([A-Z][A-Za-z ]{2,20}):\s*(.+)$", line)
             if match and not match.group(2).startswith(("**", "`", ">")):
-                _add_terms(terms, seen, match.group(2))
+                _add_terms(terms, match.group(2))
             continue
         if block.lower() in NON_TERM_BLOCKS:
             continue
         if line.startswith(_SKIP_PREFIXES):
             continue
-        _add_terms(terms, seen, line)
+        _add_terms(terms, line)
 
     return terms
 
@@ -486,6 +497,172 @@ def extract_section_markers(text):
     return markers
 
 
+# --------------------------------------------------------------------------
+# Artist-scoped grouping.
+#
+# Sections 5-8 of the reference doc are artist-scoped; sections 1-4 hold the
+# cross-artist vocabulary; section 13 repeats per-artist lines in a labelled
+# ("Genre: ...") form. Grouping is what lets the tag creator offer a Black
+# Sabbath track doom/downtuned-guitar terms WITHOUT also offering it steel
+# guitar or rap styles -- a narrow, correct choice set.
+# --------------------------------------------------------------------------
+
+# `## Section 5..8: <Artist>` are the artist-scoped sections.
+_ARTIST_SECTION_RANGE = (5, 8)
+
+# Sections that are not "general" despite sitting outside the artist range.
+# Section 4 is the country vocabulary; this project's only country artist is
+# Hank Williams Sr., so it scopes to him rather than leaking pedal steel and
+# banjo into every other artist's prompt.
+_SECTION_ARTIST_OVERRIDES = {4: "Hank Williams Sr."}
+_SECTION_HEADING = re.compile(r"^##\s+Section\s+(\d+)\s*:")
+_ARTIST_LABEL = re.compile(r"^\*\*(.+?)\*\*\s*$")
+_LABELLED_LINE = re.compile(r"^([A-Z][A-Za-z ]{2,20}):\s*(.+)$")
+
+GENERAL_GROUP = "general"
+
+
+def clean_artist_name(name):
+    """'Black Sabbath (pre-Never Say Die)' -> 'Black Sabbath'."""
+    return re.sub(r"\s*\(.*?\)\s*$", "", name).strip()
+
+
+def extract_grouped_terms(text):
+    """Harvest descriptors grouped by artist, then by facet.
+
+    Returns ``{"general": {facet: [terms]}, "artists": {artist: {facet: [...]}}}``.
+    ``general`` is the cross-artist vocabulary (sections 1-4); each artist holds
+    only its own descriptors.
+    """
+    general = {}
+    artists = {}
+    facets = None            # the dict currently being filled
+    block = None             # current `###` heading
+    in_fence = False
+
+    for raw in text.splitlines():
+        line = raw.strip()
+
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue                      # the heading persists across a fence
+        if in_fence:
+            continue
+
+        heading = _SECTION_HEADING.match(line)
+        if heading:
+            number = int(heading.group(1))
+            low, high = _ARTIST_SECTION_RANGE
+            override = _SECTION_ARTIST_OVERRIDES.get(number)
+            if override:
+                artists.setdefault(override, {})
+                facets = artists[override]
+            elif low <= number <= high:
+                title = line.split(":", 1)[1].strip()
+                artist = clean_artist_name(title)
+                artists.setdefault(artist, {})
+                facets = artists[artist]
+            else:
+                facets = general
+            block = None
+            continue
+
+        if line.startswith("### "):
+            block = line[4:].strip()
+            continue
+        if line.startswith("#"):
+            block = None
+            continue
+        if not line:
+            # A blank line does NOT end the block: "### Complete examples"
+            # spans blank lines, and clearing here lets its bold labels through
+            # as phantom artists.
+            continue
+        if block is not None and block.lower() in NON_TERM_BLOCKS:
+            continue
+
+        # Section 13 form: a bold artist label scopes the labelled lines below.
+        label = _ARTIST_LABEL.match(line)
+        if label:
+            artist = clean_artist_name(label.group(1))
+            artists.setdefault(artist, {})
+            facets = artists[artist]
+            block = None
+            continue
+
+        if facets is None:
+            continue
+        if line.startswith(_SKIP_PREFIXES) or re.match(r"^\d+[.)]\s", line):
+            continue
+
+        labelled = _LABELLED_LINE.match(line)
+        if labelled and not labelled.group(2).startswith(("**", "`", ">")):
+            facet, body = labelled.group(1).strip(), labelled.group(2)
+        elif block is not None:
+            facet, body = block, line
+        else:
+            # Outside any facet block, only a labelled line is a term list --
+            # otherwise section 10's prose rules get comma-split into "terms".
+            continue
+        # Only register a facet that actually receives a term, so a prose line
+        # that parses to nothing does not leave an empty group behind.
+        bucket = facets.get(facet)
+        if bucket is None:
+            bucket = []
+            _add_terms(bucket, body)
+            if bucket:
+                facets[facet] = bucket
+        else:
+            _add_terms(bucket, body)
+
+    return {GENERAL_GROUP: general, "artists": artists}
+
+
+def resolve_artist(groups, artist):
+    """Match a loose dataset/artist name onto a vocabulary artist, or ``None``.
+
+    Word-based rather than string-prefix based, because real dataset folders are
+    not named after the artist: ``Doorsdata`` -> "The Doors", ``hank_sr`` ->
+    "Hank Williams Sr.", ``sabbath`` -> "Black Sabbath".
+    """
+    if not artist:
+        return None
+    key = re.sub(r"[^a-z0-9]", "", artist.lower())
+    if not key:
+        return None
+    fallback = None
+    for name in groups.get("artists", {}):
+        if re.sub(r"[^a-z0-9]", "", name.lower()) == key:
+            return name                      # exact after normalisation
+        # Significant words only; "the"/"sr" carry no identity.
+        for word in re.findall(r"[a-z0-9]+", name.lower()):
+            if len(word) >= 4 and word in key:
+                fallback = fallback or name
+    return fallback
+
+
+def terms_for_artist(groups, artist):
+    """Return ``(artist_facets, general_facets, resolved_name)``.
+
+    The two buckets stay separate because they mean different things: the
+    artist's own facets are the narrow, preferred choice set, while the general
+    facets are cross-artist fundamentals (vocal timbre, energy, production) that
+    apply to any track. Keeping them apart lets a prompt say "prefer these"
+    without hiding the fundamentals.
+
+    An empty or unmatched artist yields an empty artist bucket and the general
+    vocabulary only -- the safe fallback, so one artist's signature terms are
+    never offered for another.
+    """
+    selected = resolve_artist(groups, artist)
+    artists = groups.get("artists", {})
+    return (
+        dict(artists.get(selected, {})) if selected else {},
+        dict(groups.get(GENERAL_GROUP, {})),
+        selected,
+    )
+
+
 def build_lexicon(source_path, out_dir=None):
     """Extract vocabulary + markers from ``source_path`` and write them out.
 
@@ -497,11 +674,13 @@ def build_lexicon(source_path, out_dir=None):
     text = _read_text(source_path)
     terms = extract_descriptor_terms(text)
     markers = extract_section_markers(text)
+    groups = extract_grouped_terms(text)
 
     out_dir = out_dir or os.path.dirname(os.path.abspath(source_path))
     os.makedirs(out_dir, exist_ok=True)
     vocab_path = os.path.join(out_dir, "vocabulary.txt")
     markers_path = os.path.join(out_dir, "section_markers.txt")
+    groups_path = os.path.join(out_dir, "vocabulary.json")
 
     stamp = (
         f"# Extracted from {os.path.basename(source_path)} -- do not hand-edit.\n"
@@ -513,6 +692,12 @@ def build_lexicon(source_path, out_dir=None):
     with open(markers_path, "w", encoding="utf-8") as f:
         f.write(stamp + "# Section markers: one per line.\n")
         f.write("\n".join(markers) + "\n")
+    grouped = dict(groups)
+    grouped["_source"] = os.path.basename(source_path)
+    grouped["_note"] = "Generated by scripts/build_lexicon.py -- do not hand-edit."
+    with open(groups_path, "w", encoding="utf-8") as f:
+        json.dump(grouped, f, indent=2, sort_keys=False)
+        f.write("\n")
 
     # Suspect terms are the guard against example prose leaking in.
     suspects = [t for t in terms if _looks_like_prose(t)]
@@ -520,14 +705,31 @@ def build_lexicon(source_path, out_dir=None):
         f"Source: {source_path}",
         f"Descriptors: {len(terms)} -> {vocab_path}",
         f"Section markers: {len(markers)} -> {markers_path}",
+        f"Artists: {len(groups['artists'])} -> {groups_path}",
     ]
+    for artist, facets in groups["artists"].items():
+        count = len({t.lower() for ts in facets.values() for t in ts})
+        report.append(f"  {artist}: {count} term(s)")
     if suspects:
         report.append(f"Review {len(suspects)} suspiciously long term(s):")
         report.extend(f"  {t}" for t in suspects[:10])
     return {
         "terms": terms,
         "markers": markers,
+        "groups": groups,
         "vocabulary_path": vocab_path,
         "markers_path": markers_path,
+        "groups_path": groups_path,
         "report": "\n".join(report),
     }
+
+
+def load_vocabulary_groups(path):
+    """Read the artist-grouped vocabulary written by ``build_lexicon``."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"grouped vocabulary not found: {path}")
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    data.pop("_source", None)
+    data.pop("_note", None)
+    return data

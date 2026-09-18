@@ -8,17 +8,20 @@ class TagCreatorWorker(QThread):
     finished_ok = Signal(int, str, str)   # sample_index, caption_block, lyrics_block
     failed = Signal(str)
 
-    def __init__(self, sample_index, sample, config, parent=None):
+    def __init__(self, sample_index, sample, config, artist="", parent=None):
         super().__init__(parent)
         self.sample_index = sample_index
         self.sample = sample
         self.config = config
+        # Scopes the offered vocabulary (e.g. "sabbath" -> Black Sabbath).
+        # Empty means cross-artist fundamentals only.
+        self.artist = artist
 
     def run(self):
         from modules.llm_client import get_client
 
         name, info, client = get_client(self.config, role="aggregator")
-        messages = tag_creator_messages(self.sample)
+        messages = tag_creator_messages(self.sample, self.artist)
         resp = client.chat.completions.create(
             model=info.get("model") or "deepseek-chat",
             messages=messages,

@@ -4,25 +4,83 @@ Produces the two blocks of the two-layer model:
   * **Caption (global)**: genre, mood/energy, instruments, vocal style.
   * **Lyrics (time-script)**: the lyrics with ``[Section]`` markers and
     per-moment vocal delivery notes (preserving the existing lyric text).
+
+WHERE THE VOCABULARY COMES FROM
+-------------------------------
+Not from this file. It is generated from ``docs/descriptor_reference.md`` —
+the project's authoritative annotation vocabulary — by
+``scripts/build_lexicon.py``, and loaded at prompt time:
+
+    docs/vocabulary.json      artist-scoped facets (preferred)
+    docs/vocabulary.txt       flat term list (fallback)
+    docs/section_markers.txt  [Marker] names for the lyrics block
+
+WHY ARTIST SCOPING MATTERS
+--------------------------
+A choice set is only useful if it is narrow AND correct. One hardcoded generic
+list used to serve every track; measured against the authoritative doc it shared
+just 14 of its 34 terms and offered "mumble rap" / "trap flow" for a Black
+Sabbath record while omitting "downtuned guitar". Now a Sabbath track is given
+Sabbath's own facets plus the cross-artist fundamentals, and is never offered
+steel guitar or Vox Continental organ.
+
+An empty or unmatched artist falls back to the cross-artist fundamentals only —
+never to some other artist's signature terms.
 """
-ACE_STEP_VOCABULARY = """VOCAL TIMBRE: bright, dark, warm, cold, breathy, nasal, gritty, smooth, husky,
-metallic, whispery, resonant, airy, smoky, sultry, light, clear, high-pitched,
-raspy, powerful, ethereal, flute-like, hollow, velvety, shrill, hoarse, mellow,
-thin, thick, reedy, silvery, twangy
-VOCAL DELIVERY: whispered, shouted, spoken word, narration, singing, falsetto,
-powerful belting, harmonies, call and response, ad-libs
-RAP STYLES: mumble rap, chopper rap, melodic rap, lyrical rap, trap flow, double-time rap
-VOCAL FX: auto-tune, reverb, delay, distortion
-ENERGY/MOOD: high energy, low energy, building energy, explosive, melancholic,
-euphoric, dreamy, aggressive
-GLOBAL ENERGY: high (energetic, aggressive, intense, powerful, explosive,
-stadium-sized, driving), moderate (mid-tempo, moderate energy, relaxed groove,
-laid-back, steady beat), low (calm, intimate, restrained, minimalist, quiet
-tension, subtle, lo-fi), emotional (uplifting, euphoric, melancholic, passionate,
-triumphant, defiant)
-STRUCTURE: [Intro] [Verse] [Verse 1] [Pre-Chorus] [Chorus] [Bridge] [Outro]
-[Build] [Drop] [Breakdown] [Instrumental] [Guitar Solo] [Piano Interlude]
-[Fade Out] [Silence]"""
+import os
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DOCS_DIR = os.path.join(ROOT, "docs")
+GROUPS_PATH = os.path.join(DOCS_DIR, "vocabulary.json")
+FLAT_PATH = os.path.join(DOCS_DIR, "vocabulary.txt")
+MARKERS_PATH = os.path.join(DOCS_DIR, "section_markers.txt")
+
+
+def _format_facets(facets):
+    return "\n".join(f"{facet}: {', '.join(terms)}"
+                     for facet, terms in facets.items() if terms)
+
+
+def load_vocabulary(artist=""):
+    """Return ``(vocabulary_text, resolved_artist_name)`` for the prompt.
+
+    Prefers the artist-scoped groups; falls back to the flat list if the JSON is
+    absent. Raises FileNotFoundError with the fix, rather than silently sending
+    the model an empty vocabulary (which would make it invent descriptors).
+    """
+    from modules.research_tools import (
+        load_vocabulary_groups, load_vocabulary as load_flat, terms_for_artist,
+    )
+
+    if os.path.isfile(GROUPS_PATH):
+        groups = load_vocabulary_groups(GROUPS_PATH)
+        artist_facets, general_facets, resolved = terms_for_artist(groups, artist)
+        parts = []
+        if artist_facets:
+            parts.append(f"ARTIST VOCABULARY — {resolved} "
+                         "(prefer these):\n" + _format_facets(artist_facets))
+        parts.append("CROSS-ARTIST FUNDAMENTALS (use freely):\n"
+                     + _format_facets(general_facets))
+        return "\n\n".join(parts), resolved
+
+    if os.path.isfile(FLAT_PATH):
+        terms = load_flat(FLAT_PATH)
+        return ("VOCABULARY (one list for all artists):\n"
+                + ", ".join(terms)), None
+
+    raise FileNotFoundError(
+        "No vocabulary found. Generate it with:\n"
+        "    .venv/bin/python scripts/build_lexicon.py"
+    )
+
+
+def load_markers():
+    """Section markers for the lyrics block, or a small built-in fallback."""
+    if os.path.isfile(MARKERS_PATH):
+        with open(MARKERS_PATH, encoding="utf-8") as f:
+            return [ln.strip() for ln in f
+                    if ln.strip() and not ln.startswith("#")]
+    return ["[Intro]", "[Verse]", "[Chorus]", "[Bridge]", "[Outro]"]
 
 
 def build_track_context(sample):
@@ -52,19 +110,32 @@ def build_track_context(sample):
     return "\n".join(lines)
 
 
-def tag_creator_messages(sample):
-    """Messages that produce the Caption + Lyrics blocks."""
+def tag_creator_messages(sample, artist=""):
+    """Messages that produce the Caption + Lyrics blocks.
+
+    ``artist`` is an artist name or a loose dataset name (``"sabbath"``), and
+    scopes the offered vocabulary. Empty means cross-artist fundamentals only.
+    """
+    vocabulary, _resolved = load_vocabulary(artist)
+    markers = " ".join(load_markers())
     sys_prompt = (
-        "You are ACE-Step's Structural Tag Creator. Using ONLY the ACE-Step "
-        "vocabulary below, produce two blocks for this track.\n\n"
-        + ACE_STEP_VOCABULARY + "\n\n"
+        "You are ACE-Step's Structural Tag Creator. Choose descriptors ONLY "
+        "from the vocabulary below, preferring the artist's own terms, and "
+        "produce two blocks for this track.\n\n"
+        + vocabulary + "\n\n"
+        "SECTION MARKERS (for the lyrics block):\n" + markers + "\n\n"
         "Rules:\n"
-        "- Choose tags ONLY from the vocabulary (timbre, delivery, energy, structure).\n"
+        "- Choose tags ONLY from the vocabulary above.\n"
         "- Keep the existing lyrics text verbatim; only add [Section] markers and "
         "(vocal delivery) notes to it.\n"
-        "- Map the detected sections onto structure tags ([Verse], [Chorus], [Guitar Solo]...).\n"
+        "- Map the detected sections onto the section markers above.\n"
+        "- Max 3 descriptors per bracket. More risks the model singing tag names.\n"
+        "- NEVER put BPM, key, or time signature in the caption or section tags; "
+        "those belong in dedicated metadata fields, not in the text.\n"
+        "- Caption shape: 5-12 comma-separated keywords, then 2-3 sentences "
+        "describing how the energy moves through the track.\n"
         "- Output exactly two blocks:\n"
-        "CAPTION:\n<comma-separated: genre, mood/energy tier, instruments, vocal style>\n\n"
+        "CAPTION:\n<comma-separated keywords. Then 2-3 sentences.>\n\n"
         "LYRICS:\n<the structured lyrics with [Section] markers and (vocal delivery) notes>"
     )
     return [{"role": "system", "content": sys_prompt},

@@ -158,8 +158,24 @@ The app ships **two** MCP servers (both optional, both need `pip install "mcp[cl
 Build the descriptor vocabulary from the master reference doc with:
 
 ```bash
-.venv/bin/python scripts/build_lexicon.py --check   # -> docs/vocabulary.txt
+.venv/bin/python scripts/build_lexicon.py --check
 ```
+
+which writes three generated artifacts, all read at prompt time:
+
+| File | Contents |
+|---|---|
+| `docs/vocabulary.txt` | 390 descriptors, one per line (flat) |
+| `docs/vocabulary.json` | the same terms grouped **by artist** and facet |
+| `docs/section_markers.txt` | `[Marker]` names for the lyrics block |
+
+The **Structural Tag Creator** offers the model the *artist's own* vocabulary
+plus the cross-artist fundamentals, so a Black Sabbath track is offered
+`downtuned guitar` / `doom-laden` and never `steel guitar` or `mumble rap`.
+Which artist is used comes from the `tag_creator_artist` setting in ⚙ Settings,
+falling back to the dataset name (`sabbath` → Black Sabbath, `Doorsdata` →
+The Doors). An unrecognised artist gets the fundamentals only — never another
+artist's signature terms.
 
 ## 🔐 Configurability & security
 

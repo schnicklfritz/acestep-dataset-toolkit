@@ -38,6 +38,10 @@ DEFAULT_CONFIG = {
     "moss_max_tokens": 1024,
     # One MOSS pass covers ~120 s (hard encoder limit); 110 leaves headroom.
     "moss_chunk_seconds": 110,
+    # Structural Tag Creator: which artist's vocabulary to offer the model.
+    # Empty = use the dataset name as a hint ("sabbath" -> Black Sabbath).
+    # Unrecognised = cross-artist fundamentals only. See docs/vocabulary.json.
+    "tag_creator_artist": "",
     # Attention backend. Empty = leave it to the model/transformers.
     #
     # WHY THIS IS EMPTY BY DEFAULT: MOSS's audio encoder config pins
