@@ -130,7 +130,78 @@ class TestFillPlaceholders:
         assert _moss_prompts({"moss_attn_implementation": "sdpa"})["attn_impl"] == "sdpa"
 
 
-class TestKernelLogFetching:
+class TestPlaceholderGuard:
+    """A stale app must fail instantly, not after a Kaggle round-trip.
+
+    The real failure: the kernel file gained `{{ATTN_IMPL}}` while the running
+    app still had the OLD substitution function in memory (Python caches
+    modules). The placeholder reached Kaggle unsubstituted and died 52 seconds
+    later with `NameError: name 'ATTN_IMPL' is not defined` -- because `{{X}}`
+    is valid Python (a set containing a set), it was not a syntax error.
+    """
+
+    def test_unknown_placeholder_raises(self):
+        script = "X = {{SOMETHING_NEW}}\n"
+        with pytest.raises(RuntimeError) as exc:
+            _fill_placeholders(script, "/kaggle/input/a",
+                               _moss_prompts({}), "")
+        assert "SOMETHING_NEW" in str(exc.value)
+
+    def test_error_message_names_the_remedy(self):
+        script = "X = {{SOMETHING_NEW}}\n"
+        with pytest.raises(RuntimeError) as exc:
+            _fill_placeholders(script, "/kaggle/input/a", _moss_prompts({}), "")
+        assert "restart" in str(exc.value).lower(), (
+            "the message must say what to DO, not just what is wrong"
+        )
+
+    def test_all_leftover_placeholders_are_reported_together(self):
+        script = "A = {{ONE}}\nB = {{TWO}}\n"
+        with pytest.raises(RuntimeError) as exc:
+            _fill_placeholders(script, "/kaggle/input/a", _moss_prompts({}), "")
+        message = str(exc.value)
+        assert "ONE" in message and "TWO" in message
+
+    def test_a_fully_known_script_does_not_raise(self):
+        script = "A = {{MODEL_ID}}\nB = {{CHUNK_SECONDS}}\n"
+        out = _fill_placeholders(script, "/kaggle/input/a", _moss_prompts({}), "")
+        assert "{{" not in out
+
+    def test_the_real_kernel_file_fills_completely(self):
+        """The CI invariant that was missing.
+
+        If someone adds a placeholder to the kernel without teaching
+        _fill_placeholders about it, this fails at commit time instead of on
+        Kaggle. Running the REAL file (not a fixture) is the point.
+        """
+        from workers.kaggle_moss import KERNEL_SCRIPT, _moss_prompts
+
+        script = KERNEL_SCRIPT.read_text(encoding="utf-8")
+        filled = _fill_placeholders(script, "/kaggle/input/probe",
+                                    _moss_prompts({}), "")
+        assert "{{" not in filled and "}}" not in filled
+
+    def test_the_real_kernel_file_is_valid_python_once_filled(self):
+        from workers.kaggle_moss import KERNEL_SCRIPT, _moss_prompts
+
+        script = KERNEL_SCRIPT.read_text(encoding="utf-8")
+        filled = _fill_placeholders(script, "/kaggle/input/probe",
+                                    _moss_prompts({}), "")
+        ast.parse(filled)
+
+    def test_validation_runs_before_the_audio_upload(self):
+        # Otherwise a placeholder mismatch still costs an upload.
+        #
+        # Match the CALL, not the bare name: "upload_audio_dataset" first
+        # appears in the function's import block, so a naive index() comparison
+        # would compare against the import rather than the call site.
+        import inspect
+        from workers import kaggle_moss
+        src = inspect.getsource(kaggle_moss.run_kaggle_moss)
+        assert src.index("_fill_placeholders(") < \
+            src.index("upload_audio_dataset(config"), (
+                "placeholder validation must happen BEFORE upload_audio_dataset"
+            )
     """A failed run must report WHY, not point at Kaggle's web UI."""
 
     def test_tail_is_returned(self, monkeypatch):

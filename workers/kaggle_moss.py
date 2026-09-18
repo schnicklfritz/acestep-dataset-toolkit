@@ -14,6 +14,7 @@ and pip-installs transformers==4.57.1, so ``enable_internet`` must be true.
 """
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -86,6 +87,27 @@ def _fill_placeholders(script, audio_input_path, prompts, custom_tag):
     out = out.replace("{{CHUNK_SECONDS}}", str(prompts["chunk_seconds"]))
     out = out.replace("{{CUSTOM_TAG}}", json.dumps(custom_tag or ""))
     out = out.replace("{{ATTN_IMPL}}", json.dumps(prompts.get("attn_impl", "")))
+
+    # REFUSE to return a script with placeholders this function cannot fill.
+    #
+    # This is how a real failure happened: the kernel file gained
+    # `{{ATTN_IMPL}}` while the running app still had the OLD function in memory
+    # (Python caches modules, so editing a file does not update a live process).
+    # The placeholder went through unsubstituted, and because `{{X}}` is VALID
+    # Python -- a set containing a set -- it failed on Kaggle 52 seconds later
+    # with a bare `NameError: name 'ATTN_IMPL' is not defined`.
+    #
+    # A placeholder whose name never lands in the pushed script is a bug; a
+    # placeholder that lands unsubstituted is a mystery. Fail here instead.
+    leftover = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", out)))
+    if leftover:
+        raise RuntimeError(
+            "The MOSS kernel contains placeholders this version cannot fill: "
+            + ", ".join(leftover)
+            + "\n\nThe app is running stale code: it reads the kernel from disk "
+              "but substitutes using the function loaded at startup. Restart "
+              "the app and try again."
+        )
     return out
 
 
@@ -113,6 +135,22 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
     prompts = _moss_prompts(config)
     temp_dir = tempfile.mkdtemp(prefix="ace_moss_")
     try:
+        # ------------------------------------------------------------------
+        # Validate the kernel's placeholders BEFORE any Kaggle round-trip.
+        #
+        # Filling with throwaway values runs the real substitution (and its
+        # leftover guard), so a kernel file that has drifted ahead of this
+        # build fails here -- instantly and for free -- rather than after an
+        # upload, a kernel push and 52 seconds of Kaggle time.
+        # ------------------------------------------------------------------
+        script_template = KERNEL_SCRIPT.read_text(encoding="utf-8")
+        _fill_placeholders(
+            script_template, "/kaggle/input/probe",
+            {"model_id": "", "style": "", "lyrics": "", "max_tokens": 1,
+             "chunk_seconds": 1, "attn_impl": ""},
+            "",
+        )
+
         # ---- stage every track into one upload folder -------------------
         audio_dir = os.path.join(temp_dir, "audio")
         os.makedirs(audio_dir, exist_ok=True)
@@ -138,9 +176,8 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
             )
 
         # ---- build the kernel ------------------------------------------
-        script = KERNEL_SCRIPT.read_text(encoding="utf-8")
         script = _fill_placeholders(
-            script, f"/kaggle/input/{audio_name}", prompts, custom_tag
+            script_template, f"/kaggle/input/{audio_name}", prompts, custom_tag
         )
 
         kernel_slug = f"ace-moss-{uuid.uuid4().hex[:6]}"
