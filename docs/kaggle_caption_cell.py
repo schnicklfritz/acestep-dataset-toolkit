@@ -29,6 +29,7 @@ import sys
 import json
 import glob
 import tempfile
+import time
 import subprocess
 from pathlib import Path
 
@@ -36,22 +37,80 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 
+def _preflight():
+    """Print the environment BEFORE anything slow or silent happens.
+
+    This kernel used to be silent for its first ~5 minutes (pip install, then a
+    multi-GB model download), so "nothing is happening" and "it is working" looked
+    identical from the outside. Worse, a failed pip install was swallowed by
+    check=False -- which is exactly how an Internet-off session fails with NO
+    error at all.
+    """
+    print(f"[caption] python       : {sys.version.split()[0]}", flush=True)
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True,
+                             text=True).stdout
+        gpus = [ln for ln in out.splitlines() if ln.strip()]
+        print(f"[caption] gpu          : {len(gpus)} device(s)", flush=True)
+        for line in gpus:
+            print(f"[caption]   {line.strip()}", flush=True)
+        if not gpus:
+            print("[caption] !! NO GPU -- Session options -> Accelerator = GPU T4 x2",
+                  flush=True)
+    except Exception as exc:                                     # noqa: BLE001
+        print(f"[caption] gpu          : nvidia-smi unavailable ({exc})", flush=True)
+
+    import socket  # noqa: PLC0415
+    try:
+        socket.create_connection(("huggingface.co", 443), timeout=8).close()
+        print("[caption] internet     : reachable", flush=True)
+    except Exception as exc:                                     # noqa: BLE001
+        print(f"[caption] internet     : NOT REACHABLE ({exc})", flush=True)
+        print("[caption] !! Turn Internet ON in Session options, or pip AND the "
+              "model download both fail silently.", flush=True)
+
+    try:
+        stat = os.statvfs("/kaggle/working")
+        print(f"[caption] free disk    : "
+              f"{stat.f_bavail * stat.f_frsize / 1e9:.0f} GB", flush=True)
+    except Exception:                                            # noqa: BLE001
+        pass
+
+
 def _install():
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                    "accelerate", "huggingface_hub", "hf-transfer",
-                    "soundfile", "librosa", "numba", "tinytag", "tqdm"],
-                   check=False)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                    "git+https://github.com/huggingface/transformers@v4.51.3-Qwen2.5-Omni-preview",
-                    "qwen-omni-utils[decord]"],
-                   check=False)
+    """pip install, REPORTING failures instead of swallowing them."""
+    steps = (
+        ["accelerate", "huggingface_hub", "hf-transfer", "soundfile",
+         "librosa", "numba", "tinytag", "tqdm"],
+        ["git+https://github.com/huggingface/transformers"
+         "@v4.51.3-Qwen2.5-Omni-preview", "qwen-omni-utils[decord]"],
+    )
+    for index, packages in enumerate(steps):
+        label = "base packages" if index == 0 else "transformers fork + qwen-omni-utils"
+        print(f"[caption] pip install  : {label} ...", flush=True)
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", *packages], check=False
+        )
+        if proc.returncode != 0:
+            print(f"[caption] !! pip FAILED (rc={proc.returncode}) for {label} -- "
+                  f"is Internet ON in Session options?", flush=True)
+        else:
+            print(f"[caption] pip ok       : {label}", flush=True)
 
 
+_preflight()
 _install()
 
 import torch  # noqa: E402
 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor  # noqa: E402
 from qwen_omni_utils import process_mm_info  # noqa: E402
+
+import transformers as _transformers  # noqa: E402
+
+print(f"[caption] torch        : {torch.__version__} "
+      f"(cuda {torch.version.cuda}, available={torch.cuda.is_available()})",
+      flush=True)
+print(f"[caption] transformers : {_transformers.__version__}", flush=True)
 
 AUDIO_FOLDER = "/kaggle/input/acestep-audio"
 CAPTION_PROMPT = "Annotate this audio clip as ONE caption in the exact schema above. Output only the caption text."
@@ -83,6 +142,15 @@ if not os.path.isdir(AUDIO_FOLDER):
 print("AUDIO_FOLDER =", AUDIO_FOLDER)
 # ---------------------------------------------------------------------------------
 
+print("[caption] limits       : max_new_tokens=" + str(MAX_NEW_TOKENS)
+      + " max_audio_s=" + str(120)
+      + " batch=" + str(BATCH_SIZE)
+      + " rep_penalty=" + str(REPETITION_PENALTY)
+      + " no_repeat_ngram=" + str(NO_REPEAT_NGRAM), flush=True)
+print("[caption] schema       : "
+      + ("ON (ACE-Step 1.5XL system prompt)" if SYSTEM_PROMPT else "OFF"), flush=True)
+print(f"[caption] audio folder : {AUDIO_FOLDER}", flush=True)
+
 
 def is_valid_json(path):
     try:
@@ -109,6 +177,11 @@ if MODEL_SOURCE is None:
         from huggingface_hub import login
         login(token=hf, add_to_git_credential=False)
 
+print(f"[caption] model source : {MODEL_SOURCE}", flush=True)
+print("[caption] loading model -- download + shard load, this is the slow part",
+      flush=True)
+_load_started = time.time()
+
 torch_dtype = torch.float16
 load_kwargs = {
     "device_map": "balanced",
@@ -126,11 +199,19 @@ except ImportError:
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(MODEL_SOURCE, **load_kwargs)
 model.disable_talker()
 processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_SOURCE, trust_remote_code=True)
+print(f"[caption] model loaded : {time.time() - _load_started:.0f}s", flush=True)
 
 audio_files = sorted(
     p for p in Path(AUDIO_FOLDER).rglob("*")
     if p.suffix.lower() in SUPPORTED_FORMATS and p.is_file()
 )
+print(f"[caption] audio files  : {len(audio_files)} under {AUDIO_FOLDER}", flush=True)
+if not audio_files:
+    print("[caption] !! NO AUDIO FOUND -- attach the audio dataset or fix the path "
+          "above. This run will finish immediately with 0 results.", flush=True)
+elif len(audio_files) == 1:
+    print("[caption] !! only ONE file found -- if you expected more, the dataset "
+          "mount is wrong.", flush=True)
 
 
 def truncate_audio(audio_path, max_seconds=120):
@@ -163,6 +244,8 @@ def extract_reply(text):
 results = []
 for i in range(0, len(audio_files), BATCH_SIZE):
     batch = audio_files[i:i + BATCH_SIZE]
+    print(f"[caption] captioning {i + 1}/{len(audio_files)}: {batch[0].name} "
+          f"(~30-120s, no output until the first one finishes)", flush=True)
     try:
         truncated = []
         for f in batch:
