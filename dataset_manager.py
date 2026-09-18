@@ -3287,6 +3287,12 @@ class DatasetManager(QMainWindow):
 
     def save_pipeline_defaults(self):
         self.config["caption_prompt"] = self.prompt_edit.toPlainText().strip()
+        # Appended to the built-in ACE-Step 1.5XL schema (modules/caption_spec.py).
+        # getattr-guarded: the caption tab is built with the UI, but this method can
+        # run before it exists in a headless/test construction.
+        system_editor = getattr(self, "system_prompt_edit", None)
+        if system_editor is not None:
+            self.config["caption_system_prompt"] = system_editor.toPlainText().strip()
         self.config["caption_max_tokens"] = self.max_tokens_spin.value()
         self.config["caption_max_audio_duration"] = self.max_dur_spin.value()
         self.config["caption_batch_size"] = self.batch_size_spin.value()

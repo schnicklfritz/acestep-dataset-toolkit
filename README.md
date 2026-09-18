@@ -192,6 +192,34 @@ falling back to the dataset name (`sabbath` → Black Sabbath, `Doorsdata` →
 The Doors). An unrecognised artist gets the fundamentals only — never another
 artist's signature terms.
 
+## 📐 The caption schema (ACE-Step 1.5XL)
+
+Training captions are not free prose. `docs/ACE_Step_1.5_Master_Annotation_Guide.md`
+§1 defines a **hybrid caption**: 5–12 comma-separated conditioning keywords
+(max 15) followed by 2–3 sentences of flow narrative — with a mandatory vocal
+descriptor, concrete instruments/gear, and **no BPM, key or time signature** in
+the text (those are dedicated metadata fields).
+
+That standard lives in code as `modules/caption_spec.py`, and every captioning
+backend is given it as the **system prompt**:
+
+| Knob | Role |
+|---|---|
+| *(built in)* | the schema itself — set in stone in `modules/caption_spec.py` |
+| `caption_system_prompt` — **"System Prompt (added)"** | extra instructions, **appended** to the schema (house style, per-artist emphasis) |
+| `caption_prompt` — **"Caption Prompt"** | the user turn: what to do with this clip |
+
+The user prompt can extend the schema but never replace or precede it, and an
+empty field changes nothing. The composer also ignores the old shipped default,
+which said *"Write 3 to 5 sentences. Start with A or An"* — the exact opposite of
+a front-loaded tag list, and the reason schema-less runs produced captions that
+opened with "A high-energy Garage Rock track..." instead of keywords.
+
+`modules/caption_quality.py` then **checks** the result: tag count, vocal
+descriptor, BPM/key/time-signature leakage, field-label headings, markdown, and
+degenerate repetition. Violations are reported per caption in the caption audit
+and in manifest validation — a prompt is guidance, a check is a guarantee.
+
 ## 🔐 Configurability & security
 
 * **"Anything you can't configure is a bug."** Every model, backend, threshold,

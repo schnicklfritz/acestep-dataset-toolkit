@@ -3,8 +3,14 @@
 Helps the "consistent instrument naming" requirement for LoRA/LoKR training —
 finds tracks with missing captions, per-track instrument coverage, and
 inconsistent casing/spelling of the same instrument across captions.
+
+Also reports ACE-Step 1.5XL SCHEMA violations per caption (front-loaded tag list,
+mandatory vocal descriptor, no BPM/key/time-signature, no headings, no degenerate
+repetition) via modules/caption_quality.py.
 """
 import re
+
+from modules.caption_quality import check_caption
 
 COMMON_INSTRUMENTS = [
     "vocals", "lead vocal", "backing vocals", "drums", "drum kit", "bass",
@@ -35,6 +41,10 @@ def audit_captions(dataset):
             f"  {i}. {name} — instruments: "
             + (", ".join(found) if found else "(none found)")
         )
+        # Schema conformance (ACE-Step 1.5XL). Reported per caption so a bad
+        # caption is actionable rather than merely "present".
+        for issue in check_caption(cap):
+            reports.append(f"       SCHEMA: {issue}")
 
     # Casing/spelling consistency of known instruments across all captions
     casing = {}

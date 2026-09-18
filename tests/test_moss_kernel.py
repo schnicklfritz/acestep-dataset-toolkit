@@ -41,6 +41,9 @@ REQUIRED_PLACEHOLDERS = {
     "{{CHUNK_SECONDS}}",
     "{{CUSTOM_TAG}}",
     "{{ATTN_IMPL}}",
+    "{{SYSTEM_PROMPT}}",
+    "{{REPETITION_PENALTY}}",
+    "{{NO_REPEAT_NGRAM}}",
 }
 
 # Values the app would substitute at push time.
@@ -60,6 +63,9 @@ SUBSTITUTIONS = {
     "{{CHUNK_SECONDS}}": "110",
     "{{CUSTOM_TAG}}": '""',
     "{{ATTN_IMPL}}": '""',
+    "{{SYSTEM_PROMPT}}": '"You are a music annotation assistant."',
+    "{{REPETITION_PENALTY}}": "1.15",
+    "{{NO_REPEAT_NGRAM}}": "6",
 }
 
 

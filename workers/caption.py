@@ -3,6 +3,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from workers.deepseek import DeepSeekMusicOrchestrator
 from workers.caption_backends import GeminiBackend, CustomOpenAICompatBackend
+from modules import caption_spec
 from modules.tagger import analyze_audio, compose_caption
 
 # ---------------------------------------------------------------------------
@@ -10,15 +11,13 @@ from modules.tagger import analyze_audio, compose_caption
 # instrument-only prompt is used by "Detect via Captioner" so the model lists
 # just the instruments, which DeepSeek then turns into MVSEP model choices.
 # ---------------------------------------------------------------------------
-FULL_CAPTION_PROMPT = (
-    "You are a professional music metadata tagger preparing training data for "
-    "ACE-Step. Listen carefully to this audio clip and write a detailed description. "
-    "Cover: specific instrumentation (name every instrument you hear), whether "
-    "vocals are present (gender, register, timbre) or confirm instrumental, "
-    "recording and production character, mood, and how the clip develops. "
-    "Write 3 to 5 sentences. Start with A or An. Genre, BPM, key, and time "
-    "signature are handled separately — do not include them."
-)
+# DEPRECATED — kept as an alias so existing imports keep working. This was the
+# schema-less prompt that contradicted the ACE-Step 1.5XL annotation standard:
+# "Write 3 to 5 sentences. Start with A or An" is the exact opposite of the
+# required front-loaded tag list (5-12 comma-separated keywords). The schema now
+# comes from modules/caption_spec.py and is sent as the SYSTEM prompt; this is
+# only the user-turn task line.
+FULL_CAPTION_PROMPT = caption_spec.DEFAULT_TASK_PROMPT
 
 INSTRUMENT_ONLY_PROMPT = (
     "You are a professional music metadata tagger. Listen carefully to this audio "
@@ -153,8 +152,14 @@ class RemoteCaptionWorker(QThread):
         audio_slug = upload_audio_dataset(self.config, audio_dir)
         audio_name = audio_slug.split("/")[-1]
 
-        # 3. Build the kernel from the shared template
-        prompt = self.caption_prompt or self.config.get("caption_prompt", FULL_CAPTION_PROMPT)
+        # 3. Build the kernel from the shared template.
+        #    The SCHEMA is the system prompt; the user turn only says what to do
+        #    with this clip. An explicit caption_prompt (e.g. INSTRUMENT_ONLY_
+        #    PROMPT from "Detect via Captioner") still wins as the user turn.
+        prompt = self.caption_prompt or caption_spec.task_prompt_from_config(self.config)
+        system_prompt = caption_spec.system_prompt_from_config(self.config)
+        rep_penalty = float(self.config.get("caption_repetition_penalty", 1.15) or 1.0)
+        no_repeat = int(self.config.get("caption_no_repeat_ngram", 6) or 0)
         complexity = staged_tracks[0][3] if staged_tracks else self.complexity
         max_base = int(self.config.get("caption_max_tokens", 512))
         max_tokens = 64 if complexity == "Concise Tags" else max_base
@@ -164,10 +169,13 @@ class RemoteCaptionWorker(QThread):
             kernel_template.read_text(encoding="utf-8")
             .replace("{{AUDIO_DATASET_PATH}}", f"/kaggle/input/{audio_name}")
             .replace("{{CAPTION_PROMPT}}", json.dumps(prompt))
+            .replace("{{SYSTEM_PROMPT}}", json.dumps(system_prompt))
             .replace("{{MAX_NEW_TOKENS}}", str(max_tokens))
             .replace("{{MAX_AUDIO_DURATION}}", str(max_duration))
             .replace("{{BATCH_SIZE}}", str(max(1, int(self.config.get("caption_batch_size", 1)))))
             .replace("{{CUSTOM_TAG}}", json.dumps(self.general_meta.get("custom_tag", "")))
+            .replace("{{REPETITION_PENALTY}}", str(rep_penalty))
+            .replace("{{NO_REPEAT_NGRAM}}", str(no_repeat))
         )
 
         kernel_slug = f"ace-caption-{uuid.uuid4().hex[:6]}"
@@ -248,7 +256,8 @@ class RemoteCaptionWorker(QThread):
     def _run_gemini(self, staged_tracks):
         """Caption each staged preview with Google Gemini (audio-native)."""
         backend = GeminiBackend(self.config)
-        prompt = self.caption_prompt or self.config.get("caption_prompt", FULL_CAPTION_PROMPT)
+        prompt = self.caption_prompt or caption_spec.task_prompt_from_config(self.config)
+        system_prompt = caption_spec.system_prompt_from_config(self.config)
         tag = self.general_meta.get("custom_tag", "").strip()
         tag_prefix = f"{tag}, " if tag else ""
         total = len(staged_tracks)
@@ -256,7 +265,7 @@ class RemoteCaptionWorker(QThread):
             if self._is_cancelled:
                 break
             try:
-                cap = backend.caption(path, fname, prompt)
+                cap = backend.caption(path, fname, prompt, system_prompt=system_prompt)
                 cap = f"{tag_prefix}{cap}" if tag_prefix else cap
             except Exception as e:  # noqa: BLE001
                 cap = f"Gemini error: {e}"
@@ -268,7 +277,8 @@ class RemoteCaptionWorker(QThread):
     def _run_custom_endpoint(self, staged_tracks):
         """Caption each staged preview via an OpenAI-compatible endpoint."""
         backend = CustomOpenAICompatBackend(self.config)
-        prompt = self.caption_prompt or self.config.get("caption_prompt", FULL_CAPTION_PROMPT)
+        prompt = self.caption_prompt or caption_spec.task_prompt_from_config(self.config)
+        system_prompt = caption_spec.system_prompt_from_config(self.config)
         tag = self.general_meta.get("custom_tag", "").strip()
         tag_prefix = f"{tag}, " if tag else ""
         total = len(staged_tracks)
@@ -276,7 +286,7 @@ class RemoteCaptionWorker(QThread):
             if self._is_cancelled:
                 break
             try:
-                cap = backend.caption(path, fname, prompt)
+                cap = backend.caption(path, fname, prompt, system_prompt=system_prompt)
                 cap = f"{tag_prefix}{cap}" if tag_prefix else cap
             except Exception as e:  # noqa: BLE001
                 cap = f"Custom endpoint error: {e}"
@@ -310,16 +320,26 @@ class RemoteCaptionWorker(QThread):
         for idx, (sid, fname, path, complexity) in enumerate(staged_tracks):
             if self._is_cancelled:
                 break
-            prompt = f"Generate a detailed music caption for the track '{fname}'."
+            # NO AUDIO IS SENT on this path — the model never hears the track, so
+            # it can only produce a filename-derived DRAFT. It is given the schema
+            # so the shape is right, but do not mistake it for a grounded caption.
+            prompt = (
+                f"Filename: {fname}\n\n"
+                + caption_spec.task_prompt_from_config(self.config)
+            )
             try:
                 response = client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": "You are a prompt engineer for audio models."},
+                        {"role": "system",
+                         "content": caption_spec.system_prompt_from_config(self.config)},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.3,
-                    max_tokens=200
+                    max_tokens=int(self.config.get("caption_max_tokens", 512) or 512),
+                    frequency_penalty=float(
+                        self.config.get("caption_frequency_penalty", 0.3) or 0
+                    ),
                 )
                 caption = response.choices[0].message.content.strip()
             except Exception as e:

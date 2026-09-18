@@ -26,6 +26,11 @@ Placeholders substituted by the app at push time:
   {{ATTN_IMPL}}           -> JSON string literal ("" = leave the model default).
                              "sdpa" / "flash_attention_2" / "eager". flash-attn
                              does NOT support Turing (T4, sm_75).
+  {{SYSTEM_PROMPT}}       -> JSON string literal; the ACE-Step 1.5XL annotation
+                             schema. MOSS takes ONE prompt string and has no
+                             system role, so it is prepended to each prompt.
+  {{REPETITION_PENALTY}}  -> float, 1.0 = off
+  {{NO_REPEAT_NGRAM}}     -> int, 0 = off
 
 --------------------------------------------------------------------------
 WHY THE GITHUB CLONE IS MANDATORY
@@ -78,6 +83,9 @@ MAX_NEW_TOKENS = {{MAX_NEW_TOKENS}}
 CHUNK_SECONDS = {{CHUNK_SECONDS}}
 CUSTOM_TAG = {{CUSTOM_TAG}}
 ATTN_IMPL = {{ATTN_IMPL}}
+SYSTEM_PROMPT = {{SYSTEM_PROMPT}}
+REPETITION_PENALTY = {{REPETITION_PENALTY}}
+NO_REPEAT_NGRAM = {{NO_REPEAT_NGRAM}}
 
 # ---------------------------------------------------------------------------
 # Which MOSS family? Derived from the model id, so either one works.
@@ -363,8 +371,13 @@ def _mmss(seconds):
 # One generation pass over one audio window
 # ---------------------------------------------------------------------------
 def _generate(audio, prompt):
-    """Run MOSS on a single window. Returns decoded text."""
-    inputs = processor(text=prompt, audios=[audio], return_tensors="pt")
+    """Run MOSS on a single window. Returns decoded text.
+
+    MOSS takes ONE prompt string and has no system role, so the annotation schema
+    is PREPENDED here rather than passed as a system message.
+    """
+    full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}" if SYSTEM_PROMPT else prompt
+    inputs = processor(text=full_prompt, audios=[audio], return_tensors="pt")
     inputs = inputs.to(model.device)
 
     # audio_data is built as bfloat16 by MelConfig.mel_dtype; cast it to the
@@ -383,6 +396,10 @@ def _generate(audio, prompt):
             do_sample=False,      # deterministic: this is annotation, not art
             num_beams=1,
             use_cache=True,
+            # do_sample=False is still greedy, and greedy with no penalty can loop
+            # on a repeated phrase until the token cap.
+            repetition_penalty=REPETITION_PENALTY,
+            no_repeat_ngram_size=NO_REPEAT_NGRAM,
         )
 
     input_len = inputs["input_ids"].shape[1]

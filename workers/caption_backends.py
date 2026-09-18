@@ -52,7 +52,7 @@ class GeminiBackend:
             or "gemini-2.5-flash"
         )
 
-    def caption(self, audio_path, filename, prompt, metadata=None):
+    def caption(self, audio_path, filename, prompt, metadata=None, system_prompt=""):
         if not self.api_key:
             raise ValueError(
                 "Gemini API key missing — set it in ⚙ Settings (or GEMINI_API_KEY)."
@@ -69,8 +69,14 @@ class GeminiBackend:
             audio_part = genai_types.Part.from_bytes(
                 data=_audio_bytes(audio_path), mime_type=_mime_for(audio_path)
             )
+            gen_config = None
+            if system_prompt:
+                # The ACE-Step 1.5XL annotation schema belongs in the SYSTEM role.
+                gen_config = genai_types.GenerateContentConfig(
+                    system_instruction=system_prompt
+                )
             response = client.models.generate_content(
-                model=self.model, contents=[audio_part, prompt]
+                model=self.model, contents=[audio_part, prompt], config=gen_config
             )
             return (response.text or "").strip()
         except ImportError:
@@ -84,9 +90,10 @@ class GeminiBackend:
 
             legacy.configure(api_key=self.api_key)
             uploaded = legacy.upload_file(audio_path)
-            response = legacy.GenerativeModel(self.model).generate_content(
-                [uploaded, prompt]
+            model = legacy.GenerativeModel(
+                self.model, system_instruction=system_prompt or None
             )
+            response = model.generate_content([uploaded, prompt])
             return (response.text or "").strip()
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(
@@ -96,7 +103,14 @@ class GeminiBackend:
 
 
 class CustomOpenAICompatBackend:
-    """Caption via any OpenAI-compatible endpoint (vLLM / Ollama / local GPU)."""
+    """Caption via any OpenAI-compatible endpoint (vLLM / Ollama / local GPU).
+
+    GROUNDING CAVEAT: audio is only attached when ``custom_caption_audio`` is
+    true. With it false (the default) this backend sends TEXT ONLY, so a model
+    reached this way is describing a track it never heard — it will happily invent
+    a genre and a BPM. The schema prompt now forbids BPM in the caption and
+    modules/caption_quality.py flags it, but the real fix is to send the audio.
+    """
 
     def __init__(self, config):
         self.config = config
@@ -109,7 +123,7 @@ class CustomOpenAICompatBackend:
         # custom auth token when the user runs a gated endpoint.
         self.api_key = config.get("custom_key", "").strip() or "sk-no-key"
 
-    def caption(self, audio_path, filename, prompt, metadata=None):
+    def caption(self, audio_path, filename, prompt, metadata=None, system_prompt=""):
         if not self.base_url:
             raise ValueError(
                 "Custom endpoint base URL missing — set it in ⚙ Settings."
@@ -126,9 +140,22 @@ class CustomOpenAICompatBackend:
                     "input_audio": {"data": _audio_b64(audio_path), "format": fmt},
                 }
             )
+        messages = []
+        if system_prompt:
+            # The ACE-Step 1.5XL annotation schema belongs in the SYSTEM role.
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content})
         response = client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": content}],
+            messages=messages,
             max_tokens=int(self.config.get("caption_max_tokens", 512)),
+            # Without a penalty a caption can loop on a repeated phrase until the
+            # token cap (observed: a lyric refrain repeated ~200x).
+            frequency_penalty=float(
+                self.config.get("caption_frequency_penalty", 0.3) or 0
+            ),
+            presence_penalty=float(
+                self.config.get("caption_presence_penalty", 0.0) or 0
+            ),
         )
         return (response.choices[0].message.content or "").strip()

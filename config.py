@@ -68,15 +68,25 @@ DEFAULT_CONFIG = {
     "remember_custom_key": True,
     "remember_mvsep_api_key": True,
     # ---- Pipeline & model defaults (all overridable in ⚙ Settings) ----
-    "caption_prompt": (
-        "You are a professional music metadata tagger preparing training data for ACE-Step. "
-        "Listen carefully to this audio clip and write a detailed description. "
-        "Cover: specific instrumentation (name every instrument you hear), "
-        "whether vocals are present (gender, register, timbre) or confirm instrumental, "
-        "recording and production character, mood, and how the clip develops. "
-        "Write 3 to 5 sentences. Start with A or An. "
-        "Genre, BPM, key, and time signature are handled separately — do not include them."
-    ),
+    # ---- Caption schema + prompts ----
+    # The ACE-Step 1.5XL caption schema itself is BUILT IN and not editable:
+    # modules/caption_spec.py encodes docs/ACE_Step_1.5_Master_Annotation_Guide.md
+    # §1/§3 and docs/descriptor_reference.md §10, and every backend is given it as
+    # the SYSTEM prompt.
+    #
+    # caption_system_prompt: ADDITIONAL user instructions, appended to the schema
+    # (house style, per-artist emphasis). It can never replace the schema.
+    "caption_system_prompt": "",
+    # caption_prompt: the USER TURN — what to do with this clip. Kept as a key for
+    # backward compatibility. The old shipped default said "Write 3 to 5 sentences.
+    # Start with A or An", which CONTRADICTS the schema's front-loaded tag list, so
+    # caption_spec.task_prompt_from_config() ignores that value if it is the
+    # unmodified default (see LEGACY_CAPTION_PROMPT there).
+    "caption_prompt": "",
+    # Decoding controls for the GPU captioners. Greedy decoding with no penalty is
+    # what let a caption loop on a lyric refrain ~200 times until the token cap.
+    "caption_repetition_penalty": 1.15,   # 1.0 = off
+    "caption_no_repeat_ngram": 6,         # tokens; 0 = off
     "caption_max_tokens": 512,
     "caption_max_audio_duration": 120,   # seconds (0 = whole file)
     "caption_batch_size": 1,             # chunks per captioner forward pass on the Kaggle GPU

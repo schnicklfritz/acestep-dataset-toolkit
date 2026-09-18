@@ -7,6 +7,7 @@ from openai import OpenAI
 from PySide6.QtCore import QThread, Signal
 from stem_separator import StemSeparator
 from workers.deepseek import DeepSeekMusicOrchestrator
+from modules import caption_spec
 from modules.tagger import analyze_audio, compose_caption
 
 class StructuralPipelineWorker(QThread):
@@ -343,16 +344,12 @@ class StructuralPipelineWorker(QThread):
         audio_slug = upload_audio_dataset(self.config, audio_dir)
         audio_name = audio_slug.split("/")[-1]
 
-        # 3. Build the kernel from the shared template
-        prompt = self.config.get("caption_prompt", (
-            "You are a professional music metadata tagger preparing training data for ACE-Step. "
-            "Listen carefully to this audio clip and write a detailed description. "
-            "Cover: specific instrumentation (name every instrument you hear), "
-            "whether vocals are present or confirm instrumental, "
-            "recording and production character, mood, and how the clip develops. "
-            "Write 3 to 5 sentences. Start with A or An. "
-            "Genre, BPM, key, and time signature are handled separately -- do not include them."
-        ))
+        # 3. Build the kernel from the shared template.
+        #    The SCHEMA is the system prompt (see modules/caption_spec.py).
+        prompt = caption_spec.task_prompt_from_config(self.config)
+        system_prompt = caption_spec.system_prompt_from_config(self.config)
+        rep_penalty = float(self.config.get("caption_repetition_penalty", 1.15) or 1.0)
+        no_repeat = int(self.config.get("caption_no_repeat_ngram", 6) or 0)
         max_tokens = int(self.config.get("caption_max_tokens", 512))
         max_duration = int(self.config.get("caption_max_audio_duration", 120))
         kernel_template = _Path(__file__).resolve().parent.parent / "kernels" / "caption_kernel.py"
@@ -360,10 +357,13 @@ class StructuralPipelineWorker(QThread):
             kernel_template.read_text(encoding="utf-8")
             .replace("{{AUDIO_DATASET_PATH}}", f"/kaggle/input/{audio_name}")
             .replace("{{CAPTION_PROMPT}}", json.dumps(prompt))
+            .replace("{{SYSTEM_PROMPT}}", json.dumps(system_prompt))
             .replace("{{MAX_NEW_TOKENS}}", str(max_tokens))
             .replace("{{MAX_AUDIO_DURATION}}", str(max_duration))
             .replace("{{BATCH_SIZE}}", str(max(1, int(self.config.get("caption_batch_size", 1)))))
             .replace("{{CUSTOM_TAG}}", json.dumps(""))
+            .replace("{{REPETITION_PENALTY}}", str(rep_penalty))
+            .replace("{{NO_REPEAT_NGRAM}}", str(no_repeat))
         )
 
         kernel_slug = f"struct-caption-{uuid.uuid4().hex[:6]}"

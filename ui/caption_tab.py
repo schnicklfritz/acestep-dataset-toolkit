@@ -346,8 +346,26 @@ def build_caption_tab(manager, parent):
     manager.prompt_edit.setPlainText(manager.config.get("caption_prompt", ""))
     manager.prompt_edit.setMaximumHeight(140)
     manager.prompt_edit.setPlaceholderText("Instruction given to the caption model for every chunk.")
-    manager.prompt_edit.setToolTip("Edit to steer how descriptions are written.")
+    manager.prompt_edit.setToolTip(
+        "The user turn: what to do with this clip. The annotation schema itself is "
+        "built in and sent as the system prompt."
+    )
     p_form.addRow("Caption Prompt:", manager.prompt_edit)
+
+    manager.system_prompt_edit = QTextEdit()
+    manager.system_prompt_edit.setPlainText(
+        manager.config.get("caption_system_prompt", "")
+    )
+    manager.system_prompt_edit.setMaximumHeight(90)
+    manager.system_prompt_edit.setPlaceholderText(
+        "Extra instructions, appended to the built-in ACE-Step 1.5XL schema..."
+    )
+    manager.system_prompt_edit.setToolTip(
+        "The ACE-Step 1.5XL caption schema is built in (modules/caption_spec.py) and "
+        "cannot be replaced — this text is APPENDED to it. Use it for house style or "
+        "per-artist emphasis."
+    )
+    p_form.addRow("System Prompt (added):", manager.system_prompt_edit)
 
     manager.max_tokens_spin = _spin(64, 4096, int(manager.config.get("caption_max_tokens", 512)))
     manager.max_tokens_spin.setToolTip("Maximum tokens the captioner may generate per chunk.")

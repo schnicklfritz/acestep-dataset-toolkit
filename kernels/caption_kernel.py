@@ -8,9 +8,14 @@ writes ``/kaggle/working/captions_out.json``::
 
 Placeholders substituted by the app at push time:
   {{AUDIO_DATASET_PATH}}  -> /kaggle/input/<audio-dataset-name>
-  {{CAPTION_PROMPT}}      -> prompt as a JSON string literal
+  {{CAPTION_PROMPT}}      -> the user turn, as a JSON string literal
+  {{SYSTEM_PROMPT}}       -> the ACE-Step 1.5XL annotation schema (system turn),
+                             as a JSON string literal. Appended to the model's
+                             own identity line, never substituted for it.
   {{MAX_NEW_TOKENS}}      -> int (Concise Tags ~64, else ~512)
   {{CUSTOM_TAG}}          -> trigger tag as a JSON string literal
+  {{REPETITION_PENALTY}}  -> float, 1.0 = off
+  {{NO_REPEAT_NGRAM}}     -> int, 0 = off
 """
 import os
 import sys
@@ -43,9 +48,20 @@ from qwen_omni_utils import process_mm_info  # noqa: E402
 
 AUDIO_FOLDER = "{{AUDIO_DATASET_PATH}}"
 CAPTION_PROMPT = {{CAPTION_PROMPT}}
+SYSTEM_PROMPT = {{SYSTEM_PROMPT}}
 MAX_NEW_TOKENS = {{MAX_NEW_TOKENS}}
 BATCH_SIZE = {{BATCH_SIZE}}
 CUSTOM_TAG = {{CUSTOM_TAG}}
+REPETITION_PENALTY = {{REPETITION_PENALTY}}
+NO_REPEAT_NGRAM = {{NO_REPEAT_NGRAM}}
+
+# The model's own identity line, kept verbatim (set in stone). The ACE-Step
+# annotation SCHEMA in SYSTEM_PROMPT is APPENDED to it, never substituted for it.
+QWEN_IDENTITY = (
+    "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
+    "capable of perceiving auditory and visual inputs, as well as generating "
+    "text and speech."
+)
 SUPPORTED_FORMATS = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.wma'}
 
 
@@ -136,9 +152,7 @@ for i in range(0, len(audio_files), BATCH_SIZE):
         conversations = [
             [
                 {"role": "system", "content": [{"type": "text", "text": (
-                    "You are Qwen, a virtual human developed by the Qwen Team, "
-                    "Alibaba Group, capable of perceiving auditory and visual inputs, "
-                    "as well as generating text and speech.")}]},
+                    QWEN_IDENTITY + "\n\n" + SYSTEM_PROMPT)}]},
                 {"role": "user", "content": [
                     {"type": "audio", "audio": t},
                     {"type": "text", "text": CAPTION_PROMPT},
@@ -159,6 +173,10 @@ for i in range(0, len(audio_files), BATCH_SIZE):
             output_ids = model.generate(
                 **inputs, use_audio_in_video=False, return_audio=False,
                 max_new_tokens=MAX_NEW_TOKENS,
+                # Greedy decoding with no penalty is what let a caption loop on a
+                # repeated lyric phrase ~200 times until the token cap.
+                repetition_penalty=REPETITION_PENALTY,
+                no_repeat_ngram_size=NO_REPEAT_NGRAM,
             )
         full_texts = processor.batch_decode(
             output_ids, skip_special_tokens=True,

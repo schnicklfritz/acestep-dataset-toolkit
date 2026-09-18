@@ -22,6 +22,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from modules import caption_spec
+
 KERNEL_SCRIPT = (
     Path(__file__).resolve().parent.parent / "kernels" / "moss_caption_kernel.py"
 )
@@ -68,6 +70,13 @@ def _moss_prompts(config):
         # "" = leave the attention backend to the model. See config.py for why
         # this is not forced, and note flash-attn has no Turing (T4) support.
         "attn_impl": (config.get("moss_attn_implementation") or "").strip(),
+        # The ACE-Step 1.5XL schema, prepended to every prompt by the kernel
+        # (MOSS has no system role). Additional user instructions are appended.
+        "system_prompt": caption_spec.system_prompt_from_config(config),
+        "repetition_penalty": float(
+            config.get("caption_repetition_penalty", 1.15) or 1.0
+        ),
+        "no_repeat_ngram": int(config.get("caption_no_repeat_ngram", 6) or 0),
     }
 
 
@@ -87,6 +96,9 @@ def _fill_placeholders(script, audio_input_path, prompts, custom_tag):
     out = out.replace("{{CHUNK_SECONDS}}", str(prompts["chunk_seconds"]))
     out = out.replace("{{CUSTOM_TAG}}", json.dumps(custom_tag or ""))
     out = out.replace("{{ATTN_IMPL}}", json.dumps(prompts.get("attn_impl", "")))
+    out = out.replace("{{SYSTEM_PROMPT}}", json.dumps(prompts.get("system_prompt", "")))
+    out = out.replace("{{REPETITION_PENALTY}}", str(prompts.get("repetition_penalty", 1.15)))
+    out = out.replace("{{NO_REPEAT_NGRAM}}", str(prompts.get("no_repeat_ngram", 6)))
 
     # REFUSE to return a script with placeholders this function cannot fill.
     #
