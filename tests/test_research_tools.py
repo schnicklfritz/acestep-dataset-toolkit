@@ -93,6 +93,53 @@ def test_corpus_stats_reports_missing_dir(tmp_path):
     assert "not found" in out
 
 
+@pytest.fixture
+def corpus_with_dependency_trees(tmp_path):
+    """A corpus root that also contains virtualenv/node_modules-shaped trees.
+
+    Regression: pointing the tools at a data root used to swallow an entire
+    virtualenv (numpy test ``.csv`` files) and induct *its* terms as vocabulary.
+    That is a plausible-looking wrong answer, not an error, so it is pinned here.
+    """
+    d = tmp_path / "corpus"
+    site_packages = d / "venv" / "lib" / "python3.11" / "site-packages"
+    site_packages.mkdir(parents=True)
+    node_pkg = d / "node_modules" / "pkg"
+    node_pkg.mkdir(parents=True)
+    (d / "review.txt").write_text(
+        "Album review: thunderous drums and doom-laden riffs.\n", encoding="utf-8"
+    )
+    (site_packages / "umath-validation-set.csv").write_text(
+        "numpy-validation-constant\n", encoding="utf-8"
+    )
+    (node_pkg / "readme.md").write_text(
+        "node-dependency-phrase\n", encoding="utf-8"
+    )
+    return str(d)
+
+
+def test_corpus_stats_skips_dependency_trees(corpus_with_dependency_trees):
+    out = corpus_stats(corpus_with_dependency_trees)
+    assert "Files: 1" in out                 # only the real review, not the decoys
+    assert "site-packages" not in out
+    assert "node_modules" not in out
+
+
+def test_induct_terms_ignores_dependency_trees(corpus_with_dependency_trees, tmp_path):
+    vocab = tmp_path / "vocabulary.txt"
+    vocab.write_text(
+        "thunderous drums\n"
+        "numpy-validation-constant\n"
+        "node-dependency-phrase\n",
+        encoding="utf-8",
+    )
+    out = induct_terms(corpus_with_dependency_trees, str(vocab), min_sources=1)
+    assert "thunderous drums" in out
+    # Phrases living only inside the pruned trees must never be offered.
+    assert "numpy-validation-constant" not in out
+    assert "node-dependency-phrase" not in out
+
+
 # --------------------------------------------------------------------------
 # grep_corpus
 # --------------------------------------------------------------------------

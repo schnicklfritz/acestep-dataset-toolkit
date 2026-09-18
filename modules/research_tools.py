@@ -26,6 +26,19 @@ from collections import Counter, defaultdict
 # Document extensions worth reading as plain text.
 TEXT_EXTS = (".txt", ".md", ".text", ".rst", ".csv", ".tsv", ".log")
 
+# Directory names never descended into. A corpus root is supposed to be prose
+# about an artist, but pointing one at a data root silently ingested an entire
+# virtualenv: 236 "files" / 1.9 MB of numpy test .csv whose terms then showed up
+# as inducted vocabulary. That is a WRONG ANSWER, not an error, so the guard
+# belongs here rather than in a docstring asking nicely.
+# Matched case-insensitively against each path segment, so a nested
+# ``venv/lib/python3.x/site-packages`` tree is pruned at its top.
+SKIP_DIRS = {
+    ".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
+    ".tox", ".idea", ".vscode", "node_modules", "venv", ".venv", "env",
+    ".env", "site-packages", "dist-packages", "bower_components",
+}
+
 # Every list tool is capped by construction. Callers may lower these, not raise
 # them silently -- the cap is part of the contract.
 DEFAULT_MAX_HITS = 50
@@ -61,7 +74,10 @@ def _iter_corpus_files(corpus_dir):
     if not os.path.isdir(corpus_dir):
         raise FileNotFoundError(f"corpus directory not found: {corpus_dir}")
     found = []
-    for root, _dirs, files in os.walk(corpus_dir):
+    for root, dirs, files in os.walk(corpus_dir):
+        # Prune in place so os.walk never descends -- see SKIP_DIRS.
+        dirs[:] = [d for d in dirs
+                   if d.lower() not in SKIP_DIRS and not d.startswith(".")]
         for name in files:
             if name.startswith("."):
                 continue
