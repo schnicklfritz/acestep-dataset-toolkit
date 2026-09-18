@@ -59,6 +59,7 @@ class TestFillPlaceholders:
         "MAX_NEW_TOKENS = {{MAX_NEW_TOKENS}}\n"
         "CHUNK_SECONDS = {{CHUNK_SECONDS}}\n"
         "CUSTOM_TAG = {{CUSTOM_TAG}}\n"
+        "ATTN_IMPL = {{ATTN_IMPL}}\n"
     )
 
     def _fill(self, **overrides):
@@ -68,6 +69,7 @@ class TestFillPlaceholders:
             "lyrics": "Transcribe these lyrics.",
             "max_tokens": 1024,
             "chunk_seconds": 110,
+            "attn_impl": "",
         }
         prompts.update(overrides)
         return _fill_placeholders(self.SCRIPT, "/kaggle/input/audio", prompts, "")
@@ -104,10 +106,28 @@ class TestFillPlaceholders:
         out = _fill_placeholders(
             self.SCRIPT, "/kaggle/input/audio",
             {"model_id": "m", "style": "s", "lyrics": "l",
-             "max_tokens": 1, "chunk_seconds": 1},
+             "max_tokens": 1, "chunk_seconds": 1, "attn_impl": ""},
             "sabbath",
         )
         assert 'CUSTOM_TAG = "sabbath"' in out
+
+    def test_attention_backend_defaults_to_empty(self):
+        # Empty means "leave it to the model": MOSS's audio encoder pins eager,
+        # and forcing a backend at the top level is untested.
+        assert 'ATTN_IMPL = ""' in self._fill()
+
+    def test_attention_backend_can_be_requested(self):
+        out = self._fill(attn_impl="sdpa")
+        assert 'ATTN_IMPL = "sdpa"' in out
+        ast.parse(out)
+
+    def test_unset_attention_backend_is_omitted_from_the_default_prompts(self):
+        # An empty config value must become "", never the string "None".
+        assert _moss_prompts({})["attn_impl"] == ""
+        assert _moss_prompts({"moss_attn_implementation": "   "})["attn_impl"] == ""
+
+    def test_attention_backend_config_is_passed_through(self):
+        assert _moss_prompts({"moss_attn_implementation": "sdpa"})["attn_impl"] == "sdpa"
 
 
 @pytest.fixture

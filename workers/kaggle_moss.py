@@ -64,6 +64,9 @@ def _moss_prompts(config):
             config.get("moss_chunk_seconds", DEFAULT_CHUNK_SECONDS)
             or DEFAULT_CHUNK_SECONDS
         ),
+        # "" = leave the attention backend to the model. See config.py for why
+        # this is not forced, and note flash-attn has no Turing (T4) support.
+        "attn_impl": (config.get("moss_attn_implementation") or "").strip(),
     }
 
 
@@ -82,6 +85,7 @@ def _fill_placeholders(script, audio_input_path, prompts, custom_tag):
     out = out.replace("{{MAX_NEW_TOKENS}}", str(prompts["max_tokens"]))
     out = out.replace("{{CHUNK_SECONDS}}", str(prompts["chunk_seconds"]))
     out = out.replace("{{CUSTOM_TAG}}", json.dumps(custom_tag or ""))
+    out = out.replace("{{ATTN_IMPL}}", json.dumps(prompts.get("attn_impl", "")))
     return out
 
 

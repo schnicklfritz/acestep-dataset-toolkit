@@ -40,6 +40,7 @@ REQUIRED_PLACEHOLDERS = {
     "{{MAX_NEW_TOKENS}}",
     "{{CHUNK_SECONDS}}",
     "{{CUSTOM_TAG}}",
+    "{{ATTN_IMPL}}",
 }
 
 # Values the app would substitute at push time.
@@ -58,6 +59,7 @@ SUBSTITUTIONS = {
     "{{MAX_NEW_TOKENS}}": "1024",
     "{{CHUNK_SECONDS}}": "110",
     "{{CUSTOM_TAG}}": '""',
+    "{{ATTN_IMPL}}": '""',
 }
 
 
@@ -189,6 +191,24 @@ class TestSilentDefaultTraps:
         # Clobbering Kaggle's CUDA build breaks the GPU stack.
         for call in re.findall(r"_pip\(([^)]*)\)", kernel_source):
             assert "torch==" not in call.replace("torchaudio", "")
+
+    def test_attention_backend_is_guarded_not_passed_when_empty(self, kernel_source):
+        # An empty ATTN_IMPL must NOT reach from_pretrained: "" is not a valid
+        # backend name and would raise rather than fall back.
+        assert "if ATTN_IMPL:" in kernel_source
+        assert '_load_kwargs["attn_implementation"] = ATTN_IMPL' in kernel_source
+        # The default is opt-out, not opt-in: no unconditional flash_attention_2.
+        assert 'attn_implementation="flash_attention_2"' not in kernel_source
+
+    def test_flash_attn_is_not_installed(self, kernel_source):
+        # flash-attn has no Turing (T4, sm_75) support -- its README points
+        # Turing users at a separate fork with only a subset of features -- so
+        # compiling it on Kaggle's default GPU buys nothing.
+        #
+        # Check the INSTALL commands, not the whole file: the source legitimately
+        # mentions flash-attn in comments explaining why it is not used.
+        for call in re.findall(r"_pip\(([^)]*)\)", kernel_source):
+            assert "flash" not in call.lower(), f"flash-attn is being installed: {call}"
 
 
 class TestAudioLimit:

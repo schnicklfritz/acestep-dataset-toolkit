@@ -34,6 +34,21 @@ DEFAULT_CONFIG = {
     "moss_max_tokens": 1024,
     # One MOSS pass covers ~120 s (hard encoder limit); 110 leaves headroom.
     "moss_chunk_seconds": 110,
+    # Attention backend. Empty = leave it to the model/transformers.
+    #
+    # WHY THIS IS EMPTY BY DEFAULT: MOSS's audio encoder config pins
+    # "_attn_implementation": "eager" for the Whisper layers, and the encoder
+    # does deepstack feature injection through forward hooks. Forcing a
+    # different backend at the top level might not reach the encoder, and
+    # changing it is untested -- so the default stays out of the way.
+    #
+    # Options are "sdpa" / "flash_attention_2" / "eager". Note that
+    # flash-attn does NOT support Turing (T4, sm_75) at all; its README points
+    # Turing users at a separate fork with only a subset of features. It is only
+    # worth setting on an Ampere+ allocation (A100 / L4), and installing it
+    # needs `pip install flash-attn --no-build-isolation` plus a multi-minute
+    # CUDA compile.
+    "moss_attn_implementation": "",
     # ---- Lyrics tidy (contraction -> phonetic table + -ing exceptions) ----
     # Empty = use the shipped defaults in modules/lyrics_normalizer.py.
     "lyrics_contractions": {},

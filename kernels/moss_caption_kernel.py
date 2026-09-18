@@ -19,6 +19,9 @@ Placeholders substituted by the app at push time:
   {{MAX_NEW_TOKENS}}      -> int
   {{CHUNK_SECONDS}}       -> int, audio window per pass (see AUDIO LIMIT below)
   {{CUSTOM_TAG}}          -> JSON string literal ("" for none)
+  {{ATTN_IMPL}}           -> JSON string literal ("" = leave the model default).
+                             "sdpa" / "flash_attention_2" / "eager". flash-attn
+                             does NOT support Turing (T4, sm_75).
 
 --------------------------------------------------------------------------
 WHY THE GITHUB CLONE IS MANDATORY
@@ -115,6 +118,7 @@ LYRICS_PROMPT = {{LYRICS_PROMPT}}
 MAX_NEW_TOKENS = {{MAX_NEW_TOKENS}}
 CHUNK_SECONDS = {{CHUNK_SECONDS}}
 CUSTOM_TAG = {{CUSTOM_TAG}}
+ATTN_IMPL = {{ATTN_IMPL}}
 
 
 # ---------------------------------------------------------------------------
@@ -166,18 +170,29 @@ else:
 # ---------------------------------------------------------------------------
 # fp16, not bf16: config.json declares bfloat16, but Kaggle T4s (Turing) have
 # no native bfloat16. fp16 is native and also what makes the 8B fit.
+#
+# attn_implementation is only passed when explicitly requested. MOSS's audio
+# encoder config pins "_attn_implementation": "eager" for the Whisper layers and
+# injects deepstack features through forward hooks, so forcing a different
+# backend is untested. Left empty, the model's own setting wins.
+#
+# Note flash-attn does NOT support Turing (T4, sm_75): its README sends Turing
+# users to a separate fork with only a subset of features. It is only worth
+# requesting on an Ampere+ allocation.
+_load_kwargs = {"trust_remote_code": True, "device_map": "balanced"}
+if ATTN_IMPL:
+    _load_kwargs["attn_implementation"] = ATTN_IMPL
 try:
-    _dtype_kwarg = {"dtype": torch.float16}
     model = MossAudioModel.from_pretrained(
-        MODEL_SOURCE, trust_remote_code=True, device_map="balanced", **_dtype_kwarg
+        MODEL_SOURCE, dtype=torch.float16, **_load_kwargs
     )
 except TypeError:
     # transformers < 4.56 uses torch_dtype=
     model = MossAudioModel.from_pretrained(
-        MODEL_SOURCE, trust_remote_code=True, device_map="balanced",
-        torch_dtype=torch.float16,
+        MODEL_SOURCE, torch_dtype=torch.float16, **_load_kwargs
     )
 model.eval()
+print(f"[moss] attn_implementation={ATTN_IMPL or '(model default)'}", flush=True)
 
 # enable_time_marker must be EXPLICIT: from_pretrained defaults it to False
 # even though __init__ defaults to True. Timestamps are the reason we want
