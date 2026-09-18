@@ -328,7 +328,7 @@ class StructuralPipelineWorker(QThread):
         """
         from modules.kaggle import (
             upload_audio_dataset, push_kernel, wait_kernel_done,
-            download_kernel_output,
+            wait_dataset_ready, download_kernel_output,
         )
         from pathlib import Path as _Path
 
@@ -342,6 +342,14 @@ class StructuralPipelineWorker(QThread):
         # 2. Upload as a private Kaggle dataset
         self.progress.emit(50, "Uploading section audio to Kaggle...")
         audio_slug = upload_audio_dataset(self.config, audio_dir)
+        # dataset_create_new returns before the version is mounted; pushing the
+        # kernel early yields an EMPTY /kaggle/input/<slug>.
+        self.progress.emit(53, "Waiting for the Kaggle dataset to finish processing…")
+        if not wait_dataset_ready(self.config, audio_slug):
+            raise RuntimeError(
+                f"Kaggle dataset {audio_slug} did not become ready in time; "
+                "the kernel would mount an EMPTY folder. Re-run."
+            )
         audio_name = audio_slug.split("/")[-1]
 
         # 3. Build the kernel from the shared template.

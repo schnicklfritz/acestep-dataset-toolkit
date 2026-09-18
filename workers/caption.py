@@ -112,6 +112,25 @@ class RemoteCaptionWorker(QThread):
                 pct = int(5 + (20 * (i + 1) / total))
                 self.progress.emit(pct, f"Staged: {s.get('filename', '')}")
 
+            skipped = total - len(staged_tracks)
+            if not staged_tracks:
+                # REFUSE to proceed. Running anyway uploads an EMPTY Kaggle
+                # dataset, and the kernel then reports "... was empty" and burns a
+                # GPU session producing nothing. That is exactly what happened.
+                self.error_occurred.emit(
+                    f"Nothing to caption: none of the {total} track(s) has a "
+                    "usable audio_path, so there is nothing to upload. Every "
+                    "sample whose audio file is missing is skipped silently — "
+                    "check the paths in 📂 Open JSON (e.g. files moved by "
+                    "normalization, or a dataset referencing another machine's "
+                    "absolute paths)."
+                )
+                return
+            if skipped:
+                self.progress.emit(
+                    25, f"Skipped {skipped} track(s) with missing audio files."
+                )
+
             if self.backend == "Kaggle Cloud (Free GPU)":
                 self._run_real_kaggle(staged_tracks, temp_dir)
             elif self.backend == "Gemini":
@@ -138,7 +157,7 @@ class RemoteCaptionWorker(QThread):
         """
         from modules.kaggle import (
             upload_audio_dataset, push_kernel, wait_kernel_done,
-            download_kernel_output,
+            wait_dataset_ready, download_kernel_output,
         )
         from pathlib import Path as _Path
 
@@ -151,6 +170,17 @@ class RemoteCaptionWorker(QThread):
         # 2. Upload as a private Kaggle dataset
         self.progress.emit(40, "Uploading audio to a private Kaggle dataset…")
         audio_slug = upload_audio_dataset(self.config, audio_dir)
+        # WAIT for the dataset version to finish processing. dataset_create_new
+        # returns early, and pushing the kernel before it is ready mounts an EMPTY
+        # /kaggle/input/<slug> -- the kernel then finds no audio and reports the
+        # folder as empty. This is the failure wait_dataset_ready exists to stop.
+        self.progress.emit(45, "Waiting for the Kaggle dataset to finish processing…")
+        if not wait_dataset_ready(self.config, audio_slug):
+            raise RuntimeError(
+                f"Kaggle dataset {audio_slug} did not become ready in time. "
+                "Pushing the kernel now would mount an EMPTY folder and caption "
+                "nothing. Check the dataset on kaggle.com and re-run."
+            )
         audio_name = audio_slug.split("/")[-1]
 
         # 3. Build the kernel from the shared template.
