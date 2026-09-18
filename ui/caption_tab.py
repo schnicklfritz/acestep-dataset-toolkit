@@ -14,7 +14,8 @@ The style <-> tag blend is exposed as a **slider** (0 = prose only,
 A dataset-wide value lives in config["tag_caption_ratio"]; a per-track override
 is stored on the sample as ``prompt_override`` (None = follow the dataset).
 """
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,18 +24,172 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 # Wheel-guarded slider: scrolling past it cannot move the blend ratio.
 from modules.wheel_guard import GuardedSlider as QSlider
 
+
+class TrackPickerButton(QToolButton):
+    """Dropdown listing the dataset's tracks with checkboxes.
+
+    Lets the user tick any subset of tracks for a run. Implemented as a
+    QToolButton + InstantPopup menu rather than a QComboBox, because a Qt combo
+    box with per-item checkboxes needs a custom item model and a delegate, and
+    its popup misbehaves with many rows. A menu scrolls on its own and is far
+    less code for the same UX.
+
+    Ticks are keyed by FILENAME (not row index) so they survive table refreshes,
+    dataset reloads, and re-ordering.
+    """
+
+    selection_changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setText("Tracks ▾ (0 selected)")
+        self.setPopupMode(QToolButton.InstantPopup)
+        self.setToolTip(
+            "Tick the tracks to process. Selections survive table refreshes and "
+            "are matched by filename, not row."
+        )
+        self._menu = QMenu(self)
+        self.setMenu(self._menu)
+        self._checked = set()          # filenames that are ticked
+        self._actions = {}             # filename -> QAction
+        self._known = []               # filenames currently in the dataset
+        self._samples = []             # last dataset passed to set_tracks
+        self._build_static_actions()
+        self.menu().aboutToShow.connect(self._sync_menu_from_state)
+
+    # -- static (quick) actions -------------------------------------------
+    def _build_static_actions(self):
+        for label, slot in (
+            ("Select all", self.select_all),
+            ("Select none", self.select_none),
+            ("Select tracks missing captions", self.select_missing_captions),
+        ):
+            act = QAction(label, self)
+            act.triggered.connect(slot)
+            self._menu.addAction(act)
+        self._menu.addSeparator()
+
+    # -- population --------------------------------------------------------
+    def set_tracks(self, samples):
+        """(Re)build the per-track list from dataset samples.
+
+        Existing ticks survive: a filename that was ticked stays ticked as long
+        as it is still present.
+
+        Called from refresh_table(), which fires often, so it short-circuits when
+        the track list has not actually changed -- rebuilding N QActions on every
+        table refresh would be wasteful on a large dataset.
+        """
+        samples = list(samples or [])
+        new_names = [(s.get("filename") or "").strip() for s in samples]
+        new_names = [n for n in new_names if n]
+
+        if new_names == self._known:
+            # Same tracks: just keep the samples current so
+            # select_missing_captions() sees fresh captions. No menu rebuild.
+            self._samples = samples
+            return
+
+        self._samples = samples
+        self._known = new_names
+
+        # Drop ticks for tracks that no longer exist.
+        self._checked &= set(self._known)
+
+        # Rebuild the per-track section, keeping the quick actions at the top.
+        for act in self._actions.values():
+            self._menu.removeAction(act)
+        self._actions.clear()
+
+        for name in self._known:
+            act = QAction(name, self)
+            act.setCheckable(True)
+            act.setChecked(name in self._checked)
+            act.toggled.connect(
+                lambda checked, n=name: self._on_track_toggled(n, checked)
+            )
+            self._menu.addAction(act)
+            self._actions[name] = act
+
+        self._update_label()
+
+    def refresh(self, samples=None):
+        """Alias kept for callers that just want the list rebuilt."""
+        if samples is None:
+            return
+        self.set_tracks(samples)
+
+    def _sync_menu_from_state(self):
+        for name, act in self._actions.items():
+            act.blockSignals(True)
+            act.setChecked(name in self._checked)
+            act.blockSignals(False)
+
+    # -- selection ---------------------------------------------------------
+    def _on_track_toggled(self, name, checked):
+        if checked:
+            self._checked.add(name)
+        else:
+            self._checked.discard(name)
+        self._update_label()
+        self.selection_changed.emit()
+
+    def select_missing_captions(self, *_):
+        """Tick tracks whose caption is blank.
+
+        Takes ``*_`` because QAction.triggered passes a ``checked`` bool that
+        must NOT be swallowed as a real argument.
+        """
+        missing = {
+            (s.get("filename") or "").strip()
+            for s in self._samples
+            if not (s.get("caption") or "").strip()
+        }
+        self._checked = {n for n in self._known if n in missing}
+        self._sync_menu_from_state()
+        self._update_label()
+        self.selection_changed.emit()
+
+    def select_all(self, *_):
+        self._checked = set(self._known)
+        self._sync_menu_from_state()
+        self._update_label()
+        self.selection_changed.emit()
+
+    def select_none(self, *_):
+        self._checked.clear()
+        self._sync_menu_from_state()
+        self._update_label()
+        self.selection_changed.emit()
+
+    def selected_filenames(self):
+        """Ticked filenames, in dataset order (not click order)."""
+        return [n for n in self._known if n in self._checked]
+
+    def is_empty(self):
+        return not self._checked
+
+    # -- label -------------------------------------------------------------
+    def _update_label(self):
+        total = len(self._known)
+        self.setText(f"Tracks ▾ ({len(self._checked)} of {total} selected)")
+
+
 # Backend labels -> config value in config["caption_backend"].
 CAPTION_BACKENDS = (
     ("ace_step", "ACE-Step captioner (Kaggle GPU)"),
+    ("moss", "MOSS-Audio on Kaggle (open model, raw style + lyrics)"),
     ("gemini", "Google Gemini (audio-native)"),
     ("deepseek", "DeepSeek LLM (text-only synthesis)"),
     ("custom", "Custom OpenAI-compatible endpoint"),
@@ -232,6 +387,80 @@ def build_caption_tab(manager, parent):
         a_layout.addWidget(btn)
     a_layout.addStretch()
     layout.addWidget(actions_grp)
+
+    # ------------------------------------------------------------------
+    # MOSS-Audio on Kaggle (open model)
+    # ------------------------------------------------------------------
+    moss_grp = QGroupBox("MOSS-Audio on Kaggle (open model)")
+    m_layout = QVBoxLayout(moss_grp)
+
+    moss_note = QLabel(
+        "Runs the open <b>MOSS-Audio</b> model on a free Kaggle GPU. It writes raw "
+        "style text into <i>caption</i> and raw lyrics into <i>raw_lyrics</i>, then "
+        "you format them with the Structural Tag Creator. "
+        "Requires Kaggle credentials in ⚙ Settings."
+    )
+    moss_note.setStyleSheet("color: #999;")
+    moss_note.setWordWrap(True)
+    m_layout.addWidget(moss_note)
+
+    m_row = QHBoxLayout()
+    manager.moss_track_picker = TrackPickerButton()
+    manager.moss_track_picker.setToolTip(
+        "Tick the tracks to send to MOSS. 'Select tracks missing captions' is a "
+        "quick way to only process what needs it."
+    )
+    m_row.addWidget(manager.moss_track_picker, 1)
+    m_layout.addLayout(m_row)
+
+    m_row = QHBoxLayout()
+    manager.moss_model_edit = QLineEdit(
+        manager.config.get("moss_model_id", "")
+        or "OpenMOSS-Team/MOSS-Audio-8B-Instruct"
+    )
+    manager.moss_model_edit.setToolTip(
+        "Hugging Face repo id for the MOSS-Audio weights.\n\n"
+        "8B-Instruct (~17 GiB) is the best quality and shards across Kaggle's two "
+        "T4s. Use MOSS-Audio-4B-Instruct (~10 GiB) if you want it to fit on one GPU."
+    )
+    m_row.addWidget(QLabel("Model:"))
+    m_row.addWidget(manager.moss_model_edit, 1)
+    m_layout.addLayout(m_row)
+
+    m_row2 = QHBoxLayout()
+    manager.moss_weights_dataset_edit = QLineEdit(
+        manager.config.get("moss_model_dataset", "")
+    )
+    manager.moss_weights_dataset_edit.setToolTip(
+        "Optional: a private Kaggle dataset holding the MOSS weights, e.g. "
+        "'you/moss-audio-8b'. Set this to skip a ~17 GiB download inside the "
+        "kernel on every run."
+    )
+    m_row2.addWidget(QLabel("Cached weights (optional):"))
+    m_row2.addWidget(manager.moss_weights_dataset_edit, 1)
+    m_layout.addLayout(m_row2)
+
+    m_run = QHBoxLayout()
+    manager.moss_run_btn = QPushButton("🚀 Caption via MOSS (Kaggle)")
+    manager.moss_run_btn.setToolTip(
+        "Uploads the selected tracks, runs MOSS-Audio on a Kaggle GPU, then writes "
+        "the raw style + lyrics back into the dataset. Nothing is overwritten: "
+        "previous values are kept in caption_before_moss / raw_lyrics_before_moss."
+    )
+    manager.moss_open_btn = QPushButton("Open last Kaggle run")
+    manager.moss_open_btn.setToolTip(
+        "Open the most recent MOSS kernel's output page in Kaggle to inspect the log."
+    )
+    m_run.addWidget(manager.moss_run_btn)
+    m_run.addWidget(manager.moss_open_btn)
+    m_run.addStretch()
+    m_layout.addLayout(m_run)
+
+    manager.moss_status = QLabel("Not run yet.")
+    manager.moss_status.setStyleSheet("color: #999;")
+    manager.moss_status.setWordWrap(True)
+    m_layout.addWidget(manager.moss_status)
+    layout.addWidget(moss_grp)
 
     layout.addStretch()
     return inner

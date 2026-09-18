@@ -1297,6 +1297,145 @@ class DatasetManager(QMainWindow):
         self.caption_edit_btn.clicked.connect(self.open_caption_editor)
         self.caption_override_btn.clicked.connect(self.set_track_caption_override)
         self.caption_clear_override_btn.clicked.connect(self.clear_track_caption_override)
+        # MOSS-Audio (open model on a Kaggle GPU)
+        self.moss_run_btn.clicked.connect(self.run_moss_captioning)
+        self.moss_open_btn.clicked.connect(self.open_last_moss_kernel)
+        self.refresh_moss_track_picker()
+
+    # -----------------------------------------------------------------------
+    # MOSS-Audio (open model) on Kaggle
+    # -----------------------------------------------------------------------
+    def refresh_moss_track_picker(self):
+        """Keep the MOSS track picker in step with the dataset.
+
+        Ticks are keyed by filename and survive the rebuild, so a refresh after
+        an add/delete/load does not silently clear the user's selection.
+        """
+        picker = getattr(self, "moss_track_picker", None)
+        if picker is not None:
+            picker.set_tracks(self.dataset.get("samples", []))
+
+    def run_moss_captioning(self):
+        """Send the ticked tracks to MOSS-Audio on a Kaggle GPU."""
+        from workers.kaggle_moss import KaggleMossWorker
+
+        samples = self.dataset.get("samples", [])
+        if not samples:
+            QMessageBox.warning(self, "No Tracks", "Add audio tracks first.")
+            return
+
+        picked = self.moss_track_picker.selected_filenames()
+        if not picked:
+            QMessageBox.information(
+                self, "No Tracks Selected",
+                "Tick the tracks to send to MOSS using the “Tracks” dropdown.",
+            )
+            return
+
+        by_name = {s.get("filename", ""): s for s in samples}
+        paths = []
+        missing = []
+        for name in picked:
+            sample = by_name.get(name)
+            path = (sample or {}).get("audio_path", "")
+            if path and os.path.exists(path):
+                paths.append(path)
+            else:
+                missing.append(name)
+        if not paths:
+            QMessageBox.warning(
+                self, "Files Not Found",
+                "None of the selected tracks exist on disk:\n\n"
+                + "\n".join(missing[:10]),
+            )
+            return
+        if missing:
+            resp = QMessageBox.question(
+                self, "Some Files Missing",
+                f"{len(missing)} selected track(s) are missing on disk and will "
+                "be skipped:\n\n" + "\n".join(missing[:10])
+                + "\n\nContinue with the rest?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if resp != QMessageBox.Yes:
+                return
+
+        # Persist the backend choices the user just made in the tab.
+        self.config["moss_model_id"] = self.moss_model_edit.text().strip()
+        self.config["moss_model_dataset"] = \
+            self.moss_weights_dataset_edit.text().strip()
+
+        self.moss_run_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.moss_status.setText(f"Starting MOSS on {len(paths)} track(s)...")
+        self.status_label.setText("Uploading tracks to Kaggle...")
+
+        self.moss_worker = KaggleMossWorker(paths, self.config)
+        self.moss_worker.progress.connect(self.on_moss_progress)
+        self.moss_worker.finished_ok.connect(self.on_moss_finished)
+        self.moss_worker.failed.connect(self.on_moss_failed)
+        self.moss_worker.start()
+
+    def on_moss_progress(self, pct, msg):
+        self.progress_bar.setValue(pct)
+        self.moss_status.setText(msg)
+        self.status_label.setText(msg)
+
+    def on_moss_finished(self, results):
+        """Write the raw MOSS output into the dataset (backups preserved)."""
+        from modules.moss_import import apply_moss_output
+
+        self.moss_run_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        if not results:
+            self.moss_status.setText("MOSS returned no results.")
+            return
+
+        report = apply_moss_output(self.dataset, results)
+        self.refresh_table()
+        self.on_table_selection_changed()
+        self.refresh_moss_track_picker()
+
+        self.moss_status.setText(
+            f"Done — {report['matched']} track(s) written "
+            f"({report['overwritten']} replaced, previous kept in "
+            f"caption_before_moss). {report['prompt_override_fixed']} "
+            f"prompt_override value(s) normalised to bool."
+            + (f" No result for {len(report['unmatched'])} track(s)."
+               if report["unmatched"] else "")
+        )
+        self.status_label.setText(
+            "MOSS finished. Run the Structural Tag Creator to format the "
+            "captions and lyrics into [Section] tags."
+        )
+        QMessageBox.information(
+            self, "MOSS Captioning Complete",
+            f"Wrote raw style + lyrics for {report['matched']} track(s).\n\n"
+            "Next: run the Structural Tag Creator to format them into the "
+            "ACE-Step caption and [Section]-tagged lyrics.\n\n"
+            "Nothing was destroyed — previous values are in "
+            "caption_before_moss / raw_lyrics_before_moss.",
+        )
+
+    def on_moss_failed(self, err):
+        self.moss_run_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.moss_status.setText(f"Failed: {err}")
+        self.status_label.setText("MOSS captioning failed.")
+        QMessageBox.critical(self, "MOSS Captioning Failed", str(err))
+
+    def open_last_moss_kernel(self):
+        """Open the most recent MOSS kernel's output page in Kaggle."""
+        import webbrowser
+        from workers.kaggle_moss import LAST_KERNEL_REF
+
+        if not LAST_KERNEL_REF:
+            self.moss_status.setText(
+                "No MOSS run yet this session — nothing to open."
+            )
+            return
+        webbrowser.open_new_tab(f"https://www.kaggle.com/code/{LAST_KERNEL_REF}/output")
 
     def on_caption_blend_changed(self, value):
         """Dataset-wide prose/tags blend ratio (persisted with other defaults)."""
@@ -3343,6 +3482,9 @@ class DatasetManager(QMainWindow):
         if hasattr(self, "filter_count_label"):
             total = len(self.dataset["samples"])
             self.filter_count_label.setText(f"{shown} of {total} tracks")
+        # Keep the MOSS track picker in step with the dataset. Cheap when the
+        # track list is unchanged (see TrackPickerButton.set_tracks).
+        self.refresh_moss_track_picker()
 
     def _matches_filters(self, s):
         """Apply the search/filter state to a single sample dict."""

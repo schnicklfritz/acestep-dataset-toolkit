@@ -22,6 +22,18 @@ DEFAULT_CONFIG = {
     "kaggle_model_dataset": "michelmoalem9b/acestep-captioner-model",  # cached captioner weights
     # Suppress the "Before You Add Tracks" dataset-quality warnings dialog.
     "suppress_add_track_warnings": False,
+    # ---- MOSS-Audio (open model captioning on a Kaggle GPU) ----
+    # The 8B-Instruct variant is ~17 GiB and shards across Kaggle's two T4s.
+    "moss_model_id": "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
+    # Optional: a private Kaggle dataset holding the weights. Set this to skip a
+    # ~17 GiB download inside the kernel on every run.
+    "moss_model_dataset": "",
+    # Empty = use the built-in prompts in workers/kaggle_moss.py.
+    "moss_style_prompt": "",
+    "moss_lyrics_prompt": "",
+    "moss_max_tokens": 1024,
+    # One MOSS pass covers ~120 s (hard encoder limit); 110 leaves headroom.
+    "moss_chunk_seconds": 110,
     # ---- Lyrics tidy (contraction -> phonetic table + -ing exceptions) ----
     # Empty = use the shipped defaults in modules/lyrics_normalizer.py.
     "lyrics_contractions": {},
@@ -58,6 +70,7 @@ DEFAULT_CONFIG = {
     "lyrics_initial_prompt": "",      # e.g. "1970s hard rock by Black Sabbath"
     # ---- Caption backend (pluggable providers) ----
     #   ace_step  = ACE-Step captioner (Qwen2.5-Omni) on a Kaggle GPU  [default]
+    #   moss      = MOSS-Audio (open model) on a Kaggle GPU — raw style + lyrics
     #   gemini    = Google Gemini (audio-native)
     #   deepseek  = DeepSeek LLM (text-only synthesis)
     #   custom    = any OpenAI-compatible endpoint (vLLM / Ollama / local or rented GPU)
