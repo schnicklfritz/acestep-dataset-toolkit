@@ -416,12 +416,15 @@ def build_caption_tab(manager, parent):
     m_row = QHBoxLayout()
     manager.moss_model_edit = QLineEdit(
         manager.config.get("moss_model_id", "")
-        or "OpenMOSS-Team/MOSS-Audio-8B-Instruct"
+        or "OpenMOSS-Team/MOSS-Music-8B-Instruct"
     )
     manager.moss_model_edit.setToolTip(
-        "Hugging Face repo id for the MOSS-Audio weights.\n\n"
-        "8B-Instruct (~17 GiB) is the best quality and shards across Kaggle's two "
-        "T4s. Use MOSS-Audio-4B-Instruct (~10 GiB) if you want it to fit on one GPU."
+        "Hugging Face repo id for the MOSS weights.\n\n"
+        "MOSS-Music-8B-Instruct (recommended) is music-specialised: its tags are "
+        "music-captioning / lyrics-asr / chord-recognition. "
+        "MOSS-Audio-8B-Instruct is the general speech+environment+music model.\n\n"
+        "Both are ~17 GiB and shard across Kaggle's two T4s. The kernel derives "
+        "the repo and class names from this id, so either works."
     )
     m_row.addWidget(QLabel("Model:"))
     m_row.addWidget(manager.moss_model_edit, 1)

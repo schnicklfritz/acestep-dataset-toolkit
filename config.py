@@ -22,9 +22,13 @@ DEFAULT_CONFIG = {
     "kaggle_model_dataset": "michelmoalem9b/acestep-captioner-model",  # cached captioner weights
     # Suppress the "Before You Add Tracks" dataset-quality warnings dialog.
     "suppress_add_track_warnings": False,
-    # ---- MOSS-Audio (open model captioning on a Kaggle GPU) ----
-    # The 8B-Instruct variant is ~17 GiB and shards across Kaggle's two T4s.
-    "moss_model_id": "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
+    # ---- MOSS (open model captioning on a Kaggle GPU) ----
+    # MOSS-Music is the music-specialised model ("music-captioning, lyrics-asr,
+    # chord-recognition"); MOSS-Audio is general audio. Both are ~17 GiB and
+    # shard across Kaggle's two T4s. Swap to
+    # "OpenMOSS-Team/MOSS-Audio-8B-Instruct" for the general model -- the kernel
+    # derives the repo and class names from whichever id is set.
+    "moss_model_id": "OpenMOSS-Team/MOSS-Music-8B-Instruct",
     # Optional: a private Kaggle dataset holding the weights. Set this to skip a
     # ~17 GiB download inside the kernel on every run.
     "moss_model_dataset": "",

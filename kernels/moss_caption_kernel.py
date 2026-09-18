@@ -1,10 +1,14 @@
-"""MOSS-Audio captioner — Kaggle kernel.
+"""MOSS captioner — Kaggle kernel.
 
-Runs OpenMOSS MOSS-Audio (8B-Instruct by default) over a mounted Kaggle audio
-dataset and writes RAW text for two fields per track:
+Runs an OpenMOSS MOSS model over a mounted Kaggle audio dataset and writes RAW
+text for two fields per track:
 
     /kaggle/working/moss_out.json
     {"results": [{"file": "<filename>", "style": "...", "lyrics": "..."}, ...]}
+
+The model family is derived from MODEL_ID, so either sibling works:
+MOSS-Music (music-specialised: music-captioning / lyrics-asr / chord-recognition)
+or MOSS-Audio (general speech + environment + music).
 
 This kernel deliberately does NOT format captions. It emits raw MOSS output;
 the app's existing tag_creator LLM stage turns that into
@@ -29,7 +33,7 @@ WHY THE GITHUB CLONE IS MANDATORY
 The Hugging Face repo ships ``configuration_moss_audio.py`` and
 ``processing_moss_audio.py`` but NOT ``modeling_moss_audio.py``, and its
 config.json ``auto_map`` has no ``AutoModel`` entry. So
-``MossAudioModel.from_pretrained("<hf-repo>")`` cannot resolve the class.
+``MossModel.from_pretrained("<hf-repo>")`` cannot resolve the class.
 The model class exists only in the GitHub repo under ``src/``.
 
 --------------------------------------------------------------------------
@@ -46,7 +50,7 @@ must be chunked (done below), or the model silently sees only the head.
 --------------------------------------------------------------------------
 SILENT-DEFAULT TRAPS (why values are asserted, not assumed)
 --------------------------------------------------------------------------
-* ``MossAudioProcessor.from_pretrained`` defaults ``enable_time_marker=False``
+* ``MossProcessor.from_pretrained`` defaults ``enable_time_marker=False``
   while ``__init__`` defaults it to True. Omit it and you lose timestamps.
 * Every processor kwarg is read with ``kwargs.pop(..., default)``, so a TYPO
   is silently ignored rather than raising.
@@ -55,12 +59,48 @@ SILENT-DEFAULT TRAPS (why values are asserted, not assumed)
   native bfloat16 -- so an ignored dtype argument means a failed run.
 """
 import glob
+import importlib
 import json
 import os
 import subprocess
 import sys
 
 SUPPORTED_FORMATS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
+
+# ---------------------------------------------------------------------------
+# Configuration (placeholders substituted by the app at push time)
+# ---------------------------------------------------------------------------
+AUDIO_FOLDER = "{{AUDIO_DATASET_PATH}}"
+MODEL_ID = {{MODEL_ID}}
+STYLE_PROMPT = {{STYLE_PROMPT}}
+LYRICS_PROMPT = {{LYRICS_PROMPT}}
+MAX_NEW_TOKENS = {{MAX_NEW_TOKENS}}
+CHUNK_SECONDS = {{CHUNK_SECONDS}}
+CUSTOM_TAG = {{CUSTOM_TAG}}
+ATTN_IMPL = {{ATTN_IMPL}}
+
+# ---------------------------------------------------------------------------
+# Which MOSS family? Derived from the model id, so either one works.
+# ---------------------------------------------------------------------------
+# There are two sibling models with identical internals but different names:
+#
+#   MOSS-Audio   OpenMOSS/MOSS-Audio      modeling_moss_audio.MossAudioModel
+#   MOSS-Music   OpenMOSS/MOSS-Music      modeling_moss_music.MossMusicModel
+#
+# MOSS-Music is the music-specialised one -- its tags are
+# "music-captioning, lyrics-asr, chord-recognition" against Audio's general
+# "music, speech, understanding". Both share the same audio encoder
+# (max_source_positions 1500, mel_sr 16000), the same processor kwargs
+# (enable_time_marker defaulting to False in from_pretrained!) and the same
+# transformers==4.57.1 pin, so only the names differ.
+FAMILY = "music" if "music" in MODEL_ID.lower() else "audio"
+_TITLE = FAMILY.capitalize()          # "Music" / "Audio"
+MOSS_REPO_URL = f"https://github.com/OpenMOSS/MOSS-{_TITLE}.git"
+MOSS_MODEL_MODULE = f"src.modeling_moss_{FAMILY}"
+MOSS_MODEL_CLASS = f"Moss{_TITLE}Model"
+MOSS_PROC_MODULE = f"src.processing_moss_{FAMILY}"
+MOSS_PROC_CLASS = f"Moss{_TITLE}Processor"
+
 
 
 def _pip(*packages):
@@ -85,12 +125,18 @@ def _install():
 
 
 def _clone_moss():
-    """Fetch the MOSS-Audio repo (provides the missing model class)."""
-    dst = "/kaggle/working/MOSS-Audio"
+    """Fetch the MOSS repo for the configured family.
+
+    The model class is not always on the Hub -- MOSS-Audio's repo ships only
+    config/processing modules and no modeling file, and its config.json
+    auto_map has no AutoModel entry -- so the source has to come from GitHub.
+    MOSS-Music does ship its modeling file, but cloning either way keeps one
+    code path and matches the documented setup.
+    """
+    dst = f"/kaggle/working/MOSS-{_TITLE}"
     if not os.path.isdir(dst):
         subprocess.run(
-            ["git", "clone", "--depth", "1",
-             "https://github.com/OpenMOSS/MOSS-Audio.git", dst],
+            ["git", "clone", "--depth", "1", MOSS_REPO_URL, dst],
             check=False,
         )
     return dst
@@ -139,8 +185,8 @@ except ImportError as exc:
     )
 
 try:
-    from src.modeling_moss_audio import MossAudioModel  # noqa: E402
-    from src.processing_moss_audio import MossAudioProcessor  # noqa: E402
+    _model_mod = importlib.import_module(MOSS_MODEL_MODULE)
+    _proc_mod = importlib.import_module(MOSS_PROC_MODULE)
     from src.audio_io import load_audio  # noqa: E402
 except ImportError as exc:
     raise SystemExit(
@@ -149,15 +195,18 @@ except ImportError as exc:
         f"Missing: {exc}"
     )
 
-AUDIO_FOLDER = "{{AUDIO_DATASET_PATH}}"
-MODEL_ID = {{MODEL_ID}}
-STYLE_PROMPT = {{STYLE_PROMPT}}
-LYRICS_PROMPT = {{LYRICS_PROMPT}}
-MAX_NEW_TOKENS = {{MAX_NEW_TOKENS}}
-CHUNK_SECONDS = {{CHUNK_SECONDS}}
-CUSTOM_TAG = {{CUSTOM_TAG}}
-ATTN_IMPL = {{ATTN_IMPL}}
+try:
+    MossModel = getattr(_model_mod, MOSS_MODEL_CLASS)
+    MossProcessor = getattr(_proc_mod, MOSS_PROC_CLASS)
+except AttributeError as exc:
+    raise SystemExit(
+        f"{MOSS_REPO_URL} does not define {MOSS_MODEL_CLASS} / "
+        f"{MOSS_PROC_CLASS} (model id was {MODEL_ID!r}). The family is derived "
+        f"from the model id, so a differently-named release needs the mapping "
+        f"in this kernel updated. {exc}"
+    )
 
+print(f"[moss] family      : {FAMILY} ({MOSS_MODEL_CLASS})", flush=True)
 
 # ---------------------------------------------------------------------------
 # Model weights: prefer a cached Kaggle dataset, else download from HF
@@ -221,12 +270,12 @@ _load_kwargs = {"trust_remote_code": True, "device_map": "balanced"}
 if ATTN_IMPL:
     _load_kwargs["attn_implementation"] = ATTN_IMPL
 try:
-    model = MossAudioModel.from_pretrained(
+    model = MossModel.from_pretrained(
         MODEL_SOURCE, dtype=torch.float16, **_load_kwargs
     )
 except TypeError:
     # transformers < 4.56 uses torch_dtype=
-    model = MossAudioModel.from_pretrained(
+    model = MossModel.from_pretrained(
         MODEL_SOURCE, torch_dtype=torch.float16, **_load_kwargs
     )
 model.eval()
@@ -235,7 +284,7 @@ print(f"[moss] attn_implementation={ATTN_IMPL or '(model default)'}", flush=True
 # enable_time_marker must be EXPLICIT: from_pretrained defaults it to False
 # even though __init__ defaults to True. Timestamps are the reason we want
 # MOSS for lyrics at all, so verify it actually stuck rather than trusting it.
-processor = MossAudioProcessor.from_pretrained(
+processor = MossProcessor.from_pretrained(
     MODEL_SOURCE, enable_time_marker=True
 )
 assert getattr(processor, "enable_time_marker", False) is True, (

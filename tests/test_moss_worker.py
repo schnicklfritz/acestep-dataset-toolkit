@@ -85,8 +85,13 @@ class TestFillPlaceholders:
 
     def test_prompts_are_substituted_as_json_string_literals(self):
         out = self._fill()
-        assert 'MODEL_ID = "OpenMOSS-Team/MOSS-Audio-8B-Instruct"' in out
+        assert f'MODEL_ID = "{DEFAULT_MODEL_ID}"' in out
         assert 'STYLE_PROMPT = "Describe this music."' in out
+
+    def test_the_default_model_is_moss_music(self):
+        # MOSS-Music is music-specialised (music-captioning / lyrics-asr /
+        # chord-recognition) whereas MOSS-Audio is general audio.
+        assert "MOSS-Music" in DEFAULT_MODEL_ID
 
     def test_substituted_script_is_valid_python(self):
         ast.parse(self._fill())
@@ -128,6 +133,34 @@ class TestFillPlaceholders:
 
     def test_attention_backend_config_is_passed_through(self):
         assert _moss_prompts({"moss_attn_implementation": "sdpa"})["attn_impl"] == "sdpa"
+
+
+class TestNoLlmConfiguredMessage:
+    """The error must not imply the default provider is the only route."""
+
+    def test_names_the_free_providers(self):
+        from modules.llm_client import get_client
+        with pytest.raises(ValueError) as exc:
+            get_client({"llm_provider": "deepseek", "deepseek_key": ""})
+        msg = str(exc.value)
+        for free in ("Groq", "Gemini", "OpenRouter"):
+            assert free in msg, f"{free} not offered as a free option"
+
+    def test_points_at_the_settings_location(self):
+        from modules.llm_client import get_client
+        with pytest.raises(ValueError) as exc:
+            get_client({"llm_provider": "deepseek", "deepseek_key": ""})
+        assert "Settings" in str(exc.value)
+        assert "LLM Provider" in str(exc.value)
+
+    def test_does_not_present_deepseek_as_the_only_choice(self):
+        from modules.llm_client import get_client
+        with pytest.raises(ValueError) as exc:
+            get_client({"llm_provider": "deepseek", "deepseek_key": ""})
+        msg = str(exc.value)
+        # The old wording led the user to believe a paid DeepSeek key was
+        # mandatory for the whole formatting step.
+        assert "free" in msg.lower()
 
 
 class TestPlaceholderGuard:

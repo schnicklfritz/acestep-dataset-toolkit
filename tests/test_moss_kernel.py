@@ -133,15 +133,27 @@ class TestKernelParses:
 
 
 class TestRepoCloneIsMandatory:
-    """The HF repo cannot load the model; the GitHub clone is required."""
+    """The HF repo cannot always load the model; the GitHub clone is required."""
 
-    def test_clones_the_official_repo(self, kernel_source):
-        assert "github.com/OpenMOSS/MOSS-Audio" in kernel_source
+    def test_clone_url_is_derived_from_the_model_family(self, kernel_source):
+        # MOSS-Audio (OpenMOSS/MOSS-Audio) and MOSS-Music (OpenMOSS/MOSS-Music)
+        # are separate repos, so the URL cannot be hardcoded.
+        assert 'MOSS_REPO_URL = f"https://github.com/OpenMOSS/MOSS-{_TITLE}.git"' \
+            in kernel_source
+        assert 'FAMILY = "music" if "music" in MODEL_ID.lower() else "audio"' \
+            in kernel_source
 
-    def test_imports_the_model_and_processor_classes(self, kernel_source):
-        assert "from src." in kernel_source
-        assert "MossAudioModel" in kernel_source
-        assert "MossAudioProcessor" in kernel_source
+    def test_imports_module_and_class_names_are_derived(self, kernel_source):
+        # modeling_moss_music.MossMusicModel vs modeling_moss_audio.MossAudioModel
+        assert 'MOSS_MODEL_MODULE = f"src.modeling_moss_{FAMILY}"' in kernel_source
+        assert 'MOSS_MODEL_CLASS = f"Moss{_TITLE}Model"' in kernel_source
+        assert 'MOSS_PROC_CLASS = f"Moss{_TITLE}Processor"' in kernel_source
+        assert "importlib.import_module(MOSS_MODEL_MODULE)" in kernel_source
+
+    def test_missing_class_is_reported_clearly(self, kernel_source):
+        # If a future release is named differently, say so instead of dying on
+        # a bare AttributeError.
+        assert "does not define" in kernel_source
 
     def test_repo_root_is_added_to_sys_path_not_src_itself(self, kernel_source):
         # src/ is a package using absolute `from src.x import y` internally, so
@@ -246,6 +258,89 @@ class TestAudioLimit:
         windows = ns["_chunk"](audio, 110)
         assert len(windows) == 1
         assert windows[0][0] == 0
+
+
+class TestFamilyDerivation:
+    """MOSS-Audio and MOSS-Music are siblings with different names."""
+
+    @staticmethod
+    def _derive(model_id, kernel_source):
+        """Run the kernel's REAL derivation lines with ``model_id``."""
+        lines = []
+        for line in kernel_source.splitlines():
+            if line.startswith("FAMILY = "):
+                lines = [line]
+            elif lines:
+                if line.startswith("MOSS_PROC_CLASS = "):
+                    lines.append(line)
+                    break
+                if line.startswith("MOSS_") or line.startswith("_TITLE"):
+                    lines.append(line)
+                elif line.strip() and not line.startswith((" ", "#")):
+                    break
+        assert lines, "derivation block not found in the kernel"
+        ns = {"MODEL_ID": model_id}
+        exec("\n".join(lines), ns)
+        return ns
+
+    @pytest.mark.parametrize("model_id,expect", [
+        ("OpenMOSS-Team/MOSS-Music-8B-Instruct",
+         ("music", "MOSS-Music", "src.modeling_moss_music",
+          "MossMusicModel", "MossMusicProcessor")),
+        ("OpenMOSS-Team/MOSS-Audio-8B-Instruct",
+         ("audio", "MOSS-Audio", "src.modeling_moss_audio",
+          "MossAudioModel", "MossAudioProcessor")),
+    ])
+    def test_derives_the_right_names(self, kernel_source, model_id, expect):
+        family, repo_suffix, mod, model_cls, proc_cls = expect
+        ns = self._derive(model_id, kernel_source)
+        assert ns["FAMILY"] == family
+        assert repo_suffix in ns["MOSS_REPO_URL"]
+        assert ns["MOSS_MODEL_MODULE"] == mod
+        assert ns["MOSS_MODEL_CLASS"] == model_cls
+        assert ns["MOSS_PROC_CLASS"] == proc_cls
+
+    def test_real_music_repo_and_classes_exist_upstream(self, kernel_source):
+        """The derived names must match what the repos actually contain.
+
+        MossMusicModel / MossMusicProcessor are the names in
+        OpenMOSS/MOSS-Music's src/ and the HF config's architectures/auto_map.
+        If a release ever renames them, this documents the expectation.
+        """
+        ns = self._derive("OpenMOSS-Team/MOSS-Music-8B-Instruct", kernel_source)
+        assert ns["MOSS_REPO_URL"] == "https://github.com/OpenMOSS/MOSS-Music.git"
+        assert ns["MOSS_MODEL_CLASS"] == "MossMusicModel"
+        assert ns["MOSS_PROC_CLASS"] == "MossMusicProcessor"
+
+
+class TestNoDanglingModelNames:
+    """Switching family must not break, so no hardcoded class names in CODE.
+
+    Checked through the AST rather than raw text: the family-mapping comment
+    legitimately names MossAudioModel/MossMusicModel, so a substring search
+    would fail on documentation rather than on behaviour.
+    """
+
+    @staticmethod
+    def _referenced_names(substituted):
+        tree = ast.parse(substituted)
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                names.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                names.add(node.attr)
+        return names
+
+    def test_no_hardcoded_audio_model_class_names_in_code(self, substituted):
+        names = self._referenced_names(substituted)
+        assert "MossAudioModel" not in names
+        assert "MossAudioProcessor" not in names
+
+    def test_loads_through_the_derived_aliases(self, substituted):
+        names = self._referenced_names(substituted)
+        assert "MossModel" in names
+        assert "MossProcessor" in names
 
 
 class TestAudioDiscovery:

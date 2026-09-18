@@ -29,7 +29,7 @@ KERNEL_SCRIPT = (
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
 
 # MOSS-Audio-8B-Instruct: ~17 GiB, fits sharded across Kaggle's two T4s.
-DEFAULT_MODEL_ID = "OpenMOSS-Team/MOSS-Audio-8B-Instruct"
+DEFAULT_MODEL_ID = "OpenMOSS-Team/MOSS-Music-8B-Instruct"
 
 # The encoder caps a single pass at ~120 s (max_source_positions=1500 /
 # audio_tokens_per_second=12.5), so 110 s leaves headroom.
