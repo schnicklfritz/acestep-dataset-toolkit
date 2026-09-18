@@ -187,9 +187,22 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
         # Generous timeout: clone, pip install, model download and two passes
         # per track all happen inside this window.
         if not wait_kernel_done(config, kernel_slug, timeout=10800):
+            # Do not just tell the user to go read Kaggle -- fetch the reason.
+            from modules.kaggle import fetch_kernel_logs, kernel_status_text
+            status = kernel_status_text(config, kernel_slug)
+            tail = fetch_kernel_logs(config, kernel_slug)
             raise RuntimeError(
-                "Kaggle kernel did not report success. Open the run log in "
-                "Kaggle (the app can deep-link it) to see why."
+                "Kaggle kernel did not succeed.\n\n"
+                f"Kernel: {kernel_ref}\n"
+                f"Final status: {status or '(unknown)'}\n\n"
+                "Common causes:\n"
+                "  - ran past the 3h wait window (17 GiB weight download + two\n"
+                "    passes per track is slow on a T4)\n"
+                "  - out of disk while downloading the weights (Kaggle gives a\n"
+                "    few tens of GB; use the 'Cached weights' dataset instead)\n"
+                "  - pip could not install the pinned transformers\n"
+                "  - out of VRAM loading the 8B model\n\n"
+                f"--- log tail ---\n{tail or '(log unavailable)'}"
             )
 
         progress_cb(85, "Downloading results...")

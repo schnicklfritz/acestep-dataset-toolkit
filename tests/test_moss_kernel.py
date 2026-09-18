@@ -248,7 +248,33 @@ class TestAudioLimit:
         assert windows[0][0] == 0
 
 
-class TestDeterminism:
+class TestDiagnostics:
+    """A failed Kaggle run must explain itself in its own log."""
+
+    def test_prints_environment_before_the_heavy_work(self, kernel_source):
+        for needle in ("torch        :", "transformers :",
+                       "free disk", "gpu["):
+            assert needle in kernel_source, f"missing diagnostic: {needle}"
+
+    def test_diagnostics_print_flush(self, kernel_source):
+        # Kaggle shows output as it arrives; unflushed prints can be lost when
+        # the kernel dies, which is exactly when they matter most.
+        assert kernel_source.count('flush=True') > 10
+
+    def test_guards_against_a_missing_auto_docstring(self, kernel_source):
+        # _pip() runs with check=False, so a failed install is silent and would
+        # otherwise surface much later as a bare ImportError.
+        assert "from transformers.utils.auto_docstring import auto_docstring" \
+            in kernel_source
+        assert "is too old for MOSS" in kernel_source
+
+    def test_guards_against_a_failed_clone(self, kernel_source):
+        assert "Could not import the MOSS source" in kernel_source
+        assert "internet must be enabled" in kernel_source
+
+    def test_failures_use_a_clear_exit_not_a_bare_crash(self, kernel_source):
+        assert "SystemExit(" in kernel_source
+
     def test_sampling_is_disabled(self, kernel_source):
         # Annotation should be reproducible; sampling makes re-runs differ.
         assert "do_sample=False" in kernel_source

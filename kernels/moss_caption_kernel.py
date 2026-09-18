@@ -105,11 +105,50 @@ REPO_DIR = _clone_moss()
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
 
+import shutil  # noqa: E402
 import torch  # noqa: E402
+import transformers as _transformers  # noqa: E402
 
-from src.modeling_moss_audio import MossAudioModel  # noqa: E402
-from src.processing_moss_audio import MossAudioProcessor  # noqa: E402
-from src.audio_io import load_audio  # noqa: E402
+# ---------------------------------------------------------------------------
+# Environment diagnostics
+# ---------------------------------------------------------------------------
+# Printed BEFORE the heavy work so a failed run's log explains itself. The _pip
+# calls above use check=False (one failing package must not abort the whole
+# kernel), which means an install problem would otherwise surface much later as
+# a confusing ImportError with no hint about the cause.
+print(f"[moss] python       : {sys.version.split()[0]}", flush=True)
+print(f"[moss] torch        : {torch.__version__} "
+      f"(cuda {torch.version.cuda}, available={torch.cuda.is_available()})",
+      flush=True)
+if torch.cuda.is_available():
+    for _i in range(torch.cuda.device_count()):
+        _cap = torch.cuda.get_device_capability(_i)
+        _free = torch.cuda.mem_get_info(_i)[0] / 1e9
+        print(f"[moss] gpu[{_i}]       : {torch.cuda.get_device_name(_i)} "
+              f"sm_{_cap[0]}{_cap[1]} {_free:.1f} GB free", flush=True)
+print(f"[moss] transformers : {_transformers.__version__}", flush=True)
+print(f"[moss] free disk /  : {shutil.disk_usage('/').free / 1e9:.1f} GB "
+      f"(8B weights are ~17 GB)", flush=True)
+
+# Fail HERE with a clear reason instead of at a confusing line later.
+try:
+    from transformers.utils.auto_docstring import auto_docstring  # noqa: F401
+except ImportError as exc:
+    raise SystemExit(
+        f"transformers is too old for MOSS (found {_transformers.__version__}); "
+        f"the pinned install did not take effect. Missing: {exc}"
+    )
+
+try:
+    from src.modeling_moss_audio import MossAudioModel  # noqa: E402
+    from src.processing_moss_audio import MossAudioProcessor  # noqa: E402
+    from src.audio_io import load_audio  # noqa: E402
+except ImportError as exc:
+    raise SystemExit(
+        f"Could not import the MOSS source from {REPO_DIR}. The git clone most "
+        f"likely failed -- internet must be enabled for this kernel. "
+        f"Missing: {exc}"
+    )
 
 AUDIO_FOLDER = "{{AUDIO_DATASET_PATH}}"
 MODEL_ID = {{MODEL_ID}}

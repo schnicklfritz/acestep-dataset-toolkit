@@ -130,6 +130,74 @@ class TestFillPlaceholders:
         assert _moss_prompts({"moss_attn_implementation": "sdpa"})["attn_impl"] == "sdpa"
 
 
+class TestKernelLogFetching:
+    """A failed run must report WHY, not point at Kaggle's web UI."""
+
+    def test_tail_is_returned(self, monkeypatch):
+        from modules import kaggle
+
+        class FakeApi:
+            def kernels_logs(self, _slug):
+                return "line1\nline2\nline3"
+
+        monkeypatch.setattr(kaggle, "_get_api", lambda _c: (FakeApi(), "u"))
+        assert kaggle.fetch_kernel_logs({}, "k") == "line1\nline2\nline3"
+
+    def test_long_logs_are_truncated_to_the_tail(self, monkeypatch):
+        # Failures are at the END, so a truncated log must keep the tail.
+        from modules import kaggle
+
+        body = "START\n" + ("x" * 10000) + "\nTHE ACTUAL ERROR"
+
+        class FakeApi:
+            def kernels_logs(self, _slug):
+                return body
+
+        monkeypatch.setattr(kaggle, "_get_api", lambda _c: (FakeApi(), "u"))
+        out = kaggle.fetch_kernel_logs({}, "k", max_chars=100)
+        assert out.endswith("THE ACTUAL ERROR")
+        assert len(out) <= 101        # 100 + the ellipsis marker
+        assert not out.startswith("START")
+
+    def test_unavailable_log_returns_empty_not_an_exception(self, monkeypatch):
+        # Diagnostics must never mask the original failure.
+        from modules import kaggle
+
+        def boom(_c):
+            raise RuntimeError("no creds")
+
+        monkeypatch.setattr(kaggle, "_get_api", boom)
+        assert kaggle.fetch_kernel_logs({}, "k") == ""
+
+    def test_empty_log_returns_empty(self, monkeypatch):
+        from modules import kaggle
+
+        class FakeApi:
+            def kernels_logs(self, _slug):
+                return None
+
+        monkeypatch.setattr(kaggle, "_get_api", lambda _c: (FakeApi(), "u"))
+        assert kaggle.fetch_kernel_logs({}, "k") == ""
+
+    def test_status_text_returns_empty_on_error(self, monkeypatch):
+        from modules import kaggle
+
+        def boom(_c):
+            raise RuntimeError("nope")
+
+        monkeypatch.setattr(kaggle, "_get_api", boom)
+        assert kaggle.kernel_status_text({}, "k") == ""
+
+    def test_failure_message_includes_the_log_tail(self):
+        # The worker must embed the log, not tell the user to go and read it.
+        import inspect
+        from workers import kaggle_moss
+        src = inspect.getsource(kaggle_moss.run_kaggle_moss)
+        assert "fetch_kernel_logs" in src
+        assert "log tail" in src
+        assert "Open the run log in Kaggle" not in src
+
+
 @pytest.fixture
 def picker(qapp):
     return TrackPickerButton()

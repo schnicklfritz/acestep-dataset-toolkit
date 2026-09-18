@@ -168,6 +168,34 @@ def wait_kernel_done(config, kernel_slug, timeout=1200, poll_seconds=20):
     return False
 
 
+def fetch_kernel_logs(config, kernel_slug, max_chars=6000):
+    """Return the TAIL of a kernel's execution log, or '' if unavailable.
+
+    Failures surface at the end of the log, so the tail is what matters. The
+    returned text is meant to be embedded in an error message: without it the
+    user is told to go read Kaggle's web UI, which is a poor trade when the API
+    can hand the reason over directly.
+    """
+    try:
+        api, user = _get_api(config)
+        text = api.kernels_logs(f"{user}/{kernel_slug}")
+    except Exception:  # noqa: BLE001 — diagnostics must never mask the real error
+        return ""
+    if not text:
+        return ""
+    text = text.strip()
+    return text if len(text) <= max_chars else "…" + text[-max_chars:]
+
+
+def kernel_status_text(config, kernel_slug):
+    """Human-readable kernel status, or '' when it cannot be read."""
+    try:
+        api, user = _get_api(config)
+        return str(api.kernels_status(f"{user}/{kernel_slug}"))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def download_kernel_output(config, kernel_slug, out_dir):
     """Download the kernel output folder. Returns out_dir."""
     api, user = _get_api(config)
