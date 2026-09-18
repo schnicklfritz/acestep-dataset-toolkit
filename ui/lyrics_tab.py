@@ -153,6 +153,16 @@ def build_lyrics_tab(manager, parent):
     manager.lyrics_tags_check.setChecked(True)
     o_form.addRow("", manager.lyrics_tags_check)
 
+    manager.lyrics_lines_check = QCheckBox("Capitalize the first word of each line  (rising \u2192 Rising)")
+    manager.lyrics_lines_check.setChecked(True)
+    manager.lyrics_lines_check.setToolTip(
+        "Lyric lines are normally written as sentences, so a lowercase start "
+        "reads as a typo in a training caption. Only the first character is "
+        "touched — the rest of the line keeps its case, so an ALL-CAPS line and "
+        "words like iPhone/eBay are left alone."
+    )
+    o_form.addRow("", manager.lyrics_lines_check)
+
     manager.lyrics_punct_check = QCheckBox('Strip trailing punctuation  (except " and ))')
     manager.lyrics_punct_check.setChecked(True)
     manager.lyrics_punct_check.setToolTip(

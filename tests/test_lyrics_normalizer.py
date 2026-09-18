@@ -127,6 +127,67 @@ class TestTrailingPunctuation:
         assert strip_trailing_punctuation("no punctuation here") == "no punctuation here"
 
 
+class TestLineCapitalization:
+    """Capitalise the first word of each lyric line; leave the rest alone."""
+
+    @pytest.mark.parametrize("src,want", [
+        ("rising up from the ashes", "Rising up from the ashes"),
+        ("we're on fire", "We're on fire"),
+        ("just one word", "Just one word"),
+    ])
+    def test_capitalizes_the_first_letter(self, src, want):
+        from modules.lyrics_normalizer import capitalize_first_word
+        assert capitalize_first_word(src) == want
+
+    @pytest.mark.parametrize("src", [
+        "Already Capitalised",
+        "ALL CAPS LINE STAYS LOUD",
+        "iPhone and eBay",          # intentional internal casing preserved
+    ])
+    def test_leaves_rest_of_the_line_untouched(self, src):
+        from modules.lyrics_normalizer import capitalize_first_word
+        assert capitalize_first_word(src) == src
+
+    @pytest.mark.parametrize("src", ["", "   ", "123 456", "!!!", "'"])
+    def test_ignores_lines_with_no_leading_letter(self, src):
+        from modules.lyrics_normalizer import capitalize_first_word
+        assert capitalize_first_word(src) == src
+
+    def test_skips_leading_whitespace(self):
+        from modules.lyrics_normalizer import capitalize_first_word
+        assert capitalize_first_word("   rising up") == "   Rising up"
+
+    def test_applied_through_normalize_lyrics(self):
+        out, rep = normalize_lyrics(
+            "rising up from the ashes\nwe're on fire",
+            contractions={"we're": "weer"},
+        )
+        assert "Rising up" in out
+        assert "Weer on fire" in out
+        assert rep["capitalized"] >= 2
+
+    def test_capitalizes_the_final_form_not_the_source(self):
+        # she'll -> sheel must come out as "Sheel", not "Sheel" from "She'll"
+        out, _ = normalize_lyrics("she'll be there", contractions=TABLE)
+        assert out.startswith("Sheel")
+
+    def test_tag_lines_are_not_treated_as_lyric_lines(self):
+        # [verse] is handled by the tag rule, not the line rule
+        out, _ = normalize_lyrics("[verse]\nrising up")
+        assert "[Verse]" in out
+        assert "Rising up" in out
+
+    def test_can_be_switched_off(self):
+        sentinel = object()
+        out, _ = normalize_lyrics("rising up", contractions=TABLE,
+                                  do_capitalize_lines=False)
+        assert out.startswith("rising")
+
+    def test_all_caps_line_survives_a_tidy(self):
+        out, _ = normalize_lyrics("YEAH, dont stop")
+        assert "YEAH" in out
+
+
 class TestNormalizeLyricsReport:
     def test_report_tracks_counts(self):
         out, rep = normalize_lyrics(

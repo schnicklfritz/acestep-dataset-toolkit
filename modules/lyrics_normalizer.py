@@ -244,6 +244,32 @@ def strip_trailing_punctuation(line):
     return stripped + tail_kept
 
 
+def capitalize_first_word(line):
+    """Capitalise the first letter of a lyric line, leaving the rest alone.
+
+    Skips anything that has no leading letter (blank lines, a lone "'", a
+    line already starting with a capital, a line starting with punctuation).
+    Only the FIRST character is touched: the rest of the line keeps whatever
+    case the writer used, because a line may legitimately be all-caps.
+
+    A word that already carries intentional inner capitalisation (iPhone, eBay,
+    iTunes) is left as written — turning it into IPhone would be worse than
+    leaving it lowercase.
+    """
+    for i, ch in enumerate(line):
+        if ch.isalpha():
+            if i == 0 and ch.isupper():
+                return line          # already capitalised
+            # Reject deliberate mixed-case words like iPhone / eBay.
+            word = line[i:].split(" ", 1)[0]
+            if any(c.isupper() for c in word[1:]):
+                return line
+            return line[:i] + ch.upper() + line[i + 1:]
+        if not ch.isspace():
+            return line              # starts with punctuation/digit; leave it
+    return line                      # blank or no letters at all
+
+
 def normalize_lyrics(
     text,
     contractions=None,
@@ -251,12 +277,18 @@ def normalize_lyrics(
     ing_exceptions=None,
     do_capitalize_tags=True,
     do_strip_punctuation=True,
+    do_capitalize_lines=True,
     protect_markers=True,
 ):
     """Normalize a lyrics block. Returns ``(new_text, report)``.
 
     ``report`` carries ``contractions`` (list of ``(from, to)`` applied),
     ``ing`` (count converted), ``tags`` (count touched) and ``lines_changed``.
+
+    ``do_capitalize_lines`` capitalises the first word of every lyric line.
+    Lyrics are normally written as sentences, and a lowercase line start reads
+    as a typo in a training caption. Only the first character is affected — the
+    rest of the line is untouched, so an intentionally ALL-CAPS line survives.
 
     ``protect_markers`` leaves ``---- filename ----`` separator lines (used by
     the all-lyrics view) completely untouched, so tidying a whole-dataset block
@@ -268,7 +300,7 @@ def normalize_lyrics(
         ing_exceptions = DEFAULT_ING_EXCEPTIONS
 
     report = {"contractions": [], "ing": 0, "tags": 0, "lines_changed": 0,
-              "apostrophes": 0, "word_changes": []}
+              "apostrophes": 0, "capitalized": 0, "word_changes": []}
     changed = set()
     lowered = {k.lower(): v for k, v in (contractions or {}).items()}
     out_lines = []
@@ -331,7 +363,17 @@ def normalize_lyrics(
         if body != before_apos:
             report["apostrophes"] += len(before_apos) - len(body)
 
-        # 7. Trailing punctuation.
+        # 7. Capitalise the first word of the line. Runs after every word-level
+        #    transform so it capitalises the FINAL form (e.g. "sheel", not
+        #    "she'll"), and before punctuation stripping so a leading quote
+        #    cannot swallow the change.
+        if do_capitalize_lines:
+            before_cap = body
+            body = capitalize_first_word(body)
+            if body != before_cap:
+                report["capitalized"] += 1
+
+        # 8. Trailing punctuation.
         if do_strip_punctuation:
             body = strip_trailing_punctuation(body)
 

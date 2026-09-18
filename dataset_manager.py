@@ -947,6 +947,7 @@ class DatasetManager(QMainWindow):
             "ing_to_in": self.lyrics_ing_check.isChecked(),
             "ing_exceptions": merged_ing,
             "do_capitalize_tags": self.lyrics_tags_check.isChecked(),
+            "do_capitalize_lines": self.lyrics_lines_check.isChecked(),
             "do_strip_punctuation": self.lyrics_punct_check.isChecked(),
         }
 
@@ -1004,7 +1005,9 @@ class DatasetManager(QMainWindow):
             f"{s.get('filename', '?')} — {report['lines_changed']} line(s) changed | "
             f"{len(report['contractions'])} contraction(s) mapped | "
             f"{report['apostrophes']} apostrophe(s) stripped | "
-            f"{report['ing']} \u2011ing word(s) shortened | {report['tags']} tag(s) capitalized"
+            f"{report['ing']} \u2011ing word(s) shortened | "
+            f"{report['capitalized']} line(s) capitalized | "
+            f"{report['tags']} tag(s) capitalized"
         )
 
     def apply_lyrics_tidy(self):
