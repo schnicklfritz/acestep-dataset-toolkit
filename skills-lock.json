@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "acestep-songwriting": {
+      "source": "ace-step/ace-step-1.5",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/acestep-songwriting/SKILL.md",
+      "computedHash": "367f44333db0d1dd62880cf0ba92debf0ab3f6e83ff599a47005c0564948199f"
+    }
+  }
+}
