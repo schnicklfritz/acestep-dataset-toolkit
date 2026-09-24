@@ -1,149 +1,29 @@
-# AUTO-GENERATED — do not edit
-# ------------------------------------------------------------------
-# CACHE-INVALIDATION NOTICES — read THIS first before touching code.
+# AUTO-GENERATED -- do not edit. Regenerate: scripts/gen_changed_markers.sh
+# HEAD: 4d4f6909e23a6d4698f46e3c324bf93af709e6b9
+# generated: 2026-09-24T03:26:32-04:00
+# dirty: 0 path(s), this file excluded
 #
-# RULE (see .clinerules): Everything committed at HEAD is an IMMUTABLE CACHE HIT.
-# Only open files / hunks listed under [UNREVIEWED] below.
-# When you commit a change, EMPTY this file — the loop has absorbed it.
+# VALIDATE ME BEFORE SCOPING ANY WORK:
+#   - '# HEAD:' must equal `git rev-parse HEAD`
+#   - the DIRTY block below must match `git status --porcelain`
+#     (ignoring .changed_markers itself -- tracked and rewritten by this
+#      script -- and .changed_markers.*, which is gitignored scratch).
+#   - git status collapses an untracked DIRECTORY to one line while the
+#     diff below expands it to one entry per file. Expected, not drift.
+#   - cross-check against .agent_notes.md, which is hand-owned.
+# On ANY disagreement: STOP, regenerate, re-read. See .clinerules.
 #
-# STALE LINE PROTECTION: bind notes to function/class names + hunk context,
-# not raw line numbers (they go stale).
+# ---- DIRTY (real index; one line per git status --porcelain entry) ----
+#   (plus .changed_markers and its scratch file: excluded by design)
 #
-# TWO MODES:
-#   [UNREVIEWED]      = daily iterative mode (git diff dirty hunks)
-#   [BASELINE SWEEP]  = one-time dead-code audit (from vulture/flake8 flags)
-# ------------------------------------------------------------------
+# ------ SCOPE SUMMARY (read this before the hunks) ------
 
-[UNREVIEWED]
-# (none — tree clean at 566f782, which absorbed the ACE-Step 1.5XL caption
-#  schema, the length bound, the generated notebook, the kernel diagnostics, and
-#  the Kaggle dataset-mount wait. Dirty only because of this regeneration.)
+# ------ FULL HUNKS (3 lines of context) ------
+# Anchor edits to function/class names + hunk context, never line numbers.
 
-[OUTSTANDING]
-#   - ROOT CAUSE OF THE EMPTY KAGGLE MOUNT (fixed in 566f782): five of eight
-#     workers uploaded the audio dataset and pushed the kernel IMMEDIATELY, before
-#     the dataset version was mounted, so /kaggle/input/<slug> was empty and the
-#     kernel captioned nothing ("was empty; found audio elsewhere"). modules/
-#     kaggle.py:wait_dataset_ready() documented this exact failure but only
-#     workers/kaggle_moss.py and workers/kaggle_stems.py called it. All five
-#     (caption, kaggle_lyrics, spatial, structural, structure) now wait and ABORT
-#     on timeout. tests/test_kaggle_dataset_wait.py pins it.
-#   - THE APP CACHES MODULES AT IMPORT — RESTART IT AFTER PULLING. This is the
-#     single most likely reason a run STILL failed after the earlier fixes: the
-#     live process keeps the OLD code (the same trap that once let {{ATTN_IMPL}}
-#     reach Kaggle). Nothing in this repo takes effect in a running app until it
-#     is relaunched.
-#   - the CAPTIONER IS STILL SCHEMA-UNPROVEN ON REAL AUDIO. The prompt, validator
-#     and length trim are tested, but no caption has been produced by the new
-#     prompt on a GPU yet, so real-world compliance is unverified.
-#   - settings.json still has caption_backend="custom" (must be ace_step for the
-#     Kaggle captioner) and the UI still loads the legacy ignored caption_prompt.
-#   - THE CAPTION KERNEL IS NOW SELF-REPORTING. It prints [caption] lines before
-#     anything slow: python, GPU count, INTERNET reachability, disk, pip results,
-#     torch/transformers versions, whether the schema arrived, the resolved
-#     AUDIO_FOLDER, the file count, model source, load time, and per-file
-#     progress. A silent run should no longer be possible -- if the log is truly
-#     empty, the session is not running at all.
-#   - THE LIKELY CAUSE OF THE EMPTY RUN IS STILL UNRESOLVED: the user's ace-moss
-#     log shows "/kaggle/input/ace-audio-48bd46 was empty; found audio elsewhere"
-#     and then only ONE file (Baby_Please_Dont_Go.flac). The AC/DC dataset they
-#     intended is NOT attached to that session. The new "!! only ONE file found"
-#     warning is there to make that loud. The fix is on the Kaggle side: attach
-#     the audio dataset that actually holds the mp3s.
-#   - THE FIRST RUN CANNOT BE FAST. The model is ~16 GB: download + shard load
-#     took ~219 s in the user's MOSS log with no download at all. Expect 5-15 min
-#     of download on the first run of a session; later runs in the same session
-#     start in ~1 min.
-#   - docs/kaggle_caption_cell.{ipynb,py} ARE GENERATED — regenerate, never
-#     hand-edit: scripts/build_caption_notebook.py --tag acdc
-#     A Kaggle session must show Accelerator = GPU T4 x2 and Internet = ON.
-#   - THE NOTEBOOK'S AUTO-RESOLVE PICKS THE FIRST /kaggle/input DIR CONTAINING
-#     AUDIO. With more than one dataset attached that may be the wrong one — check
-#     the printed "AUDIO_FOLDER = ..." line in the run log before trusting it.
-#   - THE AC/DC FILES DO NOT MATCH ACROSS THE TWO PATHS. The local dataset JSON
-#     (acdc/_Backup/latest.json) references .flac — 36 samples, 35 usable, 1
-#     MISSING file — while the user's Kaggle dataset holds mp3s. To import
-#     captions_out.json back into acdc.json, match on the filename STEM, not the
-#     extension, or nothing will line up.
-#   - NO IMPORTER EXISTS FOR THE MANUAL PATH. The app writes captions into the
-#     dataset itself, but captions_out.json from a hand-run notebook must be
-#     loaded by hand; there is no script for it yet.
-#   - THE APP PATH NEEDS caption_backend=ace_step. settings.json currently says
-#     "custom", which routes the run to the Custom endpoint and never touches
-#     Kaggle (see the grounding caveat on CustomOpenAICompatBackend).
-#   - A PROVIDER'S max_tokens CANNOT BE TRUSTED — HANDLED, NOT ASSUMED. The
-#     reported caption was ~2125 words from an endpoint configured with
-#     caption_max_tokens=512 (2000 words is ~2700 tokens), so that route ignored
-#     the cap. trim_to_caption() now bounds every backend return and
-#     check_caption() flags >120 words / >900 chars / >3 flow sentences. STILL
-#     UNVERIFIED: whether that endpoint also ignores the newly added
-#     frequency_penalty — no live API call has been made against it, so the
-#     penalty path is untested on real traffic.
-#   - EXISTING CAPTIONS ARE UNDER-TAGGED, AND THAT IS MEASURED, NOT GUESSED.
-#     modules/caption_audit.py + check_caption() report sabbath.json at 18-of-19
-#     captions and Doorsdata/doors1.json at 19-of-19, almost all for one reason:
-#     "only 3 front-loaded keyword(s); the schema requires 5-12". They are NOT
-#     corrupted — the tag count is simply short, because they were produced by the
-#     schema-less prompt. Re-captioning fixes the shape; nothing needs deleting.
-#   - TWO PATHS STILL CAPTION WITHOUT AUDIO, so they can still invent genre/BPM:
-#       a) caption_backend "custom" with custom_caption_audio=false in settings.json
-#          -> workers/caption_backends.py sends TEXT ONLY (see its docstring);
-#       b) workers/caption.py _run_deepseek_orchestration -> filename only.
-#     The schema fixes the SHAPE of the output, not its GROUNDING. A provenance
-#     field (caption_backend + audio_sent per sample) is STILL NOT RECORDED, so
-#     which path produced a given caption remains unprovable after the fact.
-#   - VERIFY THE CUSTOM ENDPOINT BEFORE BLAMING THE MODEL. settings.json has
-#     caption_backend "custom" -> custom_caption_url "https://generativelanguage.
-#     googleapis.com" with custom_caption_model "gemini-3.7-flash". Gemini's
-#     OpenAI-compatible base URL is normally .../v1beta/openai/, and that model id
-#     looks non-standard. An ungrounded or mis-routed request produces exactly the
-#     kind of output that started this investigation.
-#   - THE UI STILL DISPLAYS THE IGNORED LEGACY PROMPT. ui/caption_tab.py loads
-#     caption_prompt into the "Caption Prompt" editor, and settings.json still
-#     holds the old "Start with A or An" text. The runtime ignores it by design
-#     (caption_spec.task_prompt_from_config), so it is harmless but confusing —
-#     clearing that field in Settings removes the contradiction from view.
-#   - DECODING PENALTIES ARE UNTESTED ON HARDWARE. caption_repetition_penalty
-#     (1.15) and caption_no_repeat_ngram (6) are now passed by both kernels, but no
-#     Kaggle/GPU run has used them yet. 1.0 and 0 are the documented "off" values.
-#   - MOSS IS STILL NOT REFORMATTED BY THE APP. The schema now reaches MOSS as a
-#     prepended prompt (MOSS has no system role), which partly closes the old
-#     "MOSS returns markdown and nothing reformats it" item — but
-#     modules/moss_import.py still stores MOSS's raw style text as the caption.
-#   - /home/fritz/42/Datasets/hank_sr/hank.json is CORRUPT JSON: "Unterminated
-#     string starting at line 208 column 17". It cannot be loaded. Not repaired.
-#   - PRE-EXISTING flake8 in touched workers: 11 issues (F401/F841/F811) across
-#     workers/caption.py, workers/spatial.py, workers/structural.py,
-#     workers/kaggle_moss.py. Verified identical before/after the schema commit.
-#     The baseline sweep says do NOT strip blindly — several are lazy re-imports.
-#   - THE CORPUS IS GITIGNORED AND MACHINE-LOCAL: 32 sources / 557,783 chars under
-#     docs/research/<artist>/. Regenerable, not backed up:
-#     scripts/gather_corpus.py --manifest docs/research/sources.json
-#     Extending it is APPEND-ONLY (filenames are NN-slug.txt by list position).
-#     Two sources 403'd: metalinjection.net and sweetwater.com.
-#   - unlisted_terms DOES NOT FIND DESCRIPTORS on that corpus (it ranks by raw
-#     frequency, so it returns proper nouns and years). Run it PER ARTIST, and use
-#     grep_corpus with an explicit candidate list instead.
-#   - RUNNING MCP SERVER CACHES MODULES AT IMPORT — restart it after editing
-#     research_tools.py or the server before trusting a corpus_stats call.
-#   - The stale VS Code extension MCP config still exists in the OLD format at
-#     ~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/
-#     cline_mcp_settings.json; its filesystem server entry is malformed. Repair or
-#     delete.
-#   - /home/fritz/42/Datasets/sabbath/mp3_throwaway is 9-of-15 unusable: 8
-#     zero-byte files plus Iron_Man.mp3 truncated to 43.2s (should be ~355s).
-#     Regenerate from the FLACs before any captioning run. Verified 2026-09-18.
-#   - dataset_manager.py is ~5,850 lines (~253 KB). NEVER read it whole -- read a
-#     line range by symbol. It is ~31% of the Python in this repo.
-
-[BASELINE SWEEP]
-# RUN 2026-09-15 — first pass complete. Tools: vulture 2.16, flake8 7.3.0
-# (installed into .venv for this scan; NOT app runtime deps).
-#   .venv/bin/python -m vulture . --exclude .venv,kernels,__pycache__,scripts,.git --min-confidence 80
-#   .venv/bin/python -m flake8 --select=F401 . --exclude=.venv,kernels,__pycache__,scripts,.git
-#
-# RESULT: 3906 net lines of dead code removed; app boots clean (offscreen test).
-# OUTSTANDING: 41 unused imports in peripheral files (workers/advanced.py(6),
-#   workers/structural.py(5), stem_separator.py(5), workers/health.py(4),
-#   workers/caption.py(3), ...). Do NOT blindly strip — several of those modules
-#   re-import names lazily inside functions. Verify each before removing.
+# ------ RENAME GUARD ------
+# If the hunks above contain 'rename from', run before committing:
+#   git grep -n "old_name"   # who still points at the old name?
+#   git grep -n "new_name"   # did the new name actually land?
+# Disagreement means UNKNOWN -> stop and ask. See .clinerules.
+# (no renames detected in this diff)
