@@ -15,6 +15,8 @@ the old subprocess-based implementation.
 """
 import json
 import os
+import shutil
+import tempfile
 import time
 import uuid
 
@@ -309,6 +311,51 @@ def dataset_sources(*slugs):
     return [str(slug).strip() for slug in slugs if str(slug or "").strip()]
 
 
+def _upload_payload(audio_dir, meta):
+    """Build the directory that is actually uploaded. Returns its path.
+
+    WHY NOT UPLOAD ``audio_dir`` DIRECTLY: the Kaggle API takes a FOLDER and sends
+    everything in it — it has no notion of a usable file. So a 0-byte file left
+    behind by an interrupted transcode, and the ``dataset-metadata.json`` this
+    module writes for the API, were both uploaded as dataset files. The 0-byte
+    ones then got captioned on the GPU into error rows.
+
+    The payload keeps every non-empty regular file and drops only provable junk.
+    It deliberately does NOT filter by the captioner's ``SUPPORTED_FORMATS``: six
+    other workers share this entry point, and a caption-specific format list would
+    silently drop their audio. Files are HARDLINKED where possible (no copy cost),
+    with a ``copy2`` fallback across filesystems.
+    """
+    from modules import caption_kaggle_run as ckr
+
+    payload = tempfile.mkdtemp(prefix="ace-upload-")
+    try:
+        for name in sorted(os.listdir(audio_dir)):
+            src = os.path.join(audio_dir, name)
+            if not os.path.isfile(src) or name == ckr.METADATA_NAME:
+                continue
+            if name.endswith(ckr.PART_SUFFIX) or os.path.getsize(src) == 0:
+                continue
+            dst = os.path.join(payload, name)
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+        if not os.listdir(payload):
+            raise RuntimeError(
+                f"Nothing uploadable in {audio_dir}: every file there is empty, "
+                "scratch or metadata. Uploading now would create an empty Kaggle "
+                "dataset."
+            )
+        with open(os.path.join(payload, ckr.METADATA_NAME), "w",
+                  encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        shutil.rmtree(payload, ignore_errors=True)
+        raise
+    return payload
+
+
 def upload_audio_dataset(config, audio_dir, title_prefix="ace-audio"):
     """Upload a directory of audio as a private Kaggle dataset.
 
@@ -322,13 +369,13 @@ def upload_audio_dataset(config, audio_dir, title_prefix="ace-audio"):
         "isPrivate": True,
         "licenses": [{"name": "unknown"}],
     }
-    with open(os.path.join(audio_dir, "dataset-metadata.json"), "w") as f:
-        json.dump(meta, f, indent=2)
-
+    payload = _upload_payload(audio_dir, meta)
     try:
-        api.dataset_create_new(folder=audio_dir, dir_mode="skip")
+        api.dataset_create_new(folder=payload, dir_mode="skip")
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Kaggle dataset upload failed: {e}") from e
+    finally:
+        shutil.rmtree(payload, ignore_errors=True)
 
     return f"{user}/{slug}"
 
@@ -358,17 +405,18 @@ def upload_or_update_audio_dataset(config, audio_dir, slug="", title_prefix="ace
         "licenses": [{"name": "unknown"}],
     }
     if slug:
-        with open(os.path.join(audio_dir, "dataset-metadata.json"), "w") as f:
-            json.dump(meta, f, indent=2)
+        payload = _upload_payload(audio_dir, meta)
         try:
             api.dataset_create_version(
-                folder=audio_dir, version_notes="ACE-Step caption upload",
+                folder=payload, version_notes="ACE-Step caption upload",
                 dir_mode="skip",
             )
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(
                 f"Kaggle dataset VERSION upload failed for {slug}: {e}"
             ) from e
+        finally:
+            shutil.rmtree(payload, ignore_errors=True)
         return slug
 
     return upload_audio_dataset(config, audio_dir, title_prefix=title_prefix)

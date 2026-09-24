@@ -13,6 +13,7 @@ silently, which is why they are pinned here:
 """
 import json
 import os
+import shutil
 import sys
 
 import pytest
@@ -288,3 +289,134 @@ def test_accepting_the_same_text_does_not_fake_a_backup():
     ckr.apply_decision(sample, row, "use")
     assert "caption_before_kaggle" not in sample
     assert sample["caption"] == "identical caption"
+
+
+# ---------------------------------------------------------------------------
+# staging must not be able to lie about what uploads
+# ---------------------------------------------------------------------------
+
+class _FakeProc:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+def test_a_failed_transcode_cannot_leave_a_zero_byte_track(tmp_path, monkeypatch):
+    """THE BUG THIS PINS: ffmpeg creates its output file the moment it starts, so
+    a process killed mid-encode left a 0-byte file under the track's REAL name.
+    The UI filtered it out (it lists only usable files) and the Kaggle upload sent
+    it anyway, where the kernel captioned it into an error row."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    src = _write(str(tmp_path / "src" / "song.flac"), b"x" * 64)
+
+    def killed(cmd, **kwargs):
+        with open(cmd[-1], "wb") as fh:      # the real ffmpeg behaviour...
+            fh.write(b"")                    # ...a file that exists and is empty
+        return _FakeProc(1)                  # ...then it dies
+
+    monkeypatch.setattr(ckr.subprocess, "run", killed)
+    staged = ckr.stage_track(src, str(stage), convert_mp3=True)
+
+    # The designed fallback still stages the ORIGINAL, so no track is lost...
+    assert staged.endswith("song.flac")
+    # ...and nothing pretends to be a finished MP3, and no scratch is left.
+    assert not (stage / "song.mp3").exists()
+    assert not list(stage.glob("*" + ckr.PART_SUFFIX))
+
+
+def test_convert_renames_into_place_only_after_ffmpeg_succeeds(tmp_path, monkeypatch):
+    src = _write(str(tmp_path / "src" / "song.flac"), b"x")
+    dst = tmp_path / "stage" / "song.mp3"
+    dst.parent.mkdir()
+
+    def ok(cmd, **kwargs):
+        with open(cmd[-1], "wb") as fh:      # ffmpeg writes the .part file
+            fh.write(b"mp3data")
+        return _FakeProc(0)
+
+    monkeypatch.setattr(ckr.subprocess, "run", ok)
+    assert ckr.convert_to_mp3(src, str(dst)) is True
+    assert dst.read_bytes() == b"mp3data"
+    assert not list(dst.parent.glob("*" + ckr.PART_SUFFIX))
+
+
+def test_convert_discards_the_scratch_file_when_ffmpeg_fails(tmp_path, monkeypatch):
+    src = _write(str(tmp_path / "src" / "song.flac"), b"x")
+    dst = tmp_path / "stage" / "song.mp3"
+    dst.parent.mkdir()
+
+    def bad(cmd, **kwargs):
+        with open(cmd[-1], "wb") as fh:
+            fh.write(b"half")
+        return _FakeProc(1)
+
+    monkeypatch.setattr(ckr.subprocess, "run", bad)
+    assert ckr.convert_to_mp3(src, str(dst)) is False
+    assert not dst.exists()
+    assert not list(dst.parent.glob("*" + ckr.PART_SUFFIX))
+
+
+def test_staging_report_names_why_a_file_is_ignored(tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    _write(str(stage / "good.mp3"), b"audio")
+    _write(str(stage / "zero.mp3"), b"")
+    _write(str(stage / ("song.mp3" + ckr.PART_SUFFIX)), b"half")
+    _write(str(stage / ckr.METADATA_NAME), b"{}")
+
+    report = ckr.staging_report(str(stage))
+    assert [os.path.basename(p) for p in report["usable"]] == ["good.mp3"]
+    reasons = dict(report["ignored"])
+    assert reasons["zero.mp3"] == "empty or unreadable"
+    assert reasons["song.mp3" + ckr.PART_SUFFIX] == "interrupted transcode"
+    assert reasons[ckr.METADATA_NAME] == "Kaggle metadata, not audio"
+
+
+def test_clean_unusable_removes_junk_but_keeps_everything_else(tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    _write(str(stage / "good.mp3"), b"audio")
+    _write(str(stage / "zero.mp3"), b"")
+    _write(str(stage / ("scratch.mp3" + ckr.PART_SUFFIX)), b"half")
+    # A file of an unsupported FORMAT is NOT junk: it may be intentional, so the
+    # cleanup must leave it alone even though it is not uploaded.
+    _write(str(stage / "cover.png"), b"art")
+
+    assert ckr.clean_unusable_staged(str(stage)) == 2
+    assert sorted(os.listdir(stage)) == ["cover.png", "good.mp3"]
+
+
+def test_the_upload_carries_only_uploadable_files(tmp_path):
+    """The list and the upload must not disagree: anything the page refuses to
+    list must also never reach the Kaggle dataset."""
+    from modules import kaggle as kg
+
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    _write(str(stage / "good.mp3"), b"audio")
+    _write(str(stage / "zero.mp3"), b"")
+    _write(str(stage / ("interrupted.mp3" + ckr.PART_SUFFIX)), b"half")
+    _write(str(stage / ckr.METADATA_NAME), b"{}")
+
+    payload = kg._upload_payload(str(stage), {"id": "u/d", "title": "d"})
+    try:
+        assert sorted(os.listdir(payload)) == [ckr.METADATA_NAME, "good.mp3"]
+        # The staging folder itself is untouched — the junk is left for the user
+        # to clean, not deleted behind their back.
+        assert sorted(os.listdir(stage)) == [
+            ckr.METADATA_NAME, "good.mp3", "interrupted.mp3" + ckr.PART_SUFFIX,
+            "zero.mp3",
+        ]
+    finally:
+        shutil.rmtree(payload, ignore_errors=True)
+
+
+def test_the_upload_refuses_a_folder_with_nothing_uploadable(tmp_path):
+    """Uploading an empty dataset would LOOK like a successful run."""
+    from modules import kaggle as kg
+
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    _write(str(stage / "zero.mp3"), b"")
+    with pytest.raises(RuntimeError, match="Nothing uploadable"):
+        kg._upload_payload(str(stage), {"id": "u/d", "title": "d"})

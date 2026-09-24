@@ -205,6 +205,17 @@ class RemoteCaptionWorker(QThread):
                 38, "ffmpeg not found — staging the original files at full quality."
             )
 
+        ignored = ckr.unusable_staged(staging)
+        if ignored:
+            # Loud on purpose. These files are NOT uploaded, and before the payload
+            # fix they were uploaded anyway and captioned into error rows.
+            self.progress.emit(
+                39,
+                f"{len(ignored)} unusable file(s) in the staging folder will NOT be "
+                "uploaded (empty, scratch or unsupported format). Remove them with "
+                "🧹 Clean in the staging list.",
+            )
+
         # 2. Upload as a private Kaggle dataset, or push a NEW VERSION of the one
         #    this user already has, so its identity survives across runs.
         known_slug = (self.config.get("caption_audio_dataset") or "").strip()

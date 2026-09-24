@@ -35,6 +35,18 @@ SUPPORTED_FORMATS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
 STAGING_SUBDIR = "acestep_kaggle_staging"
 CAPTIONS_SUBDIR = "acestep_captions"
 
+# ffmpeg creates its output file the moment it starts, so a process killed
+# mid-transcode used to leave a 0-byte file under the TRACK'S REAL NAME — which
+# the UI could not show (it filters by size) and the Kaggle upload sent anyway,
+# where the kernel captioned it into an error row. Every write now lands on
+# "<target>.part" first and is renamed into place only on success, so an
+# interrupted run can never leave something that looks staged.
+PART_SUFFIX = ".part"
+
+# Written by the uploader for the Kaggle API. It used to be written INTO the
+# staging folder and then uploaded as a stray dataset file.
+METADATA_NAME = "dataset-metadata.json"
+
 # Characters ffmpeg/Kaggle dataset paths handle poorly. Replaced, not stripped, so
 # two different titles cannot collapse onto the same staged filename.
 _UNSAFE = re.compile(r"[^A-Za-z0-9._ ()-]+")
@@ -94,17 +106,60 @@ def ffmpeg_available():
     return bool(shutil.which("ffmpeg"))
 
 
+def discard_partial(path):
+    """Delete a scratch file, ignoring the race that makes it already gone."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def copy_atomic(src, dst):
+    """``shutil.copy2`` that cannot leave a partial file under a final name."""
+    part = str(dst) + PART_SUFFIX
+    try:
+        shutil.copy2(src, part)
+    except OSError:
+        discard_partial(part)
+        raise
+    try:
+        os.replace(part, dst)
+    except OSError:
+        discard_partial(part)
+        raise
+
+
 def convert_to_mp3(src, dst, bitrate="192k"):
-    """Transcode ``src`` to MP3 at ``dst``. Returns True on success."""
+    """Transcode ``src`` to MP3 at ``dst``, ATOMICALLY. Returns True on success.
+
+    The encode lands on ``<dst>.part`` and is renamed onto ``dst`` only once
+    ffmpeg exits 0 with a non-empty result, so a killed run leaves scratch that
+    nothing uploads instead of a 0-byte file that looks like a staged track.
+
+    ``-f mp3`` is explicit and load-bearing: ffmpeg infers the muxer from the
+    output extension, and the temp file does not end in ``.mp3``, so without it
+    every single encode would fail to pick a format.
+    """
+    part = str(dst) + PART_SUFFIX
     try:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-i", str(src), "-vn", "-map_metadata", "-1",
-             "-c:a", "libmp3lame", "-b:a", str(bitrate or "192k"), str(dst)],
+             "-c:a", "libmp3lame", "-b:a", str(bitrate or "192k"),
+             "-f", "mp3", part],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
     except OSError:
+        discard_partial(part)
         return False
-    return proc.returncode == 0 and _is_usable(dst)
+    if proc.returncode != 0 or not _is_usable(part):
+        discard_partial(part)
+        return False
+    try:
+        os.replace(part, dst)
+    except OSError:
+        discard_partial(part)
+        return False
+    return True
 
 
 def stage_track(audio_path, staging, convert_mp3=True, bitrate="192k", name=None):
@@ -125,7 +180,7 @@ def stage_track(audio_path, staging, convert_mp3=True, bitrate="192k", name=None
     fallback = os.path.join(staging, staged_name(name or audio_path, False))
     try:
         if os.path.abspath(audio_path) != os.path.abspath(fallback):
-            shutil.copy2(audio_path, fallback)
+            copy_atomic(audio_path, fallback)
         return fallback
     except OSError:
         return ""
@@ -152,15 +207,65 @@ def stage_tracks(items, staging, convert_mp3=True, bitrate="192k", progress=None
     return staged, skipped
 
 
+def staging_report(staging):
+    """Classify the staging folder: what uploads, and what does not (and why).
+
+    WHY THIS EXISTS: ``staged_files()`` filtered unusable files OUT OF THE LIST,
+    while the Kaggle upload sent the whole FOLDER. A 0-byte file left by an
+    interrupted transcode was therefore invisible in the UI and uploaded anyway,
+    and the kernel captioned every one of them into an error row. The list and
+    the upload now come from the SAME classification, and anything ignored is
+    reported here so the page can say so instead of silently disagreeing with
+    what is on disk.
+
+    Returns ``{"usable": [path, ...], "ignored": [(name, reason), ...]}``.
+    """
+    report = {"usable": [], "ignored": []}
+    if not os.path.isdir(staging):
+        return report
+    for name in sorted(os.listdir(staging)):
+        path = os.path.join(staging, name)
+        if not os.path.isfile(path):
+            continue
+        suffix = os.path.splitext(name)[1].lower()
+        if suffix == PART_SUFFIX:
+            report["ignored"].append((name, "interrupted transcode"))
+        elif name == METADATA_NAME:
+            report["ignored"].append((name, "Kaggle metadata, not audio"))
+        elif suffix not in SUPPORTED_FORMATS:
+            report["ignored"].append((name, "unsupported format"))
+        elif not _is_usable(path):
+            report["ignored"].append((name, "empty or unreadable"))
+        else:
+            report["usable"].append(path)
+    return report
+
+
 def staged_files(staging):
     """Audio files currently in the staging folder, sorted."""
-    if not os.path.isdir(staging):
-        return []
-    return sorted(
-        os.path.join(staging, name) for name in os.listdir(staging)
-        if os.path.splitext(name)[1].lower() in SUPPORTED_FORMATS
-        and _is_usable(os.path.join(staging, name))
-    )
+    return staging_report(staging)["usable"]
+
+
+# Reasons the cleanup is allowed to delete. An unsupported FORMAT is deliberately
+# absent: a stray cover.png in the staging folder may be intentional, whereas a
+# 0-byte file or a .part scratch file never is.
+JUNK_REASONS = {
+    "interrupted transcode",
+    "empty or unreadable",
+    "Kaggle metadata, not audio",
+}
+
+
+def unusable_staged(staging):
+    """``[(name, reason), ...]`` for everything the next upload will not take."""
+    return staging_report(staging)["ignored"]
+
+
+def clean_unusable_staged(staging):
+    """Delete the provably-junk files from the staging folder. Returns the count."""
+    junk = [name for name, reason in unusable_staged(staging)
+            if reason in JUNK_REASONS]
+    return remove_staged(staging, junk)
 
 
 def remove_staged(staging, names):
