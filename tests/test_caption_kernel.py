@@ -114,3 +114,38 @@ def test_the_audio_limit_is_documented_as_the_only_truncation():
     assert "MAX_AUDIO_DURATION" in src
     assert "0 = whole file" in src
     assert "[caption] limits" in src
+
+
+class TestAudioDiscovery:
+    """Kaggle mounts private datasets in more than one place.
+
+    A real run found nothing because the dataset landed at
+    /kaggle/input/datasets/<owner>/<slug>/ while the kernel looked in
+    /kaggle/input/<slug>/. kernels/stem_separation_kernel.py solved this first and
+    kernels/moss_caption_kernel.py copied it; THIS kernel kept the single path and
+    then wrote a valid-looking {"results": []}, which reached the app as "no
+    captions came back" and hid the cause for days.
+    """
+
+    def test_walks_the_tree_instead_of_one_folder(self):
+        src = _source()
+        assert "def _walk_for_audio(base):" in src
+        assert "os.walk(base)" in src
+
+    def test_falls_back_to_the_whole_input_mount(self):
+        src = _source()
+        assert '_walk_for_audio("/kaggle/input")' in src
+        assert "was empty; found audio elsewhere" in src
+
+    def test_does_not_assume_the_old_mount_layout(self):
+        # The old code did Path(AUDIO_FOLDER).rglob("*") only.
+        assert "Path(AUDIO_FOLDER)" not in _source()
+
+    def test_no_audio_is_a_hard_failure_not_an_empty_result(self):
+        """A zero-track result is indistinguishable from "the model returned
+        nothing", which is exactly what made this look like a model problem."""
+        src = _source()
+        assert "NO AUDIO FOUND" in src
+        assert "No supported audio found under" in src
+        assert "raise SystemExit(" in src
+

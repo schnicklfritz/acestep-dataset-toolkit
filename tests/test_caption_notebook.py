@@ -61,7 +61,13 @@ def test_cell_carries_the_ace_step_schema(notebook):
 def test_auto_resolve_is_injected_before_audio_files_is_built(notebook):
     source = _cell_source(notebook)
     assert "AUTO-RESOLVED AUDIO FOLDER" in source
-    assert source.index("AUTO-RESOLVED") < source.index("audio_files = sorted")
+    # The injected block must run BEFORE the file list is built, whichever call
+    # builds it. (The kernel gained its own _walk_for_audio() fallback after a real
+    # run mounted the dataset at /kaggle/input/datasets/<owner>/<slug>/ and the
+    # kernel found 0 files; the notebook injection is now belt-and-braces, and this
+    # assertion is what keeps it ordered correctly.)
+    assert (source.index("AUTO-RESOLVED")
+            < source.index("audio_files = _walk_for_audio(AUDIO_FOLDER)"))
 
 
 def test_the_trigger_tag_is_applied(notebook):

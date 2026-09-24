@@ -195,14 +195,50 @@ model.disable_talker()
 processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_SOURCE, trust_remote_code=True)
 print(f"[caption] model loaded : {time.time() - _load_started:.0f}s", flush=True)
 
-audio_files = sorted(
-    p for p in Path(AUDIO_FOLDER).rglob("*")
-    if p.suffix.lower() in SUPPORTED_FORMATS and p.is_file()
-)
+def _walk_for_audio(base):
+    """Every supported audio file under ``base``, recursively.
+
+    Kaggle mounts private datasets inconsistently: sometimes at
+    ``/kaggle/input/<slug>``, other times nested under
+    ``/kaggle/input/datasets/<owner>/<slug>``. AUDIO_FOLDER names the expected
+    location, but the mount is what it is -- so when that folder turns up
+    nothing, the whole input tree is searched instead of guessing at a path.
+
+    This is why every app run of this kernel wrote a perfectly valid-looking
+    ``{"results": []}``: the model loaded, the folder was searched, and the audio
+    was simply not where the path said it was. Mirrors
+    kernels/moss_caption_kernel.py, which credits
+    kernels/stem_separation_kernel.py for finding this first.
+    """
+    return sorted(
+        os.path.join(root, name)
+        for root, _dirs, names in os.walk(base)
+        for name in names
+        if os.path.splitext(name)[1].lower() in SUPPORTED_FORMATS
+    )
+
+
+audio_files = _walk_for_audio(AUDIO_FOLDER)
+if not audio_files and os.path.isdir("/kaggle/input"):
+    audio_files = _walk_for_audio("/kaggle/input")
+    if audio_files:
+        print(f"[caption] {AUDIO_FOLDER} was empty; found audio elsewhere under "
+              "/kaggle/input instead.", flush=True)
+
 print(f"[caption] audio files  : {len(audio_files)} under {AUDIO_FOLDER}", flush=True)
 if not audio_files:
-    print("[caption] !! NO AUDIO FOUND -- attach the audio dataset or fix the path "
-          "above. This run will finish immediately with 0 results.", flush=True)
+    # FAIL LOUDLY. A zero-track result surfaced in the app as "no captions came
+    # back" instead of "there was no audio to read", which is what sent this
+    # chasing the model, the prompt and the upload for days.
+    print("[caption] NO AUDIO FOUND. Input tree:", flush=True)
+    for root, _dirs, names in os.walk("/kaggle/input"):
+        print("  DIR:", root, flush=True)
+        for name in names[:50]:
+            print("  FILE:", os.path.join(root, name), flush=True)
+    raise SystemExit(
+        f"No supported audio found under {AUDIO_FOLDER} or /kaggle/input. "
+        f"Supported extensions: {sorted(SUPPORTED_FORMATS)}"
+    )
 elif len(audio_files) == 1:
     print("[caption] !! only ONE file found -- if you expected more, the dataset "
           "mount is wrong.", flush=True)
