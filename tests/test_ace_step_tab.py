@@ -277,10 +277,19 @@ def test_tick_status_counts_the_ticks():
     assert "1 of 2 ticked" in manager.ace_tick_status.text
 
 
-def test_tick_status_names_where_songs_are_added_on_an_empty_dataset():
+def test_tick_status_names_both_ways_to_get_tracks():
+    """An empty dataset is not the same as an absent one.
+
+    The hint used to say only "add songs in 🎛 Dataset Studio", so a user who had
+    simply restarted the app (it never reopens the last dataset) was told to ADD
+    songs, and reported their dataset as GONE. It must name the Load button too.
+    """
     manager = _TickManager([], ticks=[])
     manager.update_ace_tick_status()
-    assert "Dataset Studio" in manager.ace_tick_status.text
+    text = manager.ace_tick_status.text
+    assert "📂 Open" in text
+    assert "Dataset Studio" in text
+    assert "starts empty" in text
 
 
 def test_refresh_keeps_the_picker_in_step_with_the_dataset():

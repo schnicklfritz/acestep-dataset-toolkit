@@ -1633,8 +1633,10 @@ class DatasetManager(QMainWindow):
         ticked = len(self._ticked_samples())
         if not total:
             label.setText(
-                "No tracks in this dataset yet — add songs in 🎛 Dataset Studio "
-                "(that is the only place songs enter the dataset)."
+                "No tracks loaded yet — open your dataset with 📂 Open, or "
+                "add songs in 🎛 Dataset Studio. "
+                "(The app starts empty: it does not reopen the dataset you had "
+                "open last time.)"
             )
         elif not ticked:
             label.setText(
