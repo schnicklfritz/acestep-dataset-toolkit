@@ -342,9 +342,9 @@ def build_ace_step_tab(manager, parent):
 
     s_hint = QLabel(
         "<b>➕ Stage</b> (on the strip) copies the ticked tracks into this folder; "
-        "<b>Remove</b> deletes the ticked files. The next run uploads the result as "
-        "a new version of the dataset, so its identity survives. Removing a song "
-        "here never touches the dataset on disk."
+        "<b>Remove</b> deletes the ticked tracks again — the same ticks. The next "
+        "run uploads the result as a new version of the dataset, so its identity "
+        "survives. Removing a song here never touches the dataset on disk."
     )
     s_hint.setStyleSheet("color: #999;")
     s_hint.setWordWrap(True)
@@ -356,6 +356,10 @@ def build_ace_step_tab(manager, parent):
     manager.staging_list.setToolTip(
         "Files currently staged for upload. Everything listed here is uploaded and "
         "captioned on the next run.\n\n"
+        "Each row reads  staged file   ←   dataset track , because the upload uses "
+        "the converted MP3 name while the dataset may still say .flac. A row marked "
+        "“(not in this dataset)” is a leftover from an older dataset — removable "
+        "here, and captioned by the kernel unless you remove it.\n\n"
         "Files that CANNOT be uploaded (0-byte corpses from an interrupted "
         "transcode, .part scratch, our own metadata file) are deliberately NOT "
         "listed — the line under this list names them, and 🧹 Clean deletes them."
@@ -363,10 +367,13 @@ def build_ace_step_tab(manager, parent):
     s_layout.addWidget(manager.staging_list)
 
     s_row = QHBoxLayout()
-    manager.staging_remove_btn = QPushButton("➖ Remove ticked files")
+    manager.staging_remove_btn = QPushButton("➖ Remove")
     manager.staging_remove_btn.setToolTip(
-        "Delete the ticked files from the staging folder — this is how a song is "
-        "removed from the uploaded dataset."
+        "Delete the TICKED tracks — the same “Tracks ▾” ticks ➕ Stage uses — from "
+        "the staging folder. This is how a song is removed from the uploaded "
+        "dataset.\n\n"
+        "A file clicked in the list is removed as well, which is the only way to get "
+        "rid of a staged file that belongs to no track in this dataset."
     )
     manager.staging_clean_btn = QPushButton("🧹 Clean unusable")
     manager.staging_clean_btn.setToolTip(

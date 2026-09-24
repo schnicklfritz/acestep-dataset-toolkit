@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 pytest.importorskip("PySide6.QtWidgets")
 
+from PySide6.QtCore import Qt                                       # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget                     # noqa: E402
 
 import dataset_manager                                                  # noqa: E402
@@ -312,12 +313,18 @@ class _PageManager(_FakeManager):
     _set_ace_action = dataset_manager.DatasetManager._set_ace_action
     update_ace_actions = dataset_manager.DatasetManager.update_ace_actions
     update_ace_tick_status = dataset_manager.DatasetManager.update_ace_tick_status
+    _staging_rows = dataset_manager.DatasetManager._staging_rows
+    _selected_staging_names = dataset_manager.DatasetManager._selected_staging_names
+    refresh_staging_list = dataset_manager.DatasetManager.refresh_staging_list
+    staging_remove_ticked = dataset_manager.DatasetManager.staging_remove_ticked
+    on_audio_dataset_ready = dataset_manager.DatasetManager.on_audio_dataset_ready
 
     def __init__(self, config=None, samples=()):
         super().__init__(config)
         self.dataset = {"samples": list(samples)}
         self._caption_scope_ids = []
         self._caption_busy = False
+        self.status_label = _LabelStub()
 
 
 def _built_page(config=None, samples=()):
@@ -432,4 +439,64 @@ def test_the_review_chip_counts_what_is_waiting(qapp, tmp_path):
     assert manager.caption_diff_btn.isEnabled()
     # That same track has no caption, so re-caption is live too.
     assert "Re-caption · 1" in manager.caption_recaption_bad_btn.text()
+
+
+# ---------------------------------------------------------------------------
+# staging: one meaning for "ticked", and the two names of one song
+# ---------------------------------------------------------------------------
+
+def test_removing_by_tick_deletes_the_staged_file_for_that_track(qapp, tmp_path):
+    """THE BUG: ➕ Stage used the “Tracks ▾” ticks while ➖ Remove used the staging
+    list's ROW selection — one word, two selections, two buttons."""
+    (tmp_path / "aint_no_fun.mp3").write_bytes(b"audio")
+    samples = [{"id": "1", "filename": "aint_no_fun.flac"}]
+    manager = _built_page({"caption_staging_dir": str(tmp_path)}, samples)
+    manager.ace_track_picker.set_tracks(samples)
+    manager.ace_track_picker.select_all()
+    manager.refresh_staging_list()
+    assert [row[1] for row in manager._staging_rows()] == ["aint_no_fun.mp3"]
+
+    manager.staging_remove_ticked()          # ticked in the dropdown only
+    assert manager._staging_rows() == []
+
+
+def test_the_staged_list_names_the_dataset_track_behind_each_file(qapp, tmp_path):
+    """The dataset says .flac and the upload says .mp3, so without the mapping the
+    same song appears under two names with nothing connecting them."""
+    (tmp_path / "aint_no_fun.mp3").write_bytes(b"audio")
+    (tmp_path / "orphan.mp3").write_bytes(b"audio")
+    samples = [{"id": "1", "filename": "aint_no_fun.flac"}]
+    manager = _built_page({"caption_staging_dir": str(tmp_path)}, samples)
+    manager.refresh_staging_list()
+
+    labels = [manager.staging_list.item(i).text()
+              for i in range(manager.staging_list.count())]
+    assert any("aint_no_fun.mp3" in t and "aint_no_fun.flac" in t for t in labels)
+    assert any("orphan.mp3" in t and "not in this dataset" in t for t in labels)
+    # The name handed to the filesystem is item data, NOT the decorated label.
+    assert manager.staging_list.item(0).data(Qt.UserRole) == "aint_no_fun.mp3"
+
+
+def test_a_stranded_staged_file_can_still_be_removed_from_the_list(qapp, tmp_path):
+    """A staged file with no dataset track has no tick that could reach it."""
+    (tmp_path / "orphan.mp3").write_bytes(b"audio")
+    manager = _built_page({"caption_staging_dir": str(tmp_path)})
+    manager.refresh_staging_list()
+    manager.staging_list.item(0).setSelected(True)
+    manager.staging_remove_ticked()
+    assert manager._staging_rows() == []
+
+
+def test_the_uploaded_dataset_slug_is_remembered_and_shown(qapp, tmp_path, monkeypatch):
+    """settings.json kept caption_audio_dataset="" while every run created a NEW
+    dataset (ace-audio-80d01a, then ace-audio-d66edb), so the "new version of the
+    SAME dataset" promise never engaged and the page could not say where the audio
+    went."""
+    from modules import config_store
+
+    monkeypatch.setattr(config_store, "save_config", lambda *a, **k: None)
+    manager = _built_page({"caption_staging_dir": str(tmp_path)})
+    manager.on_audio_dataset_ready("akronohio/ace-audio-d66edb")
+    assert manager.config["caption_audio_dataset"] == "akronohio/ace-audio-d66edb"
+    assert manager.caption_audio_dataset_edit.text() == "akronohio/ace-audio-d66edb"
 

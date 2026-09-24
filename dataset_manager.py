@@ -2091,6 +2091,38 @@ class DatasetManager(QMainWindow):
             self.save_pipeline_defaults()
 
     # -- staging folder contents (add / remove songs) -----------------------
+    def _staging_rows(self):
+        """One row per staged file: ``(path, staged name, dataset filename or "")``.
+
+        The two names differ whenever a track is transcoded — the dataset holds
+        ``aint_no_fun.flac``, the staging folder holds ``aint_no_fun.mp3`` — so the
+        same song appeared under two different names, in two different places, with
+        nothing connecting them. That is what made "I ticked it, why is it not
+        ticked?" the inevitable question.
+        """
+        from modules import caption_kaggle_run as ckr
+
+        convert = bool(self.config.get("caption_convert_mp3", True))
+        source_of = {}
+        for sample in self.dataset.get("samples", []):
+            name = (sample.get("filename") or "").strip()
+            if name:
+                source_of.setdefault(ckr.staged_name(name, convert), name)
+        rows = []
+        for path in ckr.staged_files(ckr.staging_dir(self.config)):
+            staged = os.path.basename(path)
+            rows.append((path, staged, source_of.get(staged, "")))
+        return rows
+
+    def _selected_staging_names(self):
+        """Staged filenames selected in the list — the names the FOLDER knows."""
+        names = []
+        for item in self.staging_list.selectedItems():
+            staged = item.data(Qt.UserRole) or item.text()
+            if staged and staged not in names:
+                names.append(staged)
+        return names
+
     def refresh_staging_list(self):
         """Show what the next run would upload, and what it would leave behind."""
         from modules import caption_kaggle_run as ckr
@@ -2098,8 +2130,15 @@ class DatasetManager(QMainWindow):
         folder = ckr.staging_dir(self.config)
         report = ckr.staging_report(folder)
         self.staging_list.clear()
-        for path in report["usable"]:
-            item = QListWidgetItem(os.path.basename(path))
+        for path, staged, source in self._staging_rows():
+            # The DISPLAYED text names the dataset track this file came from; the
+            # name the folder needs is stored as item data, because handing the
+            # label to the filesystem is one rename away from deleting the wrong
+            # file.
+            label = (f"{staged}   ←   {source}" if source
+                     else f"{staged}   (not in this dataset)")
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, staged)
             try:
                 item.setToolTip(f"{path}\n{os.path.getsize(path) / 1e6:.1f} MB")
             except OSError:
@@ -2153,14 +2192,32 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(note)
 
     def staging_remove_ticked(self):
-        """Delete the ticked files from the staging folder (= from the upload)."""
+        """Delete the TICKED tracks from the staging folder (= from the upload).
+
+        "Ticked" now means the same thing here as it does on ➕ Stage: the ticks in
+        the “Tracks ▾” dropdown. Before, Stage used the ticks while Remove used the
+        staging list's ROW selection — so ticking a song and pressing Remove said
+        "Nothing Ticked" about a song that was plainly ticked. A real dataset's
+        filenames (.flac) also differ from the staged names (.mp3), which made the
+        two views impossible to line up by eye.
+
+        The list selection still works too, because a staged file can belong to no
+        track at all (a leftover from an older dataset) and otherwise there would be
+        no way to remove it.
+        """
         from modules import caption_kaggle_run as ckr
 
-        names = [item.text() for item in self.staging_list.selectedItems()]
+        convert = bool(self.config.get("caption_convert_mp3", True))
+        names = self._selected_staging_names()
+        for sample in self._ticked_samples():
+            staged = ckr.staged_name(sample.get("filename", ""), convert)
+            if staged not in names:
+                names.append(staged)
         if not names:
             QMessageBox.warning(
                 self, "Nothing Ticked",
-                "Tick the file(s) to remove from the list first.",
+                "Tick tracks in “Tracks ▾” (or click a file in the staged list) "
+                "first — Remove deletes what is selected there.",
             )
             return
         removed = ckr.remove_staged(ckr.staging_dir(self.config), names)
@@ -5634,7 +5691,38 @@ class DatasetManager(QMainWindow):
         self.active_worker.finished_sample.connect(self.on_sample_captioned)
         self.active_worker.all_done.connect(self.on_caption_finished)
         self.active_worker.error_occurred.connect(self.on_worker_error)
+        # Persist WHICH dataset the audio went to. The worker knows it first (it
+        # creates the dataset), so it tells the window rather than writing config
+        # from a thread.
+        if hasattr(self.active_worker, "dataset_slug_ready"):
+            self.active_worker.dataset_slug_ready.connect(
+                self.on_audio_dataset_ready
+            )
         self.active_worker.start()
+
+    def on_audio_dataset_ready(self, slug):
+        """Remember the Kaggle dataset that holds the uploaded audio.
+
+        WHY THIS EXISTS: the slug was set on the config dict in memory and nothing
+        ever saved it, so settings.json kept ``caption_audio_dataset=""`` while
+        every run created a NEW dataset (the logs show ace-audio-80d01a, then
+        ace-audio-d66edb). The "re-runs push a new VERSION of the same dataset"
+        promise therefore never engaged, the account accumulated orphaned datasets,
+        and the page could not say where the audio had gone.
+        """
+        slug = (slug or "").strip()
+        if not slug:
+            return
+        self.config["caption_audio_dataset"] = slug
+        edit = getattr(self, "caption_audio_dataset_edit", None)
+        if edit is not None and edit.text().strip() != slug:
+            # textChanged -> save_pipeline_defaults(), which persists the config.
+            edit.setText(slug)
+        else:
+            from modules.config_store import save_config
+
+            save_config(self.config)
+        self.status_label.setText(f"Kaggle audio dataset: {slug}")
 
     def on_sample_captioned(self, sid, caption):
         model_id = self.config.get("caption_backend", "ace_step")

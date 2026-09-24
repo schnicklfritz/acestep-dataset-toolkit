@@ -58,6 +58,12 @@ class RemoteCaptionWorker(QThread):
     finished_sample = Signal(str, str)
     all_done = Signal()
     error_occurred = Signal(str)
+    # The slug of the Kaggle dataset the audio was uploaded to. Emitted so the
+    # window can REMEMBER it: without this the slug lived only in the worker's
+    # config, settings.json kept caption_audio_dataset="" and every run created a
+    # brand-new dataset (ace-audio-80d01a, ace-audio-d66edb, ...), so the "new
+    # version of the SAME dataset" promise never engaged.
+    dataset_slug_ready = Signal(str)
 
     def __init__(self, samples, backend, complexity, general_meta, config, caption_prompt=None):
         super().__init__()
@@ -228,6 +234,9 @@ class RemoteCaptionWorker(QThread):
         # Remember it so "add/remove songs" updates THIS dataset next time
         # instead of orphaning it behind a new random slug.
         self.config["caption_audio_dataset"] = audio_slug
+        # ...and tell the window, which persists it. The mutation above only
+        # survives while the process does.
+        self.dataset_slug_ready.emit(audio_slug)
         # WAIT for the dataset version to finish processing. dataset_create_new
         # returns early, and pushing the kernel before it is ready mounts an EMPTY
         # /kaggle/input/<slug> -- the kernel then finds no audio and reports the
