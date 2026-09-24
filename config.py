@@ -90,6 +90,48 @@ DEFAULT_CONFIG = {
     "caption_max_tokens": 512,
     "caption_max_audio_duration": 120,   # seconds (0 = whole file)
     "caption_batch_size": 1,             # chunks per captioner forward pass on the Kaggle GPU
+    # caption_prompt_addendum: EXTRA text APPENDED to the user turn (the task
+    # prompt). The schema lives in the SYSTEM prompt and cannot be replaced; this
+    # only adds run-specific emphasis ("1970s live bootleg", "Bon Scott era").
+    # It is ignored when an explicit caption_prompt override is passed (e.g. the
+    # instrument-only prompt from "Detect via Captioner").
+    "caption_prompt_addendum": "",
+    # ---- ACE-Step Kaggle run plumbing ----
+    # LOCAL folder the downloaded captions_out.json is written to. Kaggle only
+    # persists /kaggle/working, so the path the user can actually choose is the
+    # DOWNLOAD destination, not a path inside the kernel. Empty = ask with a
+    # folder picker at run time.
+    "caption_output_dir": "",
+    # Persistent LOCAL staging folder whose contents ARE the uploaded Kaggle
+    # dataset. Keeping it on disk (instead of a tempfile that dies with the run)
+    # is what makes "add or remove songs from the uploaded dataset" possible.
+    # Empty = ~/acestep_kaggle_staging.
+    "caption_staging_dir": "",
+    # The private Kaggle dataset slug used for uploads ("user/slug"). Remembered
+    # so later runs push a NEW VERSION of the same dataset (dataset_create_version)
+    # instead of creating a new random-slug dataset on every run. Empty = create
+    # one on the next upload and remember it.
+    "caption_audio_dataset": "",
+    # Transcode the staged audio to MP3 before upload: smaller dataset, and one
+    # codec instead of a mix of flac/wav/m4a.
+    "caption_convert_mp3": True,
+    "caption_mp3_bitrate": "192k",
+    # Hold every caption from a run as a PROPOSAL and review them in one diff
+    # table at the end, instead of opening a modal dialog per track. Off = the
+    # old one-dialog-per-track behaviour.
+    "caption_batch_review": True,
+    # ---- Caption credentials (see dataset_manager._resolve_caption_backend) ----
+    # Backends the user has ALREADY answered the credentials prompt for, so it is
+    # asked once per backend instead of on every run. Credentials always override
+    # this memory: if a key exists, Kaggle is used without asking again.
+    "caption_cred_prompt_seen": [],
+    # The backend the user picked when they declined to enter Kaggle credentials.
+    # Reused for that backend's later runs instead of re-asking. Empty = ask.
+    "caption_fallback_backend": "",
+    # Mark captions produced by a backend that never HEARD the audio (the local
+    # rule engine's canned text, DeepSeek's filename-only draft) so a placeholder
+    # can never be mistaken for a grounded caption. Off = no stamp.
+    "caption_stamp_placeholders": True,
     "segment_min_sec": 12.0,
     "segment_max_k": 20,
     "structure_backend": "librosa",   # librosa (default) | songformer (functional labels, Kaggle)

@@ -12,7 +12,7 @@
 2. **🗣 Lyrics & Tags** — transcribe lyrics and tag the track **before** deciding anything about stems (see "Why lyrics/tags come first" below).
 3. **🎚 DSP Normalize** — EBU R128 loudness / sample-rate normalization (defaults −14 LUFS / 44.1 kHz; originals backed up).
 4. **🎸 Stem-split decision** — *decide*, don't auto-run. Whether/how to split is a choice informed by what steps 2–3 revealed. It is not a mandatory step for every dataset.
-5. **🚀 Caption** — run the AI captioner and review each caption before accepting.
+5. **🅰 ACE-Step (Kaggle)** — set the prompt add-on if you want one, stage the tracks (MP3) into your staging folder, upload/caption on a free Kaggle GPU, and download the captions into your output folder. Then review the run as a **diff table** (existing vs new, per track) and apply the choices: a track with no caption gets one added, a replaced caption is kept in `caption_before_kaggle`. Re-run only the bad ones with **♻ Re-caption bad / failed**, and add/remove songs in the staging list between runs (each run pushes a new *version* of the same Kaggle dataset).
 7. **Structural / Spatial** — per-section (and optionally per-stem) captions. Only meaningful if stems were created; otherwise this collapses into a single section-level caption.
 8. **Validate & Save JSON** — run manifest validation, then save the ACE-Step manifest.
 

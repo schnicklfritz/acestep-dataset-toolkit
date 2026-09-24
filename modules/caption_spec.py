@@ -186,14 +186,42 @@ DEFAULT_TASK_PROMPT = (
 )
 
 
+# Separator used when extra run-specific instructions are appended to the user
+# turn. Worded as a constraint, like the system addendum, so the model cannot
+# mistake the addition for permission to abandon the schema.
+TASK_PROMPT_ADDENDUM_HEADER = (
+    "\n\nADDITIONAL INSTRUCTIONS FOR THIS RUN (they must not contradict the "
+    "schema above):\n"
+)
+
+
+def build_task_prompt(addendum="", base=""):
+    """Return the user turn, with any extra text APPENDED to it.
+
+    ``base`` overrides the default task line (used for the instrument-only
+    prompt); an empty or whitespace-only ``addendum`` leaves the base untouched,
+    so a blank field changes nothing.
+    """
+    text = (base or "").strip() or DEFAULT_TASK_PROMPT
+    extra = (addendum or "").strip()
+    if not extra:
+        return text
+    return text + TASK_PROMPT_ADDENDUM_HEADER + extra
+
+
 def task_prompt_from_config(config):
     """The user-turn instruction, ignoring the legacy schema-less default.
 
     ``caption_prompt`` used to hold the whole instruction, including "Write 3 to 5
     sentences. Start with A or An". A stored copy of that default must not be
     sent as the user turn, or the contradiction returns through the other door.
+
+    ``caption_prompt_addendum`` is APPENDED to whichever base prompt survives
+    that filter — the schema is in the system turn, so the user turn is the only
+    place run-specific emphasis can be added without competing with it.
     """
     stored = (config.get("caption_prompt") or "").strip()
-    if stored and not is_legacy_caption_prompt(stored):
-        return stored
-    return DEFAULT_TASK_PROMPT
+    base = stored if (stored and not is_legacy_caption_prompt(stored)) else ""
+    return build_task_prompt(
+        addendum=config.get("caption_prompt_addendum"), base=base
+    )

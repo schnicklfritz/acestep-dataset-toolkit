@@ -36,6 +36,7 @@ from modules.caption_spec import (
     is_legacy_caption_prompt,
     system_prompt_from_config,
     task_prompt_from_config,
+    build_task_prompt,
 )
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -102,6 +103,47 @@ def test_a_genuine_user_edit_is_still_honoured():
 def test_system_prompt_config_wins_over_the_legacy_key():
     config = {"caption_system_prompt": "House style.", "caption_prompt": "ignored"}
     assert system_prompt_from_config(config).endswith("House style.")
+
+
+# --------------------------------------------------------------------------
+# the USER TURN add-on (the "add to the caption prompt" field)
+# --------------------------------------------------------------------------
+
+def test_empty_task_addendum_changes_nothing():
+    assert build_task_prompt("") == DEFAULT_TASK_PROMPT
+    assert build_task_prompt("   \n ", base="") == DEFAULT_TASK_PROMPT
+    assert build_task_prompt("", base="Always name the drum kit.") == \
+        "Always name the drum kit."
+
+
+def test_task_addendum_is_appended_and_cannot_replace_the_task_line():
+    out = build_task_prompt("This is a 1970s live bootleg.")
+    assert out.startswith(DEFAULT_TASK_PROMPT)
+    assert out.endswith("This is a 1970s live bootleg.")
+
+
+def test_task_addendum_from_config_reaches_the_user_turn():
+    out = task_prompt_from_config({"caption_prompt_addendum": "Name the amp."})
+    assert out.startswith(DEFAULT_TASK_PROMPT)
+    assert out.endswith("Name the amp.")
+
+
+def test_task_addendum_survives_the_legacy_default_being_ignored():
+    """The old contradictory default is dropped, the add-on must still apply."""
+    config = {"caption_prompt": LEGACY_CAPTION_PROMPT,
+              "caption_prompt_addendum": "Name the amp."}
+    out = task_prompt_from_config(config)
+    assert "Start with A or An" not in out
+    assert out.startswith(DEFAULT_TASK_PROMPT)
+    assert out.endswith("Name the amp.")
+
+
+def test_task_addendum_stacks_on_a_genuine_user_edit():
+    config = {"caption_prompt": "Always name the drum kit.",
+              "caption_prompt_addendum": "Mention the room."}
+    out = task_prompt_from_config(config)
+    assert out.startswith("Always name the drum kit.")
+    assert out.endswith("Mention the room.")
 
 
 # --------------------------------------------------------------------------

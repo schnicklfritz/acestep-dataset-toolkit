@@ -25,8 +25,11 @@ def run_structure_analysis(audio_path, config, min_segment_sec=0, progress_cb=No
     progress_cb = progress_cb or (lambda p, m: None)
     from modules.kaggle import (
         upload_audio_dataset, push_kernel, wait_kernel_done,
-        wait_dataset_ready, download_kernel_output,
+        wait_dataset_ready, download_kernel_output, preflight_kaggle,
     )
+
+    # PREFLIGHT: verify the credentials before uploading the audio.
+    preflight_kaggle(config)
 
     temp_dir = tempfile.mkdtemp(prefix="ace_structure_")
     try:
@@ -39,10 +42,13 @@ def run_structure_analysis(audio_path, config, min_segment_sec=0, progress_cb=No
         # dataset_create_new returns before the version is mounted; pushing the
         # kernel early yields an EMPTY /kaggle/input/<slug>.
         progress_cb(14, "Waiting for the Kaggle dataset to finish processing...")
-        if not wait_dataset_ready(config, audio_slug):
+        ready_reason = []
+        if not wait_dataset_ready(config, audio_slug, reason=ready_reason):
             raise RuntimeError(
                 f"Kaggle dataset {audio_slug} did not become ready in time; "
-                "the kernel would mount an EMPTY folder. Re-run."
+                "the kernel would mount an EMPTY folder. "
+                + " ".join(ready_reason)
+                + " Re-run."
             )
         audio_name = audio_slug.split("/")[-1]
 

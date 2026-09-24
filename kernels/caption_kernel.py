@@ -1,10 +1,21 @@
 """ACE-Step audio captioner — Kaggle kernel.
 
-Based on the working ACE-Step captioner notebook. Reads audio from a mounted
-Kaggle dataset, runs the Qwen2.5-Omni captioner with the proper chat template,
-writes ``/kaggle/working/captions_out.json``::
+Reads audio from a mounted Kaggle dataset, runs the Qwen2.5-Omni captioner with
+the proper chat template, writes ``/kaggle/working/captions_out.json``::
 
-    {"results": [{"file": "<original filename>", "caption": "..."}, ...]}
+    {"results": [{"file": "<staged filename>", "caption": "..."}, ...]}
+
+The dataset is a private Kaggle dataset the app uploaded from the user's local
+STAGING folder (``modules/caption_kaggle_run.py``). Re-runs push a new VERSION of
+that same dataset, so songs can be added or removed without the dataset losing
+its identity.
+
+Nothing is truncated on the way out: the full caption is printed for every track
+and every caption is written to the JSON. (An earlier version printed only the
+first 100 characters of each caption, which made a good caption look cut off in
+the log and hid where a bad one started to go wrong.) The only length control is
+``MAX_AUDIO_DURATION`` — seconds of audio fed to the model, 0 = the whole file —
+which is a GPU-memory limit, not a reporting one.
 
 Placeholders substituted by the app at push time:
   {{AUDIO_DATASET_PATH}}  -> /kaggle/input/<audio-dataset-name>
@@ -13,6 +24,8 @@ Placeholders substituted by the app at push time:
                              as a JSON string literal. Appended to the model's
                              own identity line, never substituted for it.
   {{MAX_NEW_TOKENS}}      -> int (Concise Tags ~64, else ~512)
+  {{MAX_AUDIO_DURATION}}  -> int seconds, 0 = whole file
+  {{BATCH_SIZE}}          -> int
   {{CUSTOM_TAG}}          -> trigger tag as a JSON string literal
   {{REPETITION_PENALTY}}  -> float, 1.0 = off
   {{NO_REPEAT_NGRAM}}     -> int, 0 = off
@@ -270,7 +283,11 @@ for i in range(0, len(audio_files), BATCH_SIZE):
             if CUSTOM_TAG:
                 caption = f"{CUSTOM_TAG}, {caption}"
             results.append({"file": f.name, "caption": caption})
-            print("OK", f.name, caption[:100])
+            # FULL caption, never a character-limited preview: the preview is the
+            # only place a caption can be checked from the log, and silently
+            # cutting it off is how a truncated-looking caption gets blamed on the
+            # model.
+            print("OK", f.name, caption, flush=True)
             if t != str(f) and t.startswith(tempfile.gettempdir()):
                 try:
                     os.remove(t)

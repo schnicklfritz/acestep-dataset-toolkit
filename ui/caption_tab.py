@@ -211,17 +211,6 @@ def _blend_labels(slider, left, right, value_label=None):
     _update(slider.value())
 
 
-def _spin(low, high, value):
-    """Small guarded spin box (see modules/wheel_guard.py)."""
-    from modules.wheel_guard import GuardedSpinBox
-
-    box = GuardedSpinBox()
-    box.setRange(low, high)
-    box.setValue(value)
-    return box
-
-
-
 def build_caption_tab(manager, parent):
     outer = QVBoxLayout(parent)
     outer.setContentsMargins(0, 0, 0, 0)
@@ -337,9 +326,9 @@ def build_caption_tab(manager, parent):
     layout.addWidget(blend_grp)
 
     # ------------------------------------------------------------------
-    # Prompt + limits
+    # Prompt
     # ------------------------------------------------------------------
-    prompt_grp = QGroupBox("Caption Prompt & Limits")
+    prompt_grp = QGroupBox("Caption Prompt")
     p_form = QFormLayout(prompt_grp)
 
     manager.prompt_edit = QTextEdit()
@@ -366,45 +355,7 @@ def build_caption_tab(manager, parent):
         "per-artist emphasis."
     )
     p_form.addRow("System Prompt (added):", manager.system_prompt_edit)
-
-    manager.max_tokens_spin = _spin(64, 4096, int(manager.config.get("caption_max_tokens", 512)))
-    manager.max_tokens_spin.setToolTip("Maximum tokens the captioner may generate per chunk.")
-    p_form.addRow("Max tokens:", manager.max_tokens_spin)
-
-    manager.max_dur_spin = _spin(0, 3600, int(manager.config.get("caption_max_audio_duration", 120)))
-    manager.max_dur_spin.setToolTip(
-        "Max audio length fed to the captioner in seconds (0 = whole file)."
-    )
-    p_form.addRow("Max audio (sec):", manager.max_dur_spin)
-
-    manager.batch_size_spin = _spin(1, 64, int(manager.config.get("caption_batch_size", 1)))
-    manager.batch_size_spin.setToolTip("Chunks per forward pass on the captioning GPU.")
-    p_form.addRow("Batch size:", manager.batch_size_spin)
     layout.addWidget(prompt_grp)
-
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
-    actions_grp = QGroupBox("Run")
-    a_layout = QHBoxLayout(actions_grp)
-
-    manager.caption_selected_btn = QPushButton("🚀 Caption Selected")
-    manager.caption_selected_btn.setToolTip("Caption the track(s) selected in the Dataset Studio table.")
-    manager.caption_missing_btn = QPushButton("Caption Missing")
-    manager.caption_missing_btn.setToolTip("Caption every track that has no caption yet.")
-    manager.caption_all_btn = QPushButton("🔁 Re-caption All")
-    manager.caption_all_btn.setToolTip("Re-run the captioner over every track (asks for confirmation).")
-    manager.caption_edit_btn = QPushButton("📝 Edit Caption…")
-    manager.caption_edit_btn.setToolTip("Open the caption / lyrics editor for the selected track.")
-    for btn in (
-        manager.caption_selected_btn,
-        manager.caption_missing_btn,
-        manager.caption_all_btn,
-        manager.caption_edit_btn,
-    ):
-        a_layout.addWidget(btn)
-    a_layout.addStretch()
-    layout.addWidget(actions_grp)
 
     # ------------------------------------------------------------------
     # MOSS-Audio on Kaggle (open model)
@@ -485,5 +436,3 @@ def build_caption_tab(manager, parent):
 
     layout.addStretch()
     return inner
-
-    layout.addWidget(backend_grp)

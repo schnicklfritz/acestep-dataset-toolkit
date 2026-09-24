@@ -1,4 +1,4 @@
-import os, json, uuid, tempfile, subprocess, shutil, time
+import os, json, uuid, tempfile, subprocess, time
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from workers.deepseek import DeepSeekMusicOrchestrator
@@ -156,30 +156,80 @@ class RemoteCaptionWorker(QThread):
         caption kernel (kernels/caption_kernel.py).
         """
         from modules.kaggle import (
-            upload_audio_dataset, push_kernel, wait_kernel_done,
-            wait_dataset_ready, download_kernel_output,
+            upload_or_update_audio_dataset, push_kernel, wait_kernel_done,
+            wait_dataset_ready, download_kernel_output, fetch_kernel_logs,
+            dataset_sources, preflight_kaggle,
         )
+        from modules import caption_kaggle_run as ckr
         from pathlib import Path as _Path
 
-        # 1. Stage audio into a dataset dir
-        audio_dir = os.path.join(temp_dir, "audio")
-        os.makedirs(audio_dir, exist_ok=True)
-        for _sid, _fname, path, _complexity in staged_tracks:
-            shutil.copy2(path, os.path.join(audio_dir, os.path.basename(path)))
+        # PREFLIGHT: prove Kaggle accepts the credentials and the dataset slugs
+        # BEFORE staging the audio. Failing here costs nothing; the same failure
+        # after a staging pass and an upload used to surface only as an opaque
+        # HTTP error minutes later.
+        preflight_kaggle(
+            self.config,
+            self.config.get("caption_audio_dataset"),
+            self.config.get("kaggle_model_dataset"),
+        )
 
-        # 2. Upload as a private Kaggle dataset
-        self.progress.emit(40, "Uploading audio to a private Kaggle dataset…")
-        audio_slug = upload_audio_dataset(self.config, audio_dir)
+        # 1. Stage the ORIGINAL audio into the PERSISTENT staging folder.
+        #    NOT the 16 kHz mono preview the other backends consume: the captioner
+        #    hears this file, so a downsampled preview would degrade every caption
+        #    it produced. The folder is on disk (not tempfile.mkdtemp) so the user
+        #    can add or remove songs between runs — its CONTENTS are the uploaded
+        #    Kaggle dataset.
+        convert = bool(self.config.get("caption_convert_mp3", True))
+        bitrate = self.config.get("caption_mp3_bitrate", "192k")
+        staging = ckr.staging_dir(self.config)
+        by_id = {s.get("id"): s for s in self.samples}
+        items = [
+            (sid, fname, (by_id.get(sid) or {}).get("audio_path") or path)
+            for sid, fname, path, _complexity in staged_tracks
+        ]
+        self.progress.emit(35, f"Staging {len(items)} track(s) to {staging}…")
+        staged, skipped = ckr.stage_tracks(
+            items, staging, convert_mp3=convert, bitrate=bitrate,
+        )
+        if not staged:
+            raise RuntimeError(
+                f"Nothing could be staged into {staging} — every track's audio "
+                "file was missing or unreadable. Uploading now would caption "
+                "nothing."
+            )
+        if skipped:
+            self.progress.emit(38, f"{skipped} track(s) could not be staged (missing audio).")
+        staged_map = {os.path.basename(path): sid for sid, _fname, path in staged}
+        if convert and not ckr.ffmpeg_available():
+            self.progress.emit(
+                38, "ffmpeg not found — staging the original files at full quality."
+            )
+
+        # 2. Upload as a private Kaggle dataset, or push a NEW VERSION of the one
+        #    this user already has, so its identity survives across runs.
+        known_slug = (self.config.get("caption_audio_dataset") or "").strip()
+        label = f"Updating Kaggle dataset {known_slug}…" if known_slug \
+            else "Uploading audio to a private Kaggle dataset…"
+        self.progress.emit(40, label)
+        audio_slug = upload_or_update_audio_dataset(
+            self.config, staging, slug=known_slug,
+        )
+        # Remember it so "add/remove songs" updates THIS dataset next time
+        # instead of orphaning it behind a new random slug.
+        self.config["caption_audio_dataset"] = audio_slug
         # WAIT for the dataset version to finish processing. dataset_create_new
         # returns early, and pushing the kernel before it is ready mounts an EMPTY
         # /kaggle/input/<slug> -- the kernel then finds no audio and reports the
         # folder as empty. This is the failure wait_dataset_ready exists to stop.
         self.progress.emit(45, "Waiting for the Kaggle dataset to finish processing…")
-        if not wait_dataset_ready(self.config, audio_slug):
+        ready_reason = []
+        if not wait_dataset_ready(self.config, audio_slug, reason=ready_reason):
             raise RuntimeError(
                 f"Kaggle dataset {audio_slug} did not become ready in time. "
                 "Pushing the kernel now would mount an EMPTY folder and caption "
-                "nothing. Check the dataset on kaggle.com and re-run."
+                "nothing. "
+                + " ".join(ready_reason)
+                + " Check the dataset on kaggle.com and re-run."
             )
         audio_name = audio_slug.split("/")[-1]
 
@@ -216,7 +266,12 @@ class RemoteCaptionWorker(QThread):
             f.write(kernel_script)
 
         user = self.config.get("kaggle_user", "").strip()
-        model_slug = self.config.get("kaggle_model_dataset", "michelmoalem9b/acestep-captioner-model")
+        # Empty is a DELIBERATE choice (no cached weights -> the kernel downloads
+        # from Hugging Face), so it must reach dataset_sources() as "" and be
+        # dropped there, not replaced by a default.
+        model_slug = (self.config.get(
+            "kaggle_model_dataset", "michelmoalem9b/acestep-captioner-model"
+        ) or "").strip()
         metadata = {
             "id": f"{user}/{kernel_slug}",
             "title": kernel_slug,
@@ -226,31 +281,70 @@ class RemoteCaptionWorker(QThread):
             "is_private": "true",
             "enable_gpu": "true",
             "enable_internet": "true",
-            "dataset_sources": [audio_slug, model_slug],
+            "dataset_sources": dataset_sources(audio_slug, model_slug),
             "competition_sources": [],
             "kernel_sources": [],
         }
         with open(os.path.join(kernel_dir, "kernel-metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
 
-        # 4. Push, wait, download
+        # 4. Push, wait, download into the USER'S local folder.
         self.progress.emit(50, "Pushing caption kernel to Kaggle GPU…")
         push_kernel(self.config, kernel_dir, kernel_slug)
         self.progress.emit(60, "Kaggle GPU captioning in progress…")
         ok = wait_kernel_done(self.config, kernel_slug)
-        out_dir = os.path.join(temp_dir, "output")
+        if not ok:
+            raise RuntimeError(
+                "The Kaggle caption kernel did not finish successfully. "
+                + (fetch_kernel_logs(self.config, kernel_slug)
+                   or "Check the kernel log on kaggle.com.")
+            )
+        # The download destination is the path the user can actually choose:
+        # Kaggle only persists /kaggle/working, so a path INSIDE the kernel is not
+        # a knob worth offering.
+        out_dir = ckr.output_dir(self.config)
+        os.makedirs(out_dir, exist_ok=True)
         download_kernel_output(self.config, kernel_slug, out_dir)
 
         res_json = os.path.join(out_dir, "captions_out.json")
         if not os.path.exists(res_json):
-            raise RuntimeError("Kaggle job finished without captions_out.json — check the kernel logs.")
-        with open(res_json, "r") as f:
-            data = json.load(f)
-        for item in data.get("results", []):
-            fname = item.get("file", "")
-            caption = item.get("caption", "")
-            sid = os.path.basename(fname).split("_preview")[0].replace(".wav", "").replace(".mp3", "")
+            raise RuntimeError(
+                f"Kaggle job finished without captions_out.json in {out_dir} — "
+                "check the kernel logs."
+            )
+        results = ckr.load_results(res_json)
+
+        # Match a result back to its track through the STAGING NAME, not by
+        # surgery on the returned filename: the staged name is what we chose, so
+        # a rename on either side is visible instead of silently mismatching.
+        emitted, unmatched = 0, []
+        for name, caption in results.items():
+            sid = staged_map.get(os.path.basename(name)) or self._sid_for_stem(name)
+            if not sid:
+                unmatched.append(name)
+                continue
             self.finished_sample.emit(sid, self._blend(sid, caption))
+            emitted += 1
+        if unmatched:
+            self.progress.emit(
+                95, f"{len(unmatched)} result(s) matched no track: "
+                    + ", ".join(sorted(unmatched)[:3])
+            )
+        self.progress.emit(
+            98, f"{emitted} caption(s) written to {res_json}"
+        )
+
+    def _sid_for_stem(self, name):
+        """Fallback match: the staged filename's stem against sample filenames.
+
+        Needed for a captions_out.json the user downloaded in an EARLIER run and
+        re-imported later, where the in-memory staging map no longer exists.
+        """
+        stem = os.path.splitext(os.path.basename(name or ""))[0].lower()
+        for sample in self.samples:
+            if os.path.splitext(sample.get("filename", ""))[0].lower() == stem:
+                return sample.get("id")
+        return None
 
     def _run_local_dsp(self, staged_tracks):
         tag = self.general_meta.get("custom_tag", "").strip()

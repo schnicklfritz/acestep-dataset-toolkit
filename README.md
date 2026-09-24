@@ -49,7 +49,28 @@ python dataset_manager.py
 | **Custom endpoint** | any OpenAI-compatible server (vLLM / Ollama / local / rented GPU) | your own |
 
 The caption prompt, max tokens, max audio duration, and batch size are all
-editable in ⚙ Settings → *Pipeline & Model Defaults*.
+editable in the **🎤 Caption → 🅰 ACE-Step (Kaggle)** page, together with the
+three settings that make a Kaggle run reproducible:
+
+| Setting | What it does |
+|---|---|
+| **Prompt add-on** | extra text **appended** to the caption prompt for a run (era, room, house style) |
+| **Staging folder** | the *local* folder whose contents ARE the uploaded Kaggle dataset — add or remove songs here |
+| **Output folder** | the *local* folder the captions are downloaded into |
+
+The ACE-Step pipeline is driven by **one tick list on its own page** — 🎤 Caption
+→ 🅰 ACE-Step (Kaggle) → *Run* → **Tracks ▾**. Ticking, staging, captioning,
+re-captioning and editing all use that list, so nothing sends you to another tab
+to set a selection (the Dataset Studio is only where *songs* enter the dataset).
+*Select tracks missing captions* ticks just the ones still to do. The ticked
+tracks are staged as MP3, uploaded as a private Kaggle dataset (a new **version**
+of the same dataset on every re-run, so its identity survives), captioned on a
+free GPU, and downloaded into your output folder. Then **🔍 Review last run
+(diff)** shows every existing caption next to the new one with a per-track
+decision — *Keep existing / Use new / Edit… / Skip* — and a track with no caption
+simply gets one added. Nothing is written until you press Apply, and a replaced
+caption is kept in `caption_before_kaggle`. **♻ Re-caption bad / failed** re-runs
+only the tracks that are blank, errored, or that the last run returned nothing for.
 
 ### Pluggable LLM provider (aggregation, recommendations, assistant)
 One OpenAI-compatible client, five providers — pick in ⚙ Settings → *LLM Provider*:
@@ -208,6 +229,7 @@ backend is given it as the **system prompt**:
 | *(built in)* | the schema itself — set in stone in `modules/caption_spec.py` |
 | `caption_system_prompt` — **"System Prompt (added)"** | extra instructions, **appended** to the schema (house style, per-artist emphasis) |
 | `caption_prompt` — **"Caption Prompt"** | the user turn: what to do with this clip |
+| `caption_prompt_addendum` — **"Prompt add-on"** | extra text **appended** to the user turn for one run (era, room, artist) |
 
 The user prompt can extend the schema but never replace or precede it, and an
 empty field changes nothing. The composer also ignores the old shipped default,
@@ -255,12 +277,46 @@ pip install transformers torch      # CLAP zero-shot instrument tagging
 ```
 
 ### Kaggle setup
-1. Create a Kaggle account and an **API key** (`kaggle.json`), put
-   Username/Key in ⚙ Settings.
-2. Upload the captioner weights as a private dataset
-   (`kaggle_model_dataset`, default
-   `michelmoalem9b/acestep-captioner-model`) so the captioner kernel finds it
-   mounted under `/kaggle/input`.
+1. **Credentials** — enter your Kaggle **username + API key** in
+   🎤 Caption → 🅰 ACE-Step (Kaggle) → *Kaggle Credentials → 🔑 Set up / change…*
+   (the same fields exist in ⚙ Settings). The credentials row always shows where
+   the key lives:
+
+   | Status | Meaning |
+   |---|---|
+   | **stored** | in the OS keyring, or the Fernet-encrypted `secrets.enc` — runs never ask again |
+   | **this session only** | you unticked *remember on this device*: nothing is written to disk, no plaintext token file is created, and the key must be re-entered after a restart |
+   | **not set** | the next caption run asks for it before doing anything else |
+
+   *🗑 Forget stored key* deletes it from the device. Secrets never go into
+   `settings.json`, and the plaintext `~/.kaggle/access_token` is only ever
+   **created** (never overwritten) when you asked to remember — other Kaggle
+   tools share that path.
+
+   **🔌 Test connection** asks Kaggle directly: one real API call, reporting
+   *who* you are and *which* auth method was used. Press it before a long run.
+
+   | Verdict | Meaning |
+   |---|---|
+   | **Connected as …** | the credentials are accepted; a run will reach Kaggle |
+   | **Not connected — …** | the reason is shown: bad/expired token, no Internet, the `kaggle` package missing, or a weights dataset that does not exist |
+
+   > **Access tokens are not API keys.** A token from Kaggle's *Settings → API*
+   > that starts with `KGAT_` is a modern **access token**. The app presents it
+   > in the correct field, but if such a value is offered as the *legacy* key,
+   > Kaggle's SDK reports success locally (it checks for the key by presence,
+   > with no network call) and then fails every real request with `401`.
+   > **Test connection** names this case explicitly — if it says legacy-key auth
+   > was used with an access token, re-issue the token and re-enter it.
+2. **Weights** — set **Model weights dataset** in 🎤 Caption → 🅰 ACE-Step (Kaggle)
+   → *Kaggle Run* (config key `kaggle_model_dataset`, default
+   `michelmoalem9b/acestep-captioner-model`) so the kernel finds the weights
+   mounted under `/kaggle/input`. It is **attached read-only and never
+   re-uploaded** by the app; clear the field and every session downloads ~16 GB
+   from Hugging Face inside the kernel instead (needs Internet ON, and `HF_TOKEN`
+   for a gated repo). A dataset you attach by hand also works: the kernel
+   auto-detects any mounted `/kaggle/input/**/config.json` that has weights beside
+   it.
 3. For SongFormer, the kernel downloads from Hugging Face
    (`ASLP-lab/SongFormer`) or uses a cached `...songformer...` dataset;
    set `HF_TOKEN` if needed.
@@ -288,6 +344,7 @@ modules/
   mcp_compat.py             mcp 1.x FastMCP / 2.x MCPServer import shim
   research_tools.py         Corpus research: census, grep, vocabulary induction
   kaggle.py                 Private audio-dataset upload + kernel push/wait/download
+  caption_kaggle_run.py     ACE-Step local staging (MP3), versioned dataset, caption diff/merge
   mvsep_api.py              MVSEP live algorithm list + separation jobs
   config_store.py           settings.json + encrypted secrets
   secrets_manager.py        OS keyring / Fernet-encrypted secrets
@@ -300,17 +357,42 @@ kernels/                    Kaggle GPU kernel scripts
   stem_separation_kernel.py Meta Demucs (htdemucs_ft / htdemucs_6s)
   structure_kernel.py       SongFormer structure (functional labels)
 workers/                    QThread workers (caption backends, pipelines, stems, …)
-ui/                         main_window.py (parallel entry point) + mvsep_tab.py
+ui/                         Tab builders: caption, ace_step, lyrics, settings, bulk-edit, MVSEP
 ```
 
 ---
 
 ## 🛠 Troubleshooting
 
+* **"Kaggle never connects", or a Kaggle run dies with no message** → press
+  **🔌 Test connection** in 🎤 Caption → 🅰 ACE-Step (Kaggle). It reports the real
+  reason in seconds: a bad or expired `KGAT_` token, no Internet, the `kaggle`
+  package not installed, or a **Model weights dataset** that is not a real
+  `owner/slug` (a placeholder such as `me/my-weights` used to be accepted at
+  entry and only failed later, at kernel-push time). Every Kaggle run path
+  (ACE-Step, MOSS, lyrics, stems, structure, spatial, structural) now runs this
+  check first, inside its own worker thread — so a credentials problem costs
+  seconds rather than a staging pass and an upload.
 * **"Kaggle credentials not configured"** → ⚙ Settings → Cloud & Execution
   Endpoints → enter Username/Key → *Save Cloud Credentials*.
+* **Captions read like templates** ("balanced musical arrangement, organic
+  dynamic response") → those are **PLACEHOLDER** captions from a backend that
+  never heard the audio (the local rule engine, or DeepSeek's filename-only
+  draft). They are marked in `caption_ai_model` and `caption_is_placeholder`, and
+  the run's status line says so before and after. Add Kaggle credentials and
+  re-run to get real captions.
+* **A run asked for Kaggle credentials even though they are stored** → the key
+  was entered with *remember* unticked (session-only) and the app was restarted.
+  Enter it again in the ACE-Step page's credentials row.
 * **Captioner kernel fails with no weights** → attach the captioner-model
   dataset to the kernel (or set `HF_TOKEN`), and check the kernel logs.
+* **A captioning run captioned 0 tracks** → the **staging folder** was empty (or
+  held no files the kernel recognises). The staging folder's contents ARE the
+  uploaded dataset: add tracks with *➕ Add selected tracks* in
+  🎤 Caption → 🅰 ACE-Step (Kaggle), then re-run.
+* **Captions did not land where expected** → the **Output folder** setting is the
+  local download destination. Kaggle only persists `/kaggle/working` inside the
+  kernel, so that path is the knob that matters.
 * **CLAP isn't used** → `use_clap_tagger: auto` requires
   `torch` + `transformers`; it degrades to the spectral tagger otherwise.
 * **Assistant needs a key** → set any LLM provider key (Gemini free tier

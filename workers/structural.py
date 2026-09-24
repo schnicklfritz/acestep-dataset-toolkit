@@ -328,9 +328,14 @@ class StructuralPipelineWorker(QThread):
         """
         from modules.kaggle import (
             upload_audio_dataset, push_kernel, wait_kernel_done,
-            wait_dataset_ready, download_kernel_output,
+            wait_dataset_ready, download_kernel_output, dataset_sources,
+            preflight_kaggle,
         )
         from pathlib import Path as _Path
+
+        # PREFLIGHT: verify the credentials and the weights dataset slug BEFORE
+        # uploading the chunk audio.
+        preflight_kaggle(self.config, self.config.get("kaggle_model_dataset"))
 
         # 1. Stage chunk WAVs into a dataset dir
         temp_dir = tempfile.mkdtemp(prefix="struct_caption_")
@@ -345,10 +350,13 @@ class StructuralPipelineWorker(QThread):
         # dataset_create_new returns before the version is mounted; pushing the
         # kernel early yields an EMPTY /kaggle/input/<slug>.
         self.progress.emit(53, "Waiting for the Kaggle dataset to finish processing…")
-        if not wait_dataset_ready(self.config, audio_slug):
+        ready_reason = []
+        if not wait_dataset_ready(self.config, audio_slug, reason=ready_reason):
             raise RuntimeError(
                 f"Kaggle dataset {audio_slug} did not become ready in time; "
-                "the kernel would mount an EMPTY folder. Re-run."
+                "the kernel would mount an EMPTY folder. "
+                + " ".join(ready_reason)
+                + " Re-run."
             )
         audio_name = audio_slug.split("/")[-1]
 
@@ -381,7 +389,9 @@ class StructuralPipelineWorker(QThread):
             f.write(kernel_script)
 
         user = self.config.get("kaggle_user", "").strip()
-        model_slug = self.config.get("kaggle_model_dataset", "michelmoalem9b/acestep-captioner-model")
+        model_slug = (self.config.get(
+            "kaggle_model_dataset", "michelmoalem9b/acestep-captioner-model"
+        ) or "").strip()
         metadata = {
             "id": f"{user}/{kernel_slug}",
             "title": kernel_slug,
@@ -391,7 +401,7 @@ class StructuralPipelineWorker(QThread):
             "is_private": "true",
             "enable_gpu": "true",
             "enable_internet": "true",
-            "dataset_sources": [audio_slug, model_slug],
+            "dataset_sources": dataset_sources(audio_slug, model_slug),
             "competition_sources": [],
             "kernel_sources": [],
         }

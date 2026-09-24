@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
     QCheckBox, QDialog, QFormLayout, QProgressBar, QScrollArea,
     QTabWidget, QRadioButton, QButtonGroup, QToolButton, QMenu,
-    QListWidget, QTextBrowser, QAbstractItemView
+    QListWidget, QListWidgetItem, QTextBrowser, QAbstractItemView
 )
 # Scroll-wheel-guarded value widgets: the wheel only changes these after the
 # control has been clicked, so scrolling the dataset past a combo/spin/slider
@@ -171,6 +171,12 @@ class DatasetManager(QMainWindow):
         self._tab_pages = []
         self._grouped_tabs = []
         self._grouped_tab_inner = []
+        # Tracks the LAST caption run covered, so the end-of-run diff review can
+        # tell this run's proposals apart from the previous run's.
+        self._caption_scope_ids = []
+        # The backend the CURRENT run is using, so a caption produced without
+        # hearing the audio can be stamped as a placeholder.
+        self._active_caption_backend = ""
 
         self.init_ui()
         self.apply_custom_theme()
@@ -257,7 +263,6 @@ class DatasetManager(QMainWindow):
         self.sync_meta_btn = None
         self.normalize_btn = None
         self.transcribe_btn = None
-        self.kaggle_master_btn = None
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
@@ -289,6 +294,9 @@ class DatasetManager(QMainWindow):
         caption_tab = QWidget()
         self.init_caption_tab(caption_tab)
 
+        ace_step_tab = QWidget()
+        self.init_ace_step_tab(ace_step_tab)
+
         # --- Grouped tabs: keep the top level to a short, scannable list ----
         # Pipelines (Structural / Spatial / Advanced) share one tab with inner
         # sub-tabs; Organize (Tag Manager / Embedding Map) likewise.
@@ -311,8 +319,19 @@ class DatasetManager(QMainWindow):
         lyrics_tab = QWidget()
         self.init_lyrics_tab(lyrics_tab)
 
+        # Caption is grouped too: the ACE-Step Kaggle pipeline (staging folder,
+        # dataset identity, output folder, run controls) has its own page instead
+        # of sharing space with four other backends.
+        caption_group_tab = self._build_grouped_tab(
+            "Caption",
+            [
+                ("🅰 ACE-Step (Kaggle)", ace_step_tab),
+                ("🎤 Other backends & MOSS", caption_tab),
+            ],
+        )
+
         self._add_tab(studio_tab, "🎛 Dataset Studio")
-        self._add_tab(caption_tab, "🎤 Caption")
+        self._add_tab(caption_group_tab, "🎤 Caption")
         self._add_tab(lyrics_tab, "🎵 Lyrics")
         self._add_tab(pipelines_tab, "⚙️ Pipeline")
         self._add_tab(organize_tab, "🏷️ Organize")
@@ -515,12 +534,6 @@ class DatasetManager(QMainWindow):
         # Step 3: Advanced Remote Cluster & Repo Controls (Row 3)
         # ============================================================================
         advanced_strip = QHBoxLayout()
-
-        self.kaggle_master_btn = QPushButton("☁️ Run Master Dual-T4 Kaggle Pipeline")
-        self.kaggle_master_btn.setStyleSheet("font-weight: bold; background-color: #4A148C; color: white; padding: 5px 12px;")
-        self.kaggle_master_btn.setToolTip("Uploads dataset to Kaggle, runs parallel dual-GPU extraction, and logs output.")
-        self.kaggle_master_btn.clicked.connect(self.start_remote_consolidated_pipeline)
-        advanced_strip.addWidget(self.kaggle_master_btn)
 
         self.tag_creator_btn = QPushButton("🏷️ Structural Tag Creator")
         self.tag_creator_btn.clicked.connect(self.start_structural_tag_creator)
@@ -1287,20 +1300,73 @@ class DatasetManager(QMainWindow):
         build_settings_tab(self, parent)
 
     def init_caption_tab(self, parent):
-        """Build the 🎤 Caption tab and connect its actions."""
+        """Build the 🎤 Caption tab's backend page and connect its actions.
+
+        The RUN buttons and the limits live in the ACE-Step page
+        (``init_ace_step_tab``): this page owns the backend choice, the
+        prose/tags blend and the MOSS-Audio group.
+        """
         from ui.caption_tab import build_caption_tab
         build_caption_tab(self, parent)
         self.caption_blend_slider.valueChanged.connect(self.on_caption_blend_changed)
-        self.caption_selected_btn.clicked.connect(self.caption_selected_track)
-        self.caption_missing_btn.clicked.connect(self.caption_missing_tracks)
-        self.caption_all_btn.clicked.connect(self.caption_all_tracks)
-        self.caption_edit_btn.clicked.connect(self.open_caption_editor)
         self.caption_override_btn.clicked.connect(self.set_track_caption_override)
         self.caption_clear_override_btn.clicked.connect(self.clear_track_caption_override)
         # MOSS-Audio (open model on a Kaggle GPU)
         self.moss_run_btn.clicked.connect(self.run_moss_captioning)
         self.moss_open_btn.clicked.connect(self.open_last_moss_kernel)
         self.refresh_moss_track_picker()
+
+    def init_ace_step_tab(self, parent):
+        """Build the 🅰 ACE-Step (Kaggle) page and connect its actions."""
+        from ui.ace_step_tab import build_ace_step_tab
+        build_ace_step_tab(self, parent)
+
+        self.caption_selected_btn.clicked.connect(self.caption_selected_track)
+        self.caption_missing_btn.clicked.connect(self.caption_missing_tracks)
+        self.caption_all_btn.clicked.connect(self.caption_all_tracks)
+        self.caption_edit_btn.clicked.connect(self.open_caption_editor)
+        self.caption_recaption_bad_btn.clicked.connect(self.caption_recaption_bad_tracks)
+        self.caption_diff_btn.clicked.connect(self.show_caption_diff)
+        self.caption_import_btn.clicked.connect(self.import_captions_json)
+
+        self.caption_staging_browse_btn.clicked.connect(self.browse_caption_staging)
+        self.caption_output_browse_btn.clicked.connect(self.browse_caption_output)
+        self.staging_add_btn.clicked.connect(self.staging_add_ticked)
+        self.staging_remove_btn.clicked.connect(self.staging_remove_ticked)
+        self.staging_refresh_btn.clicked.connect(self.refresh_staging_list)
+
+        # The page's ONLY track selector: ticks drive staging, captioning and
+        # editing, so the user never has to leave this tab to choose tracks.
+        self.ace_track_picker.selection_changed.connect(self.update_ace_tick_status)
+        self.refresh_ace_track_picker()
+
+        # Kaggle credentials: stored / session-only / not set, and the controls
+        # that change it. The prompt itself lives in _ensure_kaggle_credentials so
+        # the run path and this row cannot diverge.
+        self.ace_cred_test_btn.clicked.connect(self.test_kaggle_connection)
+        self.ace_cred_setup_btn.clicked.connect(self.configure_kaggle_credentials)
+        self.ace_cred_forget_btn.clicked.connect(self.forget_stored_kaggle_key)
+        self.ace_cred_reset_btn.clicked.connect(self.reset_caption_backend_prompts)
+        self.refresh_kaggle_cred_status()
+
+        # Persist the page's settings the same way the other tabs do: one shared
+        # handler reads every widget by name.
+        for widget, signal in (
+            (self.caption_addendum_edit, "textChanged"),
+            (self.caption_staging_edit, "textChanged"),
+            (self.caption_audio_dataset_edit, "textChanged"),
+            (self.caption_model_dataset_edit, "textChanged"),
+            (self.caption_output_edit, "textChanged"),
+            (self.max_tokens_spin, "valueChanged"),
+            (self.max_dur_spin, "valueChanged"),
+            (self.batch_size_spin, "valueChanged"),
+            (self.caption_bitrate_combo, "currentTextChanged"),
+            (self.caption_convert_check, "toggled"),
+            (self.caption_batch_review_check, "toggled"),
+        ):
+            getattr(widget, signal).connect(self.save_pipeline_defaults)
+
+        self.refresh_staging_list()
 
     # -----------------------------------------------------------------------
     # MOSS-Audio (open model) on Kaggle
@@ -1474,11 +1540,11 @@ class DatasetManager(QMainWindow):
         )
 
     def caption_selected_track(self):
-        """Run the captioner on the track(s) selected in the Studio table."""
-        if not self.get_selected_sample():
-            QMessageBox.warning(self, "No Track Selected", "Select a track in the Dataset Studio table first.")
+        """Caption the tracks ticked in this page's Tracks dropdown."""
+        if not self._ticked_samples():
+            self._no_tracks_ticked()
             return
-        self.start_ai_captioning(scope="selected")
+        self.start_ai_captioning(scope="ticked")
 
     def caption_missing_tracks(self):
         """Run the captioner on every track that has no caption yet."""
@@ -1489,12 +1555,773 @@ class DatasetManager(QMainWindow):
         self.start_ai_captioning(scope="all")
 
     def open_caption_editor(self):
-        """Edit the selected track's caption / lyrics without leaving the tab."""
-        s = self.get_selected_sample()
-        if not s:
-            QMessageBox.warning(self, "No Track Selected", "Select a track in the Dataset Studio table first.")
+        """Edit the ticked track's caption / lyrics without leaving the tab.
+
+        Several ticked → the dataset-wide diff table, because opening one editor
+        for the "first" of a multi-track selection silently ignores the rest.
+        """
+        ticked = self._ticked_samples()
+        if not ticked:
+            self._no_tracks_ticked()
             return
-        self.review_ai_caption_result(s)
+        if len(ticked) > 1:
+            self.show_caption_diff()
+            return
+        self.review_ai_caption_result(ticked[0])
+
+    # -----------------------------------------------------------------------
+    # ACE-Step (Kaggle): staging folder, output folder, diff review
+    # -----------------------------------------------------------------------
+    def caption_batch_review_enabled(self):
+        """True when a run's captions are held as proposals for ONE diff review."""
+        box = getattr(self, "caption_batch_review_check", None)
+        if box is not None:
+            return box.isChecked()
+        return bool(self.config.get("caption_batch_review", True))
+
+    def _ticked_samples(self):
+        """The samples ticked in the ACE-Step page's *Tracks ▾* dropdown.
+
+        This is the ONLY selection source for that page. The Studio table's ROW
+        selection is not a track picker — telling the user to go and set one there
+        for work that happens in the Caption tab was the wrong UI (and row
+        selection is not "a place to add tracks" at all). Ticks are keyed by
+        FILENAME, so a track removed from the dataset simply drops out instead of
+        shifting every later tick onto the wrong song.
+        """
+        picker = getattr(self, "ace_track_picker", None)
+        if picker is None:
+            return []
+        wanted = set(picker.selected_filenames())
+        if not wanted:
+            return []
+        return [
+            sample for sample in self.dataset.get("samples", [])
+            if (sample.get("filename") or "").strip() in wanted
+        ]
+
+    def refresh_ace_track_picker(self):
+        """Keep the ACE-Step track picker in step with the dataset."""
+        picker = getattr(self, "ace_track_picker", None)
+        if picker is not None:
+            picker.set_tracks(self.dataset.get("samples", []))
+        self.update_ace_tick_status()
+
+    def update_ace_tick_status(self):
+        """Always say how many tracks are ticked: an empty selection must be visible."""
+        label = getattr(self, "ace_tick_status", None)
+        if label is None:
+            return
+        total = len(self.dataset.get("samples", []))
+        ticked = len(self._ticked_samples())
+        if not total:
+            label.setText(
+                "No tracks in this dataset yet — add songs in 🎛 Dataset Studio "
+                "(that is the only place songs enter the dataset)."
+            )
+        elif not ticked:
+            label.setText(
+                "Nothing ticked — use the “Tracks ▾” dropdown above to choose which "
+                "tracks to stage and caption."
+            )
+        else:
+            label.setText(
+                f"{ticked} of {total} ticked — staging, captioning and editing act "
+                "on these tracks."
+            )
+
+    def _no_tracks_ticked(self):
+        """Ask for a tick, in place. No modal sending the user to another tab."""
+        self.update_ace_tick_status()
+        QMessageBox.information(
+            self, "No Tracks Ticked",
+            "Tick the tracks to work on with the “Tracks ▾” dropdown on this page.\n\n"
+            "“Select tracks missing captions” ticks only the ones still to do.",
+        )
+
+    def _caption_run_samples(self):
+        """The samples the last caption run covered."""
+        wanted = set(self._caption_scope_ids)
+        samples = self.dataset.get("samples", [])
+        if not wanted:
+            return samples
+        return [s for s in samples if s.get("id") in wanted]
+
+    def _proposal_rows(self):
+        """Diff rows built from the proposals already stored on the samples.
+
+        ``caption_ai_raw`` is where a proposal lives until it is accepted, so the
+        table can be reopened (or rebuilt after a restart) without the worker.
+        """
+        from modules import caption_kaggle_run as ckr
+
+        samples = self._caption_run_samples()
+        results = {}
+        for sample in samples:
+            raw = (sample.get("caption_ai_raw") or "").strip()
+            if raw:
+                results[os.path.basename(sample.get("filename", ""))] = raw
+        return ckr.diff_captions(
+            samples, results,
+            convert_mp3=bool(self.config.get("caption_convert_mp3", True)),
+        )
+
+    def _bad_caption_samples(self):
+        """Tracks that need captioning again: blank, errored, or never returned.
+
+        Three separate failure modes that all look like "done" in the table unless
+        they are collected together:
+          * no caption at all;
+          * the kernel reported ERROR for the track;
+          * the last run returned NOTHING for it, which leaves the caption blank
+            and marks nothing.
+        """
+        from modules import caption_kaggle_run as ckr
+
+        bad_ids = set()
+        if self._caption_scope_ids:
+            bad_ids = {
+                row["id"] for row in self._proposal_rows()
+                if row["status"] in (ckr.STATUS_MISSING, ckr.STATUS_ERROR)
+            }
+        return [
+            sample for sample in self.dataset.get("samples", [])
+            if not (sample.get("caption") or "").strip()
+            or (sample.get("caption_ai_raw") or "").strip().upper().startswith("ERROR:")
+            or sample.get("id") in bad_ids
+        ]
+
+    def caption_recaption_bad_tracks(self):
+        """Re-caption only the tracks that need it again."""
+        bad = self._bad_caption_samples()
+        if not bad:
+            QMessageBox.information(
+                self, "Nothing To Redo",
+                "Every track has a caption and the last run reported no errors.",
+            )
+            return
+        self.status_label.setText(f"Re-captioning {len(bad)} track(s) that need it…")
+        self.start_ai_captioning(scope="bad")
+
+    # -- Kaggle credentials -------------------------------------------------
+    def refresh_kaggle_cred_status(self):
+        """Show where the Kaggle key actually lives, in the ACE-Step page."""
+        from modules.secrets_manager import get_secret
+
+        label = getattr(self, "ace_cred_status", None)
+        if label is None:
+            return
+        user = (self.config.get("kaggle_user") or "").strip()
+        key = (self.config.get("kaggle_key") or "").strip()
+        if not user or not key:
+            label.setText(
+                "Kaggle credentials: <b>not set</b> — a run will ask for them."
+            )
+        elif get_secret("kaggle_key"):
+            label.setText(
+                f"Kaggle credentials: <b>stored</b> for <b>{user}</b> "
+                "(OS keyring / encrypted store)."
+            )
+        else:
+            label.setText(
+                f"Kaggle credentials: <b>this session only</b> for <b>{user}</b> "
+                "— nothing was written to disk."
+            )
+
+        # The last PROBE verdict, when one has been run. Where the key lives and
+        # whether Kaggle accepts it are different questions, and only the second
+        # one predicts whether a run will work -- so the row says both instead of
+        # implying health from the presence of two strings.
+        verdict = getattr(self, "_kaggle_probe_verdict", "")
+        if verdict:
+            label.setText(label.text() + "<br>" + verdict)
+
+    def _ensure_kaggle_credentials(self):
+        """Ask for Kaggle credentials. Returns True when they are set.
+
+        A dialog rather than two chained ``QInputDialog``s, because the
+        "remember on this device" choice has to be made WHERE THE KEY IS ENTERED:
+        a user who does not want the key stored should not have to hunt through
+        ⚙ Settings afterwards to untick something. Unticked means the key stays in
+        this session's config and is never written anywhere.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Kaggle Credentials")
+        dialog.resize(520, 260)
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "The ACE-Step captioner runs on a free Kaggle GPU, so it needs your "
+            "Kaggle username and API key (kaggle.com → Settings → API)."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        user_edit = QLineEdit((self.config.get("kaggle_user") or "").strip())
+        key_edit = QLineEdit((self.config.get("kaggle_key") or "").strip())
+        key_edit.setEchoMode(QLineEdit.Password)
+        key_edit.setToolTip("Shown as dots. The value is never logged.")
+        remember = QCheckBox("Remember the key on this device (encrypted store)")
+        remember.setChecked(bool(self.config.get("remember_kaggle_key", True)))
+        remember.setToolTip(
+            "Ticked: stored in the OS keyring (or the Fernet-encrypted secrets "
+            "file).\nUnticked: used for this session only — nothing is written to "
+            "disk, and any previously stored Kaggle key is deleted."
+        )
+        form.addRow("Kaggle username:", user_edit)
+        form.addRow("Kaggle API key:", key_edit)
+        form.addRow("", remember)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        ok_btn = QPushButton("✅ Use these credentials")
+        ok_btn.setDefault(True)
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        buttons.addStretch()
+        buttons.addWidget(ok_btn)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        user = user_edit.text().strip()
+        key = key_edit.text().strip()
+        if not user or not key:
+            QMessageBox.warning(
+                self, "Both Fields Needed",
+                "A Kaggle username AND API key are required.",
+            )
+            return False
+
+        self.config["kaggle_user"] = user
+        self.config["kaggle_key"] = key
+        self.config["remember_kaggle_key"] = remember.isChecked()
+        # Keep ⚙ Settings in step so the two views cannot disagree.
+        k_user = getattr(self, "k_user", None)
+        k_key = getattr(self, "k_key", None)
+        remember_box = getattr(self, "remember_kaggle", None)
+        if k_user is not None:
+            k_user.setText(user)
+        if k_key is not None:
+            k_key.setText(key)
+        if remember_box is not None:
+            remember_box.setChecked(remember.isChecked())
+        try:
+            save_config(self.config, remember=self._remembered_secret_keys())
+        except Exception as e:  # noqa: BLE001
+            # Never lose the run over a storage failure: the key is already in the
+            # in-memory config the worker reads.
+            print(f"save_config failed for Kaggle credentials: {e}")
+        self.refresh_kaggle_cred_status()
+        return True
+
+    def configure_kaggle_credentials(self):
+        """The credentials row's "Set up / change…" button."""
+        if self._ensure_kaggle_credentials():
+            self.status_label.setText("Kaggle credentials ready.")
+
+    # -- Kaggle connectivity -------------------------------------------------
+    def test_kaggle_connection(self):
+        """The credentials row's "Test connection" button.
+
+        Runs on a worker thread because it makes a real network call: token
+        introspection plus one authenticated API call. The verdict is written
+        back into the credentials row, so it does not vanish with a dialog.
+        """
+        from workers.kaggle_probe import KaggleProbeWorker
+
+        user = (self.config.get("kaggle_user") or "").strip()
+        key = (self.config.get("kaggle_key") or "").strip()
+        if not user or not key:
+            QMessageBox.warning(
+                self, "Kaggle Credentials Needed",
+                "Enter your Kaggle username and API key first "
+                "(🔑 Set up / change…).",
+            )
+            return
+
+        self.ace_cred_test_btn.setEnabled(False)
+        self._kaggle_probe_verdict = "Testing the Kaggle connection…"
+        self.refresh_kaggle_cred_status()
+        self.kaggle_probe_worker = KaggleProbeWorker(self.config)
+        self.kaggle_probe_worker.done.connect(self._on_kaggle_probe_done)
+        self.kaggle_probe_worker.failed.connect(self._on_kaggle_probe_failed)
+        self.kaggle_probe_worker.start()
+
+    def _kaggle_probe_verdict_text(self, result):
+        """One-line summary of a probe result, for the credentials row."""
+        if result.get("ok"):
+            method = (result.get("auth_method") or "").strip()
+            return (
+                f"<b>Connected</b> as <b>{result.get('username') or '?'}</b>"
+                + (f" (auth: {method})" if method else "")
+            )
+        detail = (result.get("detail") or "").strip()
+        return f"<b>Not connected</b> — {detail or 'no reason reported'}"
+
+    def _on_kaggle_probe_done(self, result):
+        """Report the verdict in the row, and explain any failure in a dialog."""
+        self.ace_cred_test_btn.setEnabled(True)
+        self._kaggle_probe_verdict = self._kaggle_probe_verdict_text(result)
+        self.refresh_kaggle_cred_status()
+
+        problems = [str(row) for row in (result.get("problems") or [])]
+        if result.get("ok") and not problems:
+            self.status_label.setText(
+                f"Kaggle connection OK (user {result.get('username')})."
+            )
+            return
+
+        lines = []
+        if result.get("detail"):
+            lines.append(str(result["detail"]))
+        lines.extend(problems)
+        if not lines:
+            lines.append("Kaggle did not accept these credentials.")
+        QMessageBox.warning(self, "Kaggle Connection Failed", "\n\n".join(lines))
+
+    def _on_kaggle_probe_failed(self, err_msg):
+        """The probe could not even run — surface it instead of staying silent."""
+        self.ace_cred_test_btn.setEnabled(True)
+        self._kaggle_probe_verdict = f"<b>Not connected</b> — {err_msg}"
+        self.refresh_kaggle_cred_status()
+        QMessageBox.warning(self, "Kaggle Connection Failed", err_msg)
+
+    def forget_stored_kaggle_key(self):
+        """Delete the stored Kaggle key and fall back to session-only."""
+        from modules.secrets_manager import delete_secret, get_secret
+
+        if not get_secret("kaggle_key") and not (self.config.get("kaggle_key") or "").strip():
+            QMessageBox.information(
+                self, "Nothing Stored", "No Kaggle key is stored on this device."
+            )
+            return
+        confirm = QMessageBox.question(
+            self, "Forget Stored Kaggle Key",
+            "Delete the stored Kaggle API key from this device?\n\n"
+            "The key stays usable for this session; after a restart you will be "
+            "asked for it again.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        delete_secret("kaggle_key")
+        self.config["remember_kaggle_key"] = False
+        try:
+            save_config(self.config, remember=self._remembered_secret_keys())
+        except Exception as e:  # noqa: BLE001
+            print(f"save_config failed while forgetting the Kaggle key: {e}")
+        self.refresh_kaggle_cred_status()
+        self.status_label.setText(
+            "Stored Kaggle key deleted — it remains in use for this session only."
+        )
+
+    def reset_caption_backend_prompts(self):
+        """Forget the once-per-backend credential decision, so it asks again."""
+        self.config["caption_cred_prompt_seen"] = []
+        self.config["caption_fallback_backend"] = ""
+        try:
+            save_config(self.config, remember=self._remembered_secret_keys())
+        except Exception as e:  # noqa: BLE001
+            print(f"save_config failed while resetting the prompt memory: {e}")
+        self.status_label.setText(
+            "The captioner will ask about Kaggle credentials again on the next run."
+        )
+
+    # Backends that never HEAR the audio. Their output is a placeholder, not a
+    # caption, and is stamped as one (see _stamp_placeholder_caption).
+    PLACEHOLDER_CAPTION_BACKENDS = ("Local Rule Engine", "DeepSeek Cloud")
+
+    def _fallback_backend_options(self):
+        """The fallbacks to offer, each with whether it can actually run."""
+        try:
+            from modules.llm_client import provider_key_present
+            llm_key = provider_key_present(self.config)
+        except Exception:  # noqa: BLE001
+            llm_key = False
+        return [
+            ("DeepSeek LLM — text-only draft, NO audio is sent",
+             "DeepSeek Cloud", bool(llm_key)),
+            ("Google Gemini — audio-native (needs a Gemini key)",
+             "Gemini", bool(self.config.get("gemini_api_key"))),
+            ("Custom endpoint — audio only if it supports it",
+             "Custom Endpoint / Webhook",
+             bool((self.config.get("custom_caption_url") or "").strip())),
+            ("Local rule engine — canned template text, no model",
+             "Local Rule Engine", True),
+        ]
+
+    def _prompt_fallback_backend(self):
+        """Let the user CHOOSE the fallback. Returns the backend, or '' to abort.
+
+        Offered as a LIST rather than picked silently: "ACE-Step is unavailable"
+        says nothing about which of four very different engines should run
+        instead, and each one produces a different KIND of text.
+        """
+        options = self._fallback_backend_options()
+        labels = [
+            label + ("" if usable else "   (not configured)")
+            for label, _backend, usable in options
+        ]
+        choice, accepted = QInputDialog.getItem(
+            self, "Which Backend Should Run Instead?",
+            "No Kaggle credentials, so the ACE-Step captioner cannot run.\n\n"
+            "Pick what should caption these tracks instead. Only the audio-native "
+            "options produce real captions; the others are stamped as placeholders:",
+            labels, 0, False,
+        )
+        if not accepted or not choice:
+            return ""
+        return options[labels.index(choice)][1]
+
+    def _resolve_caption_backend(self):
+        """Pick the caption backend, asking about credentials ONCE per backend.
+
+        ``resolve_backend()`` on its own is a SILENT degradation: ``ace_step``
+        with no Kaggle key falls through to DeepSeek (text-only, no audio) and
+        then to the local rule engine (canned template text). A page titled
+        "ACE-Step (Kaggle)" could therefore write placeholder captions that look
+        entirely real. This asks first, and never picks a fallback on the user's
+        behalf.
+
+        Credentials always win over the memory: if a key is present — now or later
+        — Kaggle is used without asking again.
+        """
+        configured = (self.config.get("caption_backend") or "ace_step").strip().lower()
+        if configured not in ("ace_step", "moss"):
+            return resolve_backend(self.config)      # an explicit choice: honour it
+
+        user = (self.config.get("kaggle_user") or "").strip()
+        key = (self.config.get("kaggle_key") or "").strip()
+        if user and key:
+            return "Kaggle Cloud (Free GPU)"
+
+        seen = [str(name) for name in (self.config.get("caption_cred_prompt_seen") or [])]
+        if configured in seen:
+            remembered = (self.config.get("caption_fallback_backend") or "").strip()
+            if remembered:
+                return remembered
+            # "Declined" was recorded without a backend: ask again rather than
+            # guess which engine the user wants.
+
+        if self._ensure_kaggle_credentials():
+            return "Kaggle Cloud (Free GPU)"
+
+        chosen = self._prompt_fallback_backend()
+        if not chosen:
+            return ""                                # cancelled: the caller aborts
+        seen.append(configured)
+        self.config["caption_cred_prompt_seen"] = sorted(set(seen))
+        self.config["caption_fallback_backend"] = chosen
+        try:
+            save_config(self.config, remember=self._remembered_secret_keys())
+        except Exception as e:  # noqa: BLE001
+            print(f"save_config failed while remembering the caption fallback: {e}")
+        return chosen
+
+    def _stamp_placeholder_caption(self, sample, backend):
+        """Mark a caption that was produced WITHOUT hearing the audio.
+
+        Exported as metadata, never as a prefix inside the caption text: a stamp
+        inside the text would become training data.
+        """
+        if not self.config.get("caption_stamp_placeholders", True):
+            return
+        if backend not in self.PLACEHOLDER_CAPTION_BACKENDS:
+            return
+        why = ("no audio was heard — canned template text"
+               if backend == "Local Rule Engine"
+               else "no audio was sent — filename-only draft")
+        sample["caption_is_placeholder"] = True
+        sample["caption_ai_model"] = f"{backend} (PLACEHOLDER — {why})"
+
+    # -- folders -----------------------------------------------------------
+    def browse_caption_staging(self):
+        """Pick the local folder whose contents are uploaded to Kaggle."""
+        from modules import caption_kaggle_run as ckr
+
+        current = self.caption_staging_edit.text().strip() or ckr.default_staging_dir()
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose Caption Staging Folder", current
+        )
+        if chosen:
+            self.caption_staging_edit.setText(chosen)
+            self.save_pipeline_defaults()
+            self.refresh_staging_list()
+
+    def browse_caption_output(self):
+        """Pick the local folder the downloaded captions land in."""
+        from modules import caption_kaggle_run as ckr
+
+        current = self.caption_output_edit.text().strip() or ckr.default_output_dir()
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose Caption Output Folder", current
+        )
+        if chosen:
+            self.caption_output_edit.setText(chosen)
+            self.save_pipeline_defaults()
+
+    # -- staging folder contents (add / remove songs) -----------------------
+    def refresh_staging_list(self):
+        """Show what the next run would upload, read straight from disk."""
+        from modules import caption_kaggle_run as ckr
+
+        folder = ckr.staging_dir(self.config)
+        files = ckr.staged_files(folder)
+        self.staging_list.clear()
+        for path in files:
+            item = QListWidgetItem(os.path.basename(path))
+            try:
+                item.setToolTip(f"{path}\n{os.path.getsize(path) / 1e6:.1f} MB")
+            except OSError:
+                item.setToolTip(path)
+            self.staging_list.addItem(item)
+        if files:
+            self.staging_count_label.setText(
+                f"{len(files)} file(s) staged in {folder} — all of them are "
+                "uploaded on the next run."
+            )
+        else:
+            self.staging_count_label.setText(
+                f"Nothing staged yet in {folder}. Use “➕ Add selected tracks”."
+            )
+
+    def staging_add_ticked(self):
+        """Copy (or transcode) the TICKED dataset tracks into the staging folder."""
+        from modules import caption_kaggle_run as ckr
+
+        samples = self._ticked_samples()
+        if not samples:
+            self._no_tracks_ticked()
+            return
+        convert = self.caption_convert_check.isChecked()
+        if convert and not ckr.ffmpeg_available():
+            QMessageBox.information(
+                self, "ffmpeg Not Found",
+                "ffmpeg is not on PATH, so the files will be staged at their "
+                "original quality instead of MP3.",
+            )
+        items = [
+            (s.get("id"), s.get("filename", ""), s.get("audio_path", ""))
+            for s in samples
+        ]
+        staged, skipped = ckr.stage_tracks(
+            items, ckr.staging_dir(self.config),
+            convert_mp3=convert, bitrate=self.caption_bitrate_combo.currentText(),
+        )
+        self.refresh_staging_list()
+        note = f"Staged {len(staged)} track(s) for upload."
+        if skipped:
+            note += f" {skipped} had no usable audio file."
+        self.status_label.setText(note)
+
+    def staging_remove_ticked(self):
+        """Delete the ticked files from the staging folder (= from the upload)."""
+        from modules import caption_kaggle_run as ckr
+
+        names = [item.text() for item in self.staging_list.selectedItems()]
+        if not names:
+            QMessageBox.warning(
+                self, "Nothing Ticked",
+                "Tick the file(s) to remove from the list first.",
+            )
+            return
+        removed = ckr.remove_staged(ckr.staging_dir(self.config), names)
+        self.refresh_staging_list()
+        self.status_label.setText(
+            f"Removed {removed} file(s) from the staging folder. The next run "
+            "uploads a new version of the Kaggle dataset without them."
+        )
+
+    # -- diff review (existing vs proposed) ---------------------------------
+    def _sample_by_id(self, sid):
+        for sample in self.dataset.get("samples", []):
+            if sample.get("id") == sid:
+                return sample
+        return None
+
+    def show_caption_diff(self, rows=None):
+        """Diff existing vs proposed captions for a whole run and apply choices.
+
+        This is the "run a diff on an existing caption, then choose which one to
+        use" step. Nothing is written to ``caption`` until Apply: a track with no
+        existing caption is ADDED by "Use new", and a replaced caption is kept in
+        ``caption_before_kaggle`` so an approved caption is recoverable.
+        """
+        from modules import caption_kaggle_run as ckr
+
+        rows = self._proposal_rows() if rows is None else rows
+        if not rows:
+            QMessageBox.information(
+                self, "Nothing To Review",
+                "There are no caption proposals yet. Run the ACE-Step captioner, "
+                "or import a captions_out.json.",
+            )
+            return
+        if not self._caption_scope_ids:
+            # An imported file: the shown rows ARE the run's scope, so a follow-up
+            # "Re-caption bad / failed" targets the right tracks.
+            self._caption_scope_ids = [row["id"] for row in rows]
+
+        counts = ckr.count_by_status(rows)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review Captions — existing vs new")
+        dialog.resize(1180, 680)
+        layout = QVBoxLayout(dialog)
+
+        summary = QLabel(
+            f"{len(rows)} track(s): "
+            + ", ".join(f"{n} {status}" for status, n in sorted(counts.items()))
+            + ". Nothing is written until you press Apply. “new” rows have no "
+            "caption at all, so using one ADDS it."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        table = QTableWidget(len(rows), 5)
+        table.setHorizontalHeaderLabels(
+            ["Track", "Status", "Existing caption", "New caption", "Decision"]
+        )
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+
+        edited = {}
+        combos = []
+        for index, row in enumerate(rows):
+            table.setItem(index, 0, QTableWidgetItem(row["filename"]))
+            table.setItem(index, 1, QTableWidgetItem(row["status"]))
+            table.setItem(index, 2, QTableWidgetItem(row["existing"] or "(no caption)"))
+            table.setItem(index, 3, QTableWidgetItem(row["proposed"] or "(nothing returned)"))
+            combo = QComboBox()
+            for label, value in (
+                ("Keep existing", "keep"),
+                ("Use new", "use"),
+                ("Edit…", "edit"),
+                ("Skip", "skip"),
+            ):
+                combo.addItem(label, value)
+            # Defaults that need no thought: nothing to use -> keep; a proposal
+            # with no existing caption -> use (that IS the add case).
+            if not row["proposed"]:
+                combo.setCurrentIndex(0)
+                combo.setEnabled(False)
+            elif row["status"] == ckr.STATUS_NEW:
+                combo.setCurrentIndex(1)
+            combo.currentIndexChanged.connect(
+                lambda _i, r=index: self._on_diff_decision_changed(
+                    dialog, rows[r], table.cellWidget(r, 4), edited
+                )
+            )
+            table.setCellWidget(index, 4, combo)
+            combos.append(combo)
+        layout.addWidget(table)
+
+        def set_all(value):
+            for combo in combos:
+                if not combo.isEnabled():
+                    continue
+                index = combo.findData(value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+
+        def apply_choices():
+            self.record_snapshot()
+            applied, skipped = 0, 0
+            for row, combo in zip(rows, combos):
+                decision = combo.currentData()
+                if decision == "skip" or not combo.isEnabled():
+                    skipped += 1
+                    continue
+                sample = self._sample_by_id(row["id"])
+                if sample is None:
+                    continue
+                ckr.apply_decision(sample, row, decision, edited.get(row["id"]))
+                applied += 1
+            self.refresh_table()
+            self.on_table_selection_changed()
+            self.status_label.setText(
+                f"Applied {applied} caption decision(s); {skipped} left unchanged."
+            )
+            dialog.accept()
+
+        buttons = QHBoxLayout()
+        use_all = QPushButton("Use new for all")
+        use_all.setToolTip("Take the new caption everywhere one was proposed.")
+        use_all.clicked.connect(lambda: set_all("use"))
+        keep_all = QPushButton("Keep all existing")
+        keep_all.setToolTip(
+            "Change nothing — the proposals stay on the tracks as caption_ai_raw."
+        )
+        keep_all.clicked.connect(lambda: set_all("keep"))
+        apply_btn = QPushButton("✅ Apply")
+        apply_btn.setToolTip(
+            "Write the chosen captions. A replaced caption is kept in "
+            "caption_before_kaggle, and a snapshot is recorded first, so this is "
+            "undoable."
+        )
+        apply_btn.clicked.connect(apply_choices)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        buttons.addWidget(use_all)
+        buttons.addWidget(keep_all)
+        buttons.addStretch()
+        buttons.addWidget(apply_btn)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+
+        dialog.exec()
+
+    def _on_diff_decision_changed(self, dialog, row, combo, edited):
+        """Handle “Edit…” in the diff table: collect the text, keep the rest."""
+        if combo is None or combo.currentData() != "edit":
+            return
+        seed = edited.get(row["id"]) or row["proposed"] or row["existing"]
+        text, ok = QInputDialog.getMultiLineText(
+            dialog, "Edit Caption", f"{row['filename']} — caption to apply:", seed
+        )
+        if ok and text.strip():
+            edited[row["id"]] = text.strip()
+        else:
+            # Cancelled or emptied: fall back to a decision that cannot lose the
+            # caption, rather than leaving "edit" selected with nothing to write.
+            index = combo.findData("keep" if row["existing"] else "use")
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
+    def import_captions_json(self):
+        """Diff a captions_out.json without running the kernel again."""
+        from modules import caption_kaggle_run as ckr
+
+        start = self.caption_output_edit.text().strip() or ckr.default_output_dir()
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Import captions_out.json", start, "Caption results (*.json)"
+        )
+        if not path:
+            return
+        try:
+            results = ckr.load_results(path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could Not Read Captions", str(exc))
+            return
+        samples = self.dataset.get("samples", [])
+        rows = ckr.diff_captions(
+            samples, results,
+            convert_mp3=bool(self.config.get("caption_convert_mp3", True)),
+        )
+        self._caption_scope_ids = [row["id"] for row in rows]
+        unmatched = ckr.unmatched_results(samples, results)
+        note = f"Imported {len(results)} caption(s) from {os.path.basename(path)}."
+        if unmatched:
+            note += (f" {len(unmatched)} matched no track in this dataset: "
+                     + ", ".join(unmatched[:3]))
+        self.ace_status_label.setText(note)
+        self.show_caption_diff(rows)
 
     def set_track_caption_override(self):
         """Store a per-track blend ratio on the selected sample."""
@@ -2499,19 +3326,10 @@ class DatasetManager(QMainWindow):
             else:
                 return
 
-        if not self.config.get("kaggle_user") or not self.config.get("kaggle_key"):
-            user, ok1 = QInputDialog.getText(self, "Kaggle Username", "Enter Kaggle username:")
-            if ok1:
-                key, ok2 = QInputDialog.getText(self, "Kaggle API Key", "Enter Kaggle API key:", QLineEdit.Password)
-                if ok2:
-                    self.config["kaggle_user"] = user.strip()
-                    self.config["kaggle_key"] = key.strip()
-                    self.k_user.setText(user.strip())
-                    self.k_key.setText(key.strip())
-                else:
-                    return
-            else:
-                return
+        # ONE shared prompt (it also carries the "remember on this device"
+        # choice) instead of three copies that could drift apart.
+        if not self._ensure_kaggle_credentials():
+            return
 
         options = {
             "stem_source": ("kaggle_demucs" if stem_source == "Separate via Kaggle (Demucs)" else ("mvsep" if stem_source == "Separate via MVSEP" else "import")),
@@ -2602,19 +3420,10 @@ class DatasetManager(QMainWindow):
             else:
                 return
 
-        if not self.config.get("kaggle_user") or not self.config.get("kaggle_key"):
-            user, ok1 = QInputDialog.getText(self, "Kaggle Username", "Enter Kaggle username:")
-            if ok1:
-                key, ok2 = QInputDialog.getText(self, "Kaggle API Key", "Enter Kaggle API key:", QLineEdit.Password)
-                if ok2:
-                    self.config["kaggle_user"] = user.strip()
-                    self.config["kaggle_key"] = key.strip()
-                    self.k_user.setText(user.strip())
-                    self.k_key.setText(key.strip())
-                else:
-                    return
-            else:
-                return
+        # ONE shared prompt (it also carries the "remember on this device"
+        # choice) instead of three copies that could drift apart.
+        if not self._ensure_kaggle_credentials():
+            return
 
         # ---- Band profile ----
         band = self.band_combo.currentText()
@@ -2829,19 +3638,10 @@ class DatasetManager(QMainWindow):
             else:
                 return
 
-        if not self.config.get("kaggle_user") or not self.config.get("kaggle_key"):
-            user, ok1 = QInputDialog.getText(self, "Kaggle Username", "Enter Kaggle username:")
-            if ok1:
-                key, ok2 = QInputDialog.getText(self, "Kaggle API Key", "Enter Kaggle API key:", QLineEdit.Password)
-                if ok2:
-                    self.config["kaggle_user"] = user.strip()
-                    self.config["kaggle_key"] = key.strip()
-                    self.k_user.setText(user.strip())
-                    self.k_key.setText(key.strip())
-                else:
-                    return
-            else:
-                return
+        # ONE shared prompt (it also carries the "remember on this device"
+        # choice) instead of three copies that could drift apart.
+        if not self._ensure_kaggle_credentials():
+            return
 
         # ---- Band profile ----
         band = self.band_combo.currentText()
@@ -3296,6 +4096,31 @@ class DatasetManager(QMainWindow):
         self.config["caption_max_tokens"] = self.max_tokens_spin.value()
         self.config["caption_max_audio_duration"] = self.max_dur_spin.value()
         self.config["caption_batch_size"] = self.batch_size_spin.value()
+        # ACE-Step page: the prompt add-on and the run paths. getattr-guarded for
+        # the same reason as the system prompt above — this method can run before
+        # the page exists in a headless/test construction.
+        addendum = getattr(self, "caption_addendum_edit", None)
+        if addendum is not None:
+            self.config["caption_prompt_addendum"] = addendum.toPlainText().strip()
+        for attr, key in (
+            ("caption_staging_edit", "caption_staging_dir"),
+            ("caption_audio_dataset_edit", "caption_audio_dataset"),
+            ("caption_model_dataset_edit", "kaggle_model_dataset"),
+            ("caption_output_edit", "caption_output_dir"),
+        ):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                self.config[key] = widget.text().strip()
+        bitrate = getattr(self, "caption_bitrate_combo", None)
+        if bitrate is not None:
+            self.config["caption_mp3_bitrate"] = bitrate.currentText().strip() or "192k"
+        for attr, key in (
+            ("caption_convert_check", "caption_convert_mp3"),
+            ("caption_batch_review_check", "caption_batch_review"),
+        ):
+            box = getattr(self, attr, None)
+            if box is not None:
+                self.config[key] = box.isChecked()
         # tag_caption_ratio is owned by the 🎤 Caption tab's blend slider
         # (on_caption_blend_changed writes it); no spin box to read here.
         self.config["use_clap_tagger"] = {
@@ -3535,9 +4360,10 @@ class DatasetManager(QMainWindow):
         if hasattr(self, "filter_count_label"):
             total = len(self.dataset["samples"])
             self.filter_count_label.setText(f"{shown} of {total} tracks")
-        # Keep the MOSS track picker in step with the dataset. Cheap when the
-        # track list is unchanged (see TrackPickerButton.set_tracks).
+        # Keep the track pickers in step with the dataset. Cheap when the track
+        # list is unchanged (see TrackPickerButton.set_tracks).
         self.refresh_moss_track_picker()
+        self.refresh_ace_track_picker()
 
     def _matches_filters(self, s):
         """Apply the search/filter state to a single sample dict."""
@@ -4118,34 +4944,6 @@ class DatasetManager(QMainWindow):
             self.status_label.setText("Warning bypass DISABLED.")
 
     # -----------------------------------------------------------------------
-    # Remote (Kaggle) consolidated pipeline
-    # -----------------------------------------------------------------------
-    def start_remote_consolidated_pipeline(self):
-        """Asynchronously triggers the master Kaggle container and opens the console view."""
-        from core.file_system import compress_dataset_folder, launch_remote_kaggle_console
-        
-        # Zip local directory structures
-        bundle_path = compress_dataset_folder(self.dataset["samples"])
-        
-        # Push audio assets out to cloud storage volume mounts
-        os.system(f"kaggle datasets version -m 'Upload bundle' -p {bundle_path}")
-        os.system(f"kaggle kernels push -p core/kaggle_worker.py")
-        
-        # THE CONSOLE PASS: Open the container workspace interface instantly
-        username = self.config.get("kaggle_user", "your-username")
-        notebook_slug = "ace-step-master-pipeline" # Your notebook's specific URL string
-        launch_remote_kaggle_console(username, notebook_slug)
-        
-        # Hand execution tracking off to background thread monitor
-        from workers.kaggle_consolidated import KaggleConsolidatedWorker
-        self.active_worker = KaggleConsolidatedWorker(self.config)
-        self.active_worker.progress.connect(self.on_worker_progress)
-        self.active_worker.all_done.connect(self.on_remote_pipeline_success)
-        self.active_worker.failed.connect(self.on_worker_error)
-        self.active_worker.start()   
-        self.status_label.setText("Container deployed! Redirecting your browser to monitor the GPUs live...")
-
-    # -----------------------------------------------------------------------
     # DSP Normalize
     # -----------------------------------------------------------------------
     def on_file_normalized(self, sid, orig_backup, norm_path, sr, lufs):
@@ -4614,7 +5412,7 @@ class DatasetManager(QMainWindow):
             return
 
         if scope is None:
-            scope_choices = ["Selected Track", "Tracks Missing Captions", "All Tracks — Review Every Result"]
+            scope_choices = ["Ticked Tracks (Caption page)", "Tracks Missing Captions", "All Tracks — Review Every Result", "Selected Track (dataset table)"]
             scope, accepted = QInputDialog.getItem(self, "Choose Captioning Scope", "Which tracks should ACE-Step Captioner process?", scope_choices, 0, False)
             if not accepted or not scope:
                 self.status_label.setText("AI captioning cancelled.")
@@ -4622,12 +5420,19 @@ class DatasetManager(QMainWindow):
 
         # Normalise programmatic scope values onto the dialog's labels.
         scope = {
-            "selected": "Selected Track",
+            "ticked": "Ticked Tracks",
             "missing": "Tracks Missing Captions",
             "all": "All Tracks — Review Every Result",
+            "bad": "Tracks Needing Re-caption",
+            "selected": "Selected Track",
         }.get(scope, scope)
 
-        if scope == "Selected Track":
+        if scope == "Ticked Tracks":
+            samples = self._ticked_samples()
+            if not samples:
+                self._no_tracks_ticked()
+                return
+        elif scope == "Selected Track":
             selected_sample = self.get_selected_sample()
             if not selected_sample:
                 QMessageBox.warning(self, "No Track Selected", "Select one track in the dataset table first.")
@@ -4635,12 +5440,18 @@ class DatasetManager(QMainWindow):
             samples = [selected_sample]
         elif scope == "Tracks Missing Captions":
             samples = [s for s in all_samples if not s.get("caption", "").strip()]
+        elif scope == "Tracks Needing Re-caption":
+            samples = self._bad_caption_samples()
         else:
             samples = list(all_samples)
 
         if not samples:
             QMessageBox.information(self, "Nothing To Caption", "No tracks match the selected scope.")
             return
+
+        # Remembered so the end-of-run diff review knows which proposals belong to
+        # THIS run: caption_ai_raw keeps the previous run's proposal otherwise.
+        self._caption_scope_ids = [s.get("id") for s in samples]
 
         self.record_snapshot()
         self._set_caption_busy(True)
@@ -4649,9 +5460,29 @@ class DatasetManager(QMainWindow):
 
         general_meta = self.dataset.get("metadata", {})
 
-        # Backend is user-configurable in ⚙ Settings; resolve() falls back
-        # gracefully (ace_step without Kaggle creds -> DeepSeek -> local).
-        backend = resolve_backend(self.config)
+        # Backend is user-configurable in the Caption page; this ASKS about
+        # credentials rather than silently degrading to an engine that never hears
+        # the audio (see _resolve_caption_backend).
+        backend = self._resolve_caption_backend()
+        if not backend:
+            self._set_caption_busy(False)
+            self.progress_bar.setVisible(False)
+            self.status_label.setText("AI captioning cancelled — no backend chosen.")
+            return
+        self._active_caption_backend = backend
+        if hasattr(self, "ace_status_label"):
+            self.ace_status_label.setText(f"Running: {backend}")
+        if backend in self.PLACEHOLDER_CAPTION_BACKENDS:
+            # Say it BEFORE the run, not only in the stamp afterwards: the user
+            # must know what they are about to write into the dataset.
+            self.status_label.setText(
+                "⚠ Placeholder backend: it never hears the audio. Captions are "
+                "stamped in caption_ai_model so they cannot be mistaken for real."
+            )
+            if hasattr(self, "ace_status_label"):
+                self.ace_status_label.setText(
+                    f"Running: {backend} — PLACEHOLDER output"
+                )
 
         self.active_worker = RemoteCaptionWorker(
             samples,
@@ -4671,7 +5502,18 @@ class DatasetManager(QMainWindow):
         for sample in self.dataset["samples"]:
             if sample.get("id") == sid:
                 self.save_ai_caption_result(sample, caption, model_id=model_id, prompt="Detailed ACE-Step caption request")
-                self.review_ai_caption_result(sample)
+                self._stamp_placeholder_caption(
+                    sample, getattr(self, "_active_caption_backend", "")
+                )
+                if self.caption_batch_review_enabled():
+                    # HOLD the proposal. A per-track modal over a 200-track run is
+                    # 200 dialogs; the diff table shows every proposal at once and
+                    # the caption is not touched until a decision is applied.
+                    self.status_label.setText(
+                        f"Captioned {sample.get('filename', sid)} — held for review."
+                    )
+                else:
+                    self.review_ai_caption_result(sample)
                 break
 
     def on_caption_finished(self):
@@ -4680,6 +5522,28 @@ class DatasetManager(QMainWindow):
         self.status_label.setText("AI Captioning completed.")
         self.refresh_table()
         self.on_table_selection_changed()
+        placeholders = [
+            s for s in self._caption_run_samples() if s.get("caption_is_placeholder")
+        ]
+        if placeholders:
+            # Louder than the stamp on its own: a dataset full of template text
+            # that LOOKS like captions is the failure this guards against.
+            self.status_label.setText(
+                f"AI Captioning completed — {len(placeholders)} caption(s) are "
+                "PLACEHOLDERS: that backend never heard the audio. They are "
+                "marked in caption_ai_model and caption_is_placeholder."
+            )
+        if self.caption_batch_review_enabled() and self._caption_scope_ids:
+            rows = self._proposal_rows()
+            if rows:
+                from modules import caption_kaggle_run as ckr
+                counts = ckr.count_by_status(rows)
+                self.ace_status_label.setText(
+                    "Last run: "
+                    + ", ".join(f"{n} {status}" for status, n in sorted(counts.items()))
+                    + ". Nothing has been changed yet — apply the diff to decide."
+                )
+                self.show_caption_diff(rows)
 
     # -----------------------------------------------------------------------
     # Lyrics transcription (WhisperX, optional)
@@ -5858,14 +6722,3 @@ class DatasetManager(QMainWindow):
         self.progress_bar.setVisible(False)      
         self.status_label.setText("Operation error.")
         QMessageBox.critical(self, "Error", f"An error occurred:\n{err_msg}")
-
-    def on_remote_pipeline_success(self, result_payload):
-        """Clean decoupled pass-through directing data integration to our core script engine."""
-        self.progress_bar.setVisible(False)
-        
-        # Trigger your independent module function
-        from core.manifest_sync import integrate_remote_pipeline_data
-        integrate_remote_pipeline_data(self, result_payload)
-
-
-

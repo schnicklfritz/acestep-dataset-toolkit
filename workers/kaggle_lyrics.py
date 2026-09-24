@@ -40,8 +40,11 @@ def run_kaggle_lyrics(audio_path, config, mode="whisperx", language=None,
 
     from modules.kaggle import (
         upload_audio_dataset, push_kernel, wait_kernel_done,
-        wait_dataset_ready, download_kernel_output,
+        wait_dataset_ready, download_kernel_output, preflight_kaggle,
     )
+
+    # PREFLIGHT: verify the credentials before uploading the audio.
+    preflight_kaggle(config)
 
     mode = str(mode or "whisperx").lower().strip()
     if mode not in ("whisperx", "acestep"):
@@ -61,10 +64,13 @@ def run_kaggle_lyrics(audio_path, config, mode="whisperx", language=None,
         # dataset_create_new returns before the version is mounted; pushing the
         # kernel early yields an EMPTY /kaggle/input/<slug>.
         progress_cb(12, "Waiting for the Kaggle dataset to finish processing...")
-        if not wait_dataset_ready(config, audio_slug):
+        ready_reason = []
+        if not wait_dataset_ready(config, audio_slug, reason=ready_reason):
             raise RuntimeError(
                 f"Kaggle dataset {audio_slug} did not become ready in time; "
-                "the kernel would mount an EMPTY folder. Re-run."
+                "the kernel would mount an EMPTY folder. "
+                + " ".join(ready_reason)
+                + " Re-run."
             )
         audio_name = audio_slug.split("/")[-1]
 

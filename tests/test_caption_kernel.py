@@ -93,3 +93,24 @@ def test_the_schema_reaches_the_kernel():
     src = _source()
     assert "SYSTEM_PROMPT" in src
     assert '{"role": "system"' in src
+
+
+def test_the_log_carries_the_full_caption_not_a_preview():
+    """A 100-char preview made good captions look cut off in the Kaggle log."""
+    src = _source()
+    assert "caption[:100]" not in src
+    assert 'print("OK", f.name, caption, flush=True)' in src
+
+
+def test_the_kernel_documents_the_staging_folder_and_versioned_dataset():
+    """The dataset is the app-uploaded staging folder, updated as a version."""
+    src = _source()
+    assert "STAGING folder" in src
+    assert "VERSION" in src
+
+
+def test_the_audio_limit_is_documented_as_the_only_truncation():
+    src = _source()
+    assert "MAX_AUDIO_DURATION" in src
+    assert "0 = whole file" in src
+    assert "[caption] limits" in src

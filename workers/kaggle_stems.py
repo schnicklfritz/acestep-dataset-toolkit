@@ -45,8 +45,11 @@ def run_kaggle_stems(audio_path, config, model=None, two_stems=None,
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
     from modules.kaggle import (
         upload_audio_dataset, push_kernel, wait_kernel_done,
-        download_kernel_output,
+        download_kernel_output, preflight_kaggle,
     )
+
+    # PREFLIGHT: verify the credentials before uploading the audio.
+    preflight_kaggle(config)
 
     model = model or config.get("kaggle_stem_model", "htdemucs_ft")
     output_dir = output_dir or config.get("stem_output_dir") \
@@ -68,9 +71,11 @@ def run_kaggle_stems(audio_path, config, model=None, two_stems=None,
         # kernel that references it — otherwise /kaggle/input/<slug> is empty.
         progress_cb(9, "Waiting for dataset to be ready...")
         from modules.kaggle import wait_dataset_ready
-        if not wait_dataset_ready(config, audio_slug):
+        ready_reason = []
+        if not wait_dataset_ready(config, audio_slug, reason=ready_reason):
             raise RuntimeError(
-                f"Kaggle dataset {audio_slug} never became ready before timeout."
+                f"Kaggle dataset {audio_slug} never became ready before timeout. "
+                + " ".join(ready_reason)
             )
 
         # ---- kernel script with model + input baked in ----

@@ -138,11 +138,16 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
 
     from modules.kaggle import (
         download_kernel_output,
+        preflight_kaggle,
         push_kernel,
         upload_audio_dataset,
         wait_dataset_ready,
         wait_kernel_done,
     )
+
+    # PREFLIGHT: ask Kaggle whether these credentials work, and whether the
+    # weights dataset actually exists, BEFORE staging or uploading anything.
+    preflight_kaggle(config, config.get("moss_model_dataset"))
 
     prompts = _moss_prompts(config)
     temp_dir = tempfile.mkdtemp(prefix="ace_moss_")
@@ -182,9 +187,11 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
         audio_name = audio_slug.split("/")[-1]
 
         progress_cb(8, "Waiting for the dataset to be ready...")
-        if not wait_dataset_ready(config, audio_slug):
+        ready_reason = []
+        if not wait_dataset_ready(config, audio_slug, reason=ready_reason):
             raise RuntimeError(
-                f"Kaggle dataset {audio_slug} never became ready before timeout."
+                f"Kaggle dataset {audio_slug} never became ready before timeout. "
+                + " ".join(ready_reason)
             )
 
         # ---- build the kernel ------------------------------------------
