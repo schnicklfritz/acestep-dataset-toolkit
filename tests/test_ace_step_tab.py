@@ -289,3 +289,147 @@ def test_refresh_keeps_the_picker_in_step_with_the_dataset():
     manager.dataset["samples"] = _samples("a.mp3", "b.mp3")
     manager.refresh_ace_track_picker()
     assert len(manager.ace_track_picker.tracks) == 2
+
+
+# ---------------------------------------------------------------------------
+# the strip: one line, in workflow order, with only the next step live
+# ---------------------------------------------------------------------------
+
+class _PageManager(_FakeManager):
+    """The REAL page plus the real gating/tick methods, without a QMainWindow.
+
+    ``build_ace_step_tab`` only needs ``config``, and ``update_ace_actions`` needs
+    a dataset, a scope list and the busy flag — so the layout AND the gating rules
+    can be tested without constructing the whole app.
+    """
+
+    _ticked_samples = dataset_manager.DatasetManager._ticked_samples
+    _caption_run_samples = dataset_manager.DatasetManager._caption_run_samples
+    _proposal_rows = dataset_manager.DatasetManager._proposal_rows
+    _bad_caption_samples = dataset_manager.DatasetManager._bad_caption_samples
+    caption_batch_review_enabled = \
+        dataset_manager.DatasetManager.caption_batch_review_enabled
+    _set_ace_action = dataset_manager.DatasetManager._set_ace_action
+    update_ace_actions = dataset_manager.DatasetManager.update_ace_actions
+    update_ace_tick_status = dataset_manager.DatasetManager.update_ace_tick_status
+
+    def __init__(self, config=None, samples=()):
+        super().__init__(config)
+        self.dataset = {"samples": list(samples)}
+        self._caption_scope_ids = []
+        self._caption_busy = False
+
+
+def _built_page(config=None, samples=()):
+    manager = _PageManager(config, samples)
+    page = QWidget()
+    build_ace_step_tab(manager, page)
+    # RETAIN the page: see the note in _built() about PySide6 freeing a C++ object
+    # whose last Python reference is dropped.
+    manager._page = page
+    return manager
+
+
+def _strip_widgets(manager):
+    """The strip's widgets, in order, excluding the stretchy status label."""
+    layout = manager.ace_strip.layout()
+    out = []
+    for index in range(layout.count()):
+        widget = layout.itemAt(index).widget()
+        if widget is not None and widget is not manager.ace_tick_status:
+            out.append(widget)
+    return out
+
+
+def test_the_strip_is_in_workflow_order(qapp):
+    """The order IS the documentation: tick, stage, caption, then review."""
+    manager = _built_page()
+    assert _strip_widgets(manager) == [
+        manager.ace_cred_test_btn,
+        manager.ace_track_picker,
+        manager.staging_add_btn,
+        manager.caption_selected_btn,
+        manager.caption_missing_btn,
+        manager.caption_all_btn,
+        manager.caption_edit_btn,
+        manager.caption_diff_btn,
+        manager.caption_recaption_bad_btn,
+        manager.caption_import_btn,
+    ]
+
+
+def test_set_once_controls_stay_off_the_strip(qapp):
+    """Folders, limits and credential management belong in collapsed Settings."""
+    manager = _built_page()
+    on_strip = set(_strip_widgets(manager))
+    assert manager.ace_cred_test_btn in on_strip
+    for attr in ("caption_staging_edit", "caption_output_edit",
+                 "caption_audio_dataset_edit", "caption_model_dataset_edit",
+                 "caption_addendum_edit", "caption_bitrate_combo",
+                 "max_tokens_spin", "max_dur_spin", "batch_size_spin",
+                 "caption_convert_check", "caption_batch_review_check",
+                 "ace_cred_setup_btn", "ace_cred_forget_btn",
+                 "ace_cred_reset_btn"):
+        assert getattr(manager, attr) not in on_strip, attr
+
+
+def test_the_next_step_is_disabled_until_its_input_exists(qapp, tmp_path):
+    manager = _built_page({"caption_staging_dir": str(tmp_path)})
+    manager.update_ace_actions()
+    assert not manager.staging_add_btn.isEnabled()
+    assert not manager.caption_selected_btn.isEnabled()
+    assert not manager.caption_edit_btn.isEnabled()
+    # Nothing has run, so there is nothing to review and nothing to re-caption.
+    assert not manager.caption_diff_btn.isEnabled()
+    # ...and an empty staging folder has no junk to clean.
+    assert not manager.staging_clean_btn.isEnabled()
+    # Import stays live: it is the manual entry point for a hand-run result.
+    assert manager.caption_import_btn.isEnabled()
+
+
+def test_a_disabled_step_says_why_in_its_tooltip(qapp, tmp_path):
+    manager = _built_page({"caption_staging_dir": str(tmp_path)})
+    manager.update_ace_actions()
+    assert "Tick tracks" in manager.staging_add_btn.toolTip()
+    assert "Tick tracks" in manager.caption_selected_btn.toolTip()
+    assert "Nothing to review" in manager.caption_diff_btn.toolTip()
+
+
+def test_ticking_a_track_turns_the_stage_and_caption_steps_on(qapp, tmp_path):
+    samples = [{"id": "1", "filename": "a.mp3"}]
+    manager = _built_page({"caption_staging_dir": str(tmp_path)}, samples)
+    manager.ace_track_picker.set_tracks(samples)
+    manager.ace_track_picker.select_all()
+    manager.update_ace_actions()
+    assert manager.staging_add_btn.isEnabled()
+    assert manager.caption_selected_btn.isEnabled()
+    assert manager.caption_edit_btn.isEnabled()
+
+
+def test_a_run_in_flight_says_so_and_blocks_the_other_steps(qapp, tmp_path):
+    samples = [{"id": "1", "filename": "a.mp3"}]
+    manager = _built_page({"caption_staging_dir": str(tmp_path)}, samples)
+    manager.ace_track_picker.set_tracks(samples)
+    manager.ace_track_picker.select_all()
+    manager._caption_busy = True
+    manager.update_ace_actions()
+    assert not manager.caption_selected_btn.isEnabled()
+    assert not manager.staging_add_btn.isEnabled()
+    assert not manager.caption_missing_btn.isEnabled()
+    assert manager.caption_selected_btn.text() == "⏳ Captioning…"
+    assert "in flight" in manager.caption_selected_btn.toolTip()
+
+
+def test_the_review_chip_counts_what_is_waiting(qapp, tmp_path):
+    """State ON the control: the count is what makes "anything to review?"
+    answerable without clicking anything."""
+    samples = [{"id": "1", "filename": "a.mp3", "caption": "",
+                "caption_ai_raw": "A brand new caption."}]
+    manager = _built_page({"caption_staging_dir": str(tmp_path)}, samples)
+    manager._caption_scope_ids = ["1"]
+    manager.update_ace_actions()
+    assert "Review · 1" in manager.caption_diff_btn.text()
+    assert manager.caption_diff_btn.isEnabled()
+    # That same track has no caption, so re-caption is live too.
+    assert "Re-caption · 1" in manager.caption_recaption_bad_btn.text()
+

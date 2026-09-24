@@ -7,7 +7,17 @@ then diff them against the captions already in the dataset. Those controls used
 to be scattered through the shared 🎤 Caption tab, where they competed for space
 with four other backends (Gemini, DeepSeek, custom endpoint, MOSS).
 
-Follows the ui/caption_tab.py / ui/settings_tab.py pattern: one function,
+One STRIP, in the order the steps happen
+----------------------------------------
+Tick tracks -> Stage -> Caption on Kaggle -> Review the diff. Every action sits on
+ONE row in that order, because the page used to be five groups stacked by KIND of
+thing (credentials, folders, prompt, staging, run) with the track selector at the
+BOTTOM and "add the ticked tracks" ABOVE it — so it asked the user to tick below
+and stage above, and scattered four status labels across the page.
+
+Only the next action is live at a time and a disabled one says WHY in its tooltip
+(``DatasetManager.update_ace_actions``); everything set-once is collapsed into
+⚙ Settings, so the strip is what the page looks like.
 ``build_ace_step_tab(manager, parent)``, which builds widgets directly onto
 ``manager`` and stores them as ``manager.<name>``, so DatasetManager methods
 (save_pipeline_defaults, start_ai_captioning, ...) keep working by name.
@@ -17,6 +27,7 @@ The three settings that make the run reproducible are here and nowhere else:
   * ``caption_staging_dir``     — the local folder that IS the uploaded dataset;
   * ``caption_output_dir``      — the local folder the captions come back to.
 """
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -58,6 +69,11 @@ def _folder_row(edit, button, label):
     return row
 
 
+def _head(text):
+    """A small bold caption inside ⚙ Settings, in place of a nested group box."""
+    return QLabel(f"<b>{text}</b>")
+
+
 def build_ace_step_tab(manager, parent):
     outer = QVBoxLayout(parent)
     outer.setContentsMargins(0, 0, 0, 0)
@@ -74,24 +90,57 @@ def build_ace_step_tab(manager, parent):
     layout.setSpacing(10)
     scroll.setWidget(inner)
 
-    banner = QLabel(
-        "ACE-Step captioner (Qwen2.5-Omni) on a free Kaggle GPU. The selected "
-        "tracks are converted to MP3 in <b>your staging folder</b>, uploaded as a "
-        "private Kaggle dataset, captioned, and the captions are downloaded to "
-        "<b>your output folder</b> — where you then diff them against the "
-        "captions already in the dataset and choose what to keep. "
-        "Uses the cached weights dataset when one is set; credentials are handled "
-        "in the row below."
+    hint = QLabel(
+        "Tick tracks → <b>Stage</b> → <b>Caption</b> on a free Kaggle GPU → "
+        "<b>Review</b> the diff and choose what to keep. Folders, dataset, prompt "
+        "and limits live in ⚙ Settings at the bottom."
     )
-    banner.setStyleSheet("color: #999;")
-    banner.setWordWrap(True)
-    layout.addWidget(banner)
+    hint.setStyleSheet("color: #999;")
+    hint.setWordWrap(True)
+    layout.addWidget(hint)
+
+    # ------------------------------------------------------------------
+    # THE STEP STRIP — one row, left to right, in the order the steps happen.
+    # The widgets are ADDED to it further down, once they all exist, so the order
+    # on the strip is the WORKFLOW order and not the creation order of this file.
+    # It scrolls sideways instead of wrapping: the point is that the sequence is
+    # visible as ONE line at any window width.
+    # ------------------------------------------------------------------
+    manager.ace_strip = QWidget()
+    strip = QHBoxLayout(manager.ace_strip)
+    strip.setContentsMargins(0, 0, 0, 0)
+    strip.setSpacing(6)
+
+    strip_scroll = QScrollArea()
+    strip_scroll.setWidgetResizable(True)
+    strip_scroll.setFrameShape(QScrollArea.NoFrame)
+    strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    strip_scroll.setWidget(manager.ace_strip)
+    strip_scroll.setMaximumHeight(64)
+    layout.addWidget(strip_scroll)
+
+    # THE one status line: what the run is doing right now. It used to be four
+    # labels in four places (credentials, staging count, tick count, run).
+    manager.ace_status_label = QLabel("Not run yet.")
+    manager.ace_status_label.setStyleSheet("color: #999;")
+    manager.ace_status_label.setWordWrap(True)
+    layout.addWidget(manager.ace_status_label)
+
+    # Everything set-once, COLLAPSED, so the strip is what the page is. Created
+    # here and added to `layout` after the staging group — a widget's position
+    # follows the addWidget call, not the order it was constructed in.
+    settings_grp = QGroupBox("⚙ Settings — folders · dataset · prompt · limits")
+    settings_grp.setCheckable(True)
+    settings_grp.setChecked(False)
+    settings_layout = QVBoxLayout(settings_grp)
 
     # ------------------------------------------------------------------
     # Kaggle credentials (stored, or session-only, or not set yet)
     # ------------------------------------------------------------------
-    cred_grp = QGroupBox("Kaggle Credentials")
-    c_layout = QVBoxLayout(cred_grp)
+    settings_layout.addWidget(_head("Kaggle credentials"))
+    c_layout = QVBoxLayout()
+    settings_layout.addLayout(c_layout)
 
     manager.ace_cred_status = QLabel("Kaggle credentials: checking…")
     manager.ace_cred_status.setWordWrap(True)
@@ -106,7 +155,7 @@ def build_ace_step_tab(manager, parent):
     c_layout.addWidget(manager.ace_cred_status)
 
     c_row = QHBoxLayout()
-    manager.ace_cred_test_btn = QPushButton("🔌 Test connection")
+    manager.ace_cred_test_btn = QPushButton("🔌 Kaggle")
     manager.ace_cred_test_btn.setToolTip(
         "Ask Kaggle whether it accepts the credentials right now.\n\n"
         "This makes one real API call, so it fails for the same reasons a run "
@@ -130,18 +179,20 @@ def build_ace_step_tab(manager, parent):
         "Forget the once-per-backend decision about missing credentials, so the "
         "next caption run asks again instead of reusing the remembered fallback."
     )
-    for _btn in (manager.ace_cred_test_btn, manager.ace_cred_setup_btn,
-                 manager.ace_cred_forget_btn, manager.ace_cred_reset_btn):
+    for _btn in (manager.ace_cred_setup_btn, manager.ace_cred_forget_btn,
+                 manager.ace_cred_reset_btn):
         c_row.addWidget(_btn)
     c_row.addStretch()
     c_layout.addLayout(c_row)
-    layout.addWidget(cred_grp)
+    # manager.ace_cred_test_btn is deliberately NOT here: it is the first chip on
+    # the strip, because "is Kaggle reachable?" is step zero of every run.
 
     # ------------------------------------------------------------------
     # Kaggle run (folders + dataset identity)
     # ------------------------------------------------------------------
-    kaggle_grp = QGroupBox("Kaggle Run — folders & dataset")
-    k_form = QFormLayout(kaggle_grp)
+    settings_layout.addWidget(_head("Kaggle run — folders &amp; dataset"))
+    k_form = QFormLayout()
+    settings_layout.addLayout(k_form)
 
     manager.caption_staging_edit = QLineEdit(
         (manager.config.get("caption_staging_dir") or "").strip() or default_staging_dir()
@@ -228,13 +279,13 @@ def build_ace_step_tab(manager, parent):
         "MP3 bitrate for the staged copies (used only when conversion is on)."
     )
     k_form.addRow("MP3 bitrate:", manager.caption_bitrate_combo)
-    layout.addWidget(kaggle_grp)
 
     # ------------------------------------------------------------------
     # Prompt add-on + limits
     # ------------------------------------------------------------------
-    prompt_grp = QGroupBox("Caption Prompt — add your own instructions")
-    p_form = QFormLayout(prompt_grp)
+    settings_layout.addWidget(_head("Caption prompt &amp; limits"))
+    p_form = QFormLayout()
+    settings_layout.addLayout(p_form)
 
     manager.caption_addendum_edit = QTextEdit()
     manager.caption_addendum_edit.setPlainText(
@@ -282,20 +333,18 @@ def build_ace_step_tab(manager, parent):
         "T4s; raise it only if the runs have memory headroom."
     )
     p_form.addRow("Batch size:", manager.batch_size_spin)
-    layout.addWidget(prompt_grp)
 
     # ------------------------------------------------------------------
-    # What is actually in the uploaded dataset (add / remove songs)
+    # Staging: what the next run uploads (the folder's CONTENTS)
     # ------------------------------------------------------------------
-    staging_grp = QGroupBox("Songs uploaded to Kaggle")
+    staging_grp = QGroupBox("Staged files — this folder IS the Kaggle dataset")
     s_layout = QVBoxLayout(staging_grp)
 
     s_hint = QLabel(
-        "The staging folder's contents ARE the Kaggle dataset. <b>Add</b> copies "
-        "the ticked tracks of this dataset into it (converting them as the option "
-        "above says); <b>Remove</b> deletes the ticked files. The next run uploads "
-        "the result as a new version of the dataset, so the dataset keeps its "
-        "identity. Removing a song here does not touch the dataset on disk."
+        "<b>➕ Stage</b> (on the strip) copies the ticked tracks into this folder; "
+        "<b>Remove</b> deletes the ticked files. The next run uploads the result as "
+        "a new version of the dataset, so its identity survives. Removing a song "
+        "here never touches the dataset on disk."
     )
     s_hint.setStyleSheet("color: #999;")
     s_hint.setWordWrap(True)
@@ -306,24 +355,29 @@ def build_ace_step_tab(manager, parent):
     manager.staging_list.setMaximumHeight(150)
     manager.staging_list.setToolTip(
         "Files currently staged for upload. Everything listed here is uploaded and "
-        "captioned on the next run."
+        "captioned on the next run.\n\n"
+        "Files that CANNOT be uploaded (0-byte corpses from an interrupted "
+        "transcode, .part scratch, our own metadata file) are deliberately NOT "
+        "listed — the line under this list names them, and 🧹 Clean deletes them."
     )
     s_layout.addWidget(manager.staging_list)
 
     s_row = QHBoxLayout()
-    manager.staging_add_btn = QPushButton("➕ Add ticked tracks")
-    manager.staging_add_btn.setToolTip(
-        "Copy (or transcode) the tracks ticked in the Tracks dropdown above into "
-        "the staging folder — that folder is what gets uploaded to Kaggle."
-    )
     manager.staging_remove_btn = QPushButton("➖ Remove ticked files")
     manager.staging_remove_btn.setToolTip(
         "Delete the ticked files from the staging folder — this is how a song is "
         "removed from the uploaded dataset."
     )
+    manager.staging_clean_btn = QPushButton("🧹 Clean unusable")
+    manager.staging_clean_btn.setToolTip(
+        "Delete the files the upload would not take anyway: 0-byte files left by an "
+        "interrupted transcode, and .part scratch files. They are invisible in the "
+        "list above (it shows only what uploads), which is exactly why the folder "
+        "and the list could silently disagree before."
+    )
     manager.staging_refresh_btn = QPushButton("Refresh")
     manager.staging_refresh_btn.setToolTip("Re-read the staging folder from disk.")
-    for _btn in (manager.staging_add_btn, manager.staging_remove_btn,
+    for _btn in (manager.staging_remove_btn, manager.staging_clean_btn,
                  manager.staging_refresh_btn):
         s_row.addWidget(_btn)
     s_row.addStretch()
@@ -335,16 +389,14 @@ def build_ace_step_tab(manager, parent):
     layout.addWidget(staging_grp)
 
     # ------------------------------------------------------------------
-    # Run
+    # The step widgets. Each is created here with its own tooltip and ADDED to
+    # the strip at the end of this function, in workflow order — the strip is one
+    # line, so its placement calls have to be in one place.
     # ------------------------------------------------------------------
-    run_grp = QGroupBox("Run")
-    r_layout = QVBoxLayout(run_grp)
-
     # THE track selector for this page. It is the ONLY way to choose which tracks
     # this page acts on: sending the user to the Dataset Studio table to set a ROW
     # selection — for work that happens here — was the wrong UI, and row selection
     # is not "a place to add tracks" in any case.
-    pick_row = QHBoxLayout()
     manager.ace_track_picker = TrackPickerButton()
     manager.ace_track_picker.setToolTip(
         "Tick the tracks this page acts on. Staging, captioning, re-captioning and "
@@ -353,14 +405,11 @@ def build_ace_step_tab(manager, parent):
         "Ticks are keyed by filename, so they survive table refreshes, dataset "
         "reloads and re-ordering."
     )
-    pick_row.addWidget(manager.ace_track_picker, 1)
-    r_layout.addLayout(pick_row)
-
     manager.ace_tick_status = QLabel("")
     manager.ace_tick_status.setStyleSheet("color: #999;")
     manager.ace_tick_status.setWordWrap(True)
-    r_layout.addWidget(manager.ace_tick_status)
 
+    # A review POLICY rather than a step, so it belongs in Settings.
     manager.caption_batch_review_check = QCheckBox(
         "Review the whole run in one diff table (recommended)"
     )
@@ -372,64 +421,72 @@ def build_ace_step_tab(manager, parent):
         "them against what the tracks already have, so you choose once.\n\n"
         "OFF: the old behaviour — a dialog per track as the results arrive."
     )
-    r_layout.addWidget(manager.caption_batch_review_check)
+    settings_layout.addWidget(manager.caption_batch_review_check)
 
-    run_row = QHBoxLayout()
-    manager.caption_selected_btn = QPushButton("🚀 Caption Ticked")
+    manager.staging_add_btn = QPushButton("➕ Stage")
+    manager.staging_add_btn.setToolTip(
+        "Copy (or transcode) the tracks ticked in “Tracks ▾” into the staging "
+        "folder — that folder is what gets uploaded to Kaggle."
+    )
+    manager.caption_selected_btn = QPushButton("🚀 Caption")
     manager.caption_selected_btn.setToolTip(
         "Caption the tracks ticked in the Tracks dropdown above."
     )
-    manager.caption_missing_btn = QPushButton("Caption Missing")
+    manager.caption_missing_btn = QPushButton("Caption missing")
     manager.caption_missing_btn.setToolTip(
         "Caption every track that has no caption yet — the whole dataset, not just "
         "the ticked ones."
     )
-    manager.caption_all_btn = QPushButton("🔁 Caption All")
+    manager.caption_all_btn = QPushButton("🔁 Caption all")
     manager.caption_all_btn.setToolTip(
         "Re-run the captioner over every track (asks for confirmation). An "
         "approved caption is never destroyed: the previous text is kept in "
         "caption_before_kaggle when you accept a replacement."
     )
-    manager.caption_edit_btn = QPushButton("📝 Edit Caption…")
+    manager.caption_edit_btn = QPushButton("📝 Edit")
     manager.caption_edit_btn.setToolTip(
         "Edit the caption / lyrics of the ticked track. With several ticked, the "
         "diff table opens instead so you can decide each one."
     )
-    for _btn in (manager.caption_selected_btn, manager.caption_missing_btn,
-                 manager.caption_all_btn, manager.caption_edit_btn):
-        run_row.addWidget(_btn)
-    run_row.addStretch()
-    r_layout.addLayout(run_row)
-
-    redo_row = QHBoxLayout()
-    manager.caption_recaption_bad_btn = QPushButton("♻ Re-caption bad / failed")
+    manager.caption_recaption_bad_btn = QPushButton("♻ Re-caption")
     manager.caption_recaption_bad_btn.setToolTip(
         "Caption only the tracks that need it again: blank captions, tracks the "
         "kernel reported an error for, and tracks that got no result at all in "
         "the last run."
     )
-    manager.caption_diff_btn = QPushButton("🔍 Review last run (diff)…")
+    manager.caption_diff_btn = QPushButton("🔍 Review")
     manager.caption_diff_btn.setToolTip(
         "Open the diff table again: existing caption vs the last proposal, per "
         "track, with a decision for each."
     )
-    manager.caption_import_btn = QPushButton("📥 Import captions_out.json…")
+    manager.caption_import_btn = QPushButton("📥 Import")
     manager.caption_import_btn.setToolTip(
         "Load a captions_out.json you downloaded (or produced in a Kaggle "
         "notebook by hand) and diff it against the dataset without re-running "
         "the kernel."
     )
-    for _btn in (manager.caption_recaption_bad_btn, manager.caption_diff_btn,
-                 manager.caption_import_btn):
-        redo_row.addWidget(_btn)
-    redo_row.addStretch()
-    r_layout.addLayout(redo_row)
+    # ------------------------------------------------------------------
+    # THE STRIP, in workflow order. Adding the widgets HERE, rather than at each
+    # creation site above, is what makes the order below the order of the WORKFLOW
+    # instead of the order this file happens to be written in.
+    # ------------------------------------------------------------------
+    for _widget in (
+        manager.ace_cred_test_btn,
+        manager.ace_track_picker,
+        manager.staging_add_btn,
+        manager.caption_selected_btn,
+        manager.caption_missing_btn,
+        manager.caption_all_btn,
+        manager.caption_edit_btn,
+        manager.caption_diff_btn,
+        manager.caption_recaption_bad_btn,
+        manager.caption_import_btn,
+    ):
+        strip.addWidget(_widget)
+    # The tick status is the only stretchable item: it absorbs the slack and
+    # wraps, so the action buttons keep their natural width and nothing clips.
+    strip.addWidget(manager.ace_tick_status, 1)
 
-    manager.ace_status_label = QLabel("Not run yet.")
-    manager.ace_status_label.setStyleSheet("color: #999;")
-    manager.ace_status_label.setWordWrap(True)
-    r_layout.addWidget(manager.ace_status_label)
-    layout.addWidget(run_grp)
-
+    layout.addWidget(settings_grp)
     layout.addStretch()
     return inner

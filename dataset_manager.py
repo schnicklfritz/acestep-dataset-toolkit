@@ -177,6 +177,10 @@ class DatasetManager(QMainWindow):
         # The backend the CURRENT run is using, so a caption produced without
         # hearing the audio can be stamped as a placeholder.
         self._active_caption_backend = ""
+        # True while a caption worker is in flight. This drives the step buttons'
+        # enabled state (see update_ace_actions) and `active_worker` cannot: it is
+        # set on every run and never cleared, so it says nothing about NOW.
+        self._caption_busy = False
 
         self.init_ui()
         self.apply_custom_theme()
@@ -1333,6 +1337,7 @@ class DatasetManager(QMainWindow):
         self.caption_output_browse_btn.clicked.connect(self.browse_caption_output)
         self.staging_add_btn.clicked.connect(self.staging_add_ticked)
         self.staging_remove_btn.clicked.connect(self.staging_remove_ticked)
+        self.staging_clean_btn.clicked.connect(self.staging_clean_unusable)
         self.staging_refresh_btn.clicked.connect(self.refresh_staging_list)
 
         # The page's ONLY track selector: ticks drive staging, captioning and
@@ -1367,6 +1372,10 @@ class DatasetManager(QMainWindow):
             getattr(widget, signal).connect(self.save_pipeline_defaults)
 
         self.refresh_staging_list()
+        # Decide the initial enabled state of every step: with nothing ticked, the
+        # staging and caption steps start disabled, with the reason in their
+        # tooltips instead of a dialog after the click.
+        self.update_ace_actions()
 
     # -----------------------------------------------------------------------
     # MOSS-Audio (open model) on Kaggle
@@ -1609,6 +1618,14 @@ class DatasetManager(QMainWindow):
 
     def update_ace_tick_status(self):
         """Always say how many tracks are ticked: an empty selection must be visible."""
+        # Ticks are an INPUT to staging/captioning/editing, so every refresh of this
+        # label also re-decides which step buttons are live. Guarded by NAME: a
+        # partial manager (the tests' stubs, a future extraction) may not carry the
+        # updater, and reaching for it unguarded is how AttributeError reached the
+        # user on a click.
+        updater = getattr(self, "update_ace_actions", None)
+        if updater is not None:
+            updater()
         label = getattr(self, "ace_tick_status", None)
         if label is None:
             return
@@ -1705,28 +1722,37 @@ class DatasetManager(QMainWindow):
 
     # -- Kaggle credentials -------------------------------------------------
     def refresh_kaggle_cred_status(self):
-        """Show where the Kaggle key actually lives, in the ACE-Step page."""
+        """Show where the Kaggle key actually lives, in the ACE-Step page.
+
+        Two places, on purpose: the full sentence in ⚙ Settings, and the SHORT
+        state on the strip chip, so "which key is this?" is answerable without
+        opening anything.
+        """
         from modules.secrets_manager import get_secret
 
-        label = getattr(self, "ace_cred_status", None)
-        if label is None:
-            return
         user = (self.config.get("kaggle_user") or "").strip()
         key = (self.config.get("kaggle_key") or "").strip()
         if not user or not key:
-            label.setText(
-                "Kaggle credentials: <b>not set</b> — a run will ask for them."
-            )
+            short = "✗ not set"
+            long = "Kaggle credentials: <b>not set</b> — a run will ask for them."
         elif get_secret("kaggle_key"):
-            label.setText(
+            short = "✓"
+            long = (
                 f"Kaggle credentials: <b>stored</b> for <b>{user}</b> "
                 "(OS keyring / encrypted store)."
             )
         else:
-            label.setText(
+            short = "session"
+            long = (
                 f"Kaggle credentials: <b>this session only</b> for <b>{user}</b> "
                 "— nothing was written to disk."
             )
+        label = getattr(self, "ace_cred_status", None)
+        if label is not None:
+            label.setText(long)
+        chip = getattr(self, "ace_cred_test_btn", None)
+        if chip is not None:
+            chip.setText(f"🔌 Kaggle {short}")
 
         # The last PROBE verdict, when one has been run. Where the key lives and
         # whether Kaggle accepts it are different questions, and only the second
@@ -2066,28 +2092,36 @@ class DatasetManager(QMainWindow):
 
     # -- staging folder contents (add / remove songs) -----------------------
     def refresh_staging_list(self):
-        """Show what the next run would upload, read straight from disk."""
+        """Show what the next run would upload, and what it would leave behind."""
         from modules import caption_kaggle_run as ckr
 
         folder = ckr.staging_dir(self.config)
-        files = ckr.staged_files(folder)
+        report = ckr.staging_report(folder)
         self.staging_list.clear()
-        for path in files:
+        for path in report["usable"]:
             item = QListWidgetItem(os.path.basename(path))
             try:
                 item.setToolTip(f"{path}\n{os.path.getsize(path) / 1e6:.1f} MB")
             except OSError:
                 item.setToolTip(path)
             self.staging_list.addItem(item)
-        if files:
-            self.staging_count_label.setText(
-                f"{len(files)} file(s) staged in {folder} — all of them are "
-                "uploaded on the next run."
-            )
+        usable = len(report["usable"])
+        ignored = report["ignored"]
+        if usable:
+            text = (f"{usable} file(s) staged in {folder} — all of them are "
+                    "uploaded on the next run.")
         else:
-            self.staging_count_label.setText(
-                f"Nothing staged yet in {folder}. Use “➕ Add selected tracks”."
-            )
+            text = f"Nothing staged yet in {folder}. Use “➕ Stage”."
+        if ignored:
+            # The list filters unusable files OUT, so without this line the folder
+            # and the list disagree silently — which is how 32 zero-byte files sat
+            # in this folder while the page said "1 song".
+            text += (f" ⚠ {len(ignored)} unusable file(s) ignored: "
+                     + ", ".join(f"{name} ({why})" for name, why in ignored[:3]))
+            if len(ignored) > 3:
+                text += f" …+{len(ignored) - 3} more"
+        self.staging_count_label.setText(text)
+        self.update_ace_actions()
 
     def staging_add_ticked(self):
         """Copy (or transcode) the TICKED dataset tracks into the staging folder."""
@@ -5393,12 +5427,117 @@ class DatasetManager(QMainWindow):
 
         Toggling by NAME means the state applies to whichever triggers actually
         exist, so a future extraction or rename cannot reintroduce the crash.
+        That is why this now only RECORDS the state: ``update_ace_actions()``
+        resolves every action by name and decides what is live.
         """
-        for name in ("caption_selected_btn", "caption_missing_btn",
-                     "caption_all_btn", "run_ai_btn"):
-            btn = getattr(self, name, None)
-            if btn is not None:
-                btn.setEnabled(not busy)
+        self._caption_busy = bool(busy)
+        self.update_ace_actions()
+
+    def _set_ace_action(self, button, enabled, reason=""):
+        """Enable/disable one step button, saying WHY when it is disabled.
+
+        A greyed-out control with no explanation makes the user hunt for the rule
+        — which is the dialog this replaces. The pristine tooltip is remembered
+        the first time it is needed, so the reason can be added and removed
+        without the text drifting.
+        """
+        if button is None:
+            return
+        tip = getattr(button, "_ace_pristine_tip", None)
+        if tip is None:
+            tip = button.toolTip()
+            button._ace_pristine_tip = tip
+        button.setEnabled(bool(enabled))
+        button.setToolTip(tip if enabled else f"{reason}\n\n{tip}")
+
+    def update_ace_actions(self):
+        """One place decides which steps are live, and why the rest are not.
+
+        Every desktop app with a linear flow does this — GitHub Desktop greys out
+        Push until there is something to push, VS Code greys out Sync — and the
+        rule it encodes is that the next action is ENABLED while anything
+        downstream of a missing input is DISABLED WITH A REASON. The alternative,
+        which this page used to be, is a row of always-live buttons each popping a
+        dialog to explain itself.
+
+        Called from everything that can change one of the inputs: the tick list,
+        the dataset refresh, the staging list, and the start/end/error of a run.
+        """
+        from modules import caption_kaggle_run as ckr
+
+        busy = getattr(self, "_caption_busy", False)
+        samples = self.dataset.get("samples", [])
+        ticked = bool(self._ticked_samples())
+        report = ckr.staging_report(ckr.staging_dir(self.config))
+        junk = [name for name, why in report["ignored"] if why in ckr.JUNK_REASONS]
+        rows = self._proposal_rows() if self._caption_scope_ids else []
+        pending = sum(1 for row in rows if row["status"] != ckr.STATUS_SAME)
+        bad = len(self._bad_caption_samples())
+
+        needs_ticks = ("Tick tracks in “Tracks ▾” first." if not ticked
+                       else "A caption run is already in flight.")
+        for name in ("staging_add_btn", "caption_selected_btn", "caption_edit_btn"):
+            self._set_ace_action(
+                getattr(self, name, None), ticked and not busy, needs_ticks,
+            )
+        for name in ("caption_missing_btn", "caption_all_btn"):
+            self._set_ace_action(
+                getattr(self, name, None), bool(samples) and not busy,
+                "Add songs to the dataset first (🎛 Dataset Studio)."
+                if not samples else "A caption run is already in flight.",
+            )
+        self._set_ace_action(
+            getattr(self, "caption_diff_btn", None), pending > 0,
+            "Nothing to review yet — run the captioner, or load a downloaded "
+            "captions_out.json with 📥 Import.",
+        )
+        self._set_ace_action(
+            getattr(self, "caption_recaption_bad_btn", None), bad > 0 and not busy,
+            "Nothing needs re-captioning: every track has a caption and the last "
+            "run reported no errors." if not bad
+            else "A caption run is already in flight.",
+        )
+        self._set_ace_action(
+            getattr(self, "staging_clean_btn", None), bool(junk) and not busy,
+            "No junk files in the staging folder." if not junk
+            else "A caption run is already in flight.",
+        )
+
+        # State ON the control, not in a floating label: the count is what makes
+        # "is there anything to review?" answerable without clicking anything.
+        review_btn = getattr(self, "caption_diff_btn", None)
+        if review_btn is not None:
+            review_btn.setText(f"🔍 Review · {pending}" if pending else "🔍 Review")
+        redo_btn = getattr(self, "caption_recaption_bad_btn", None)
+        if redo_btn is not None:
+            redo_btn.setText(f"♻ Re-caption · {bad}" if bad else "♻ Re-caption")
+        run_btn = getattr(self, "caption_selected_btn", None)
+        if run_btn is not None:
+            run_btn.setText("⏳ Captioning…" if busy else "🚀 Caption")
+
+    def staging_clean_unusable(self):
+        """Delete the provably-junk files from the staging folder.
+
+        These are the files the upload would NOT take: 0-byte corpses from an
+        interrupted transcode, ``.part`` scratch, and our own metadata file. They
+        are invisible in the list — which filters them out — which is exactly why
+        the folder and the list could silently disagree.
+        """
+        from modules import caption_kaggle_run as ckr
+
+        folder = ckr.staging_dir(self.config)
+        junk = [(name, why) for name, why in ckr.unusable_staged(folder)
+                if why in ckr.JUNK_REASONS]
+        if not junk:
+            self.status_label.setText("No junk files in the staging folder.")
+            return
+        removed = ckr.clean_unusable_staged(folder)
+        self.refresh_staging_list()
+        self.status_label.setText(
+            f"Removed {removed} unusable file(s) from the staging folder: "
+            + ", ".join(f"{name} ({why})" for name, why in junk[:4])
+            + ("…" if len(junk) > 4 else "")
+        )
 
     def start_ai_captioning(self, checked=False, scope=None):
         """Run the captioner.
@@ -5544,6 +5683,8 @@ class DatasetManager(QMainWindow):
                     + ". Nothing has been changed yet — apply the diff to decide."
                 )
                 self.show_caption_diff(rows)
+        # The proposals now exist, so 🔍 Review must come alive and show its count.
+        self.update_ace_actions()
 
     # -----------------------------------------------------------------------
     # Lyrics transcription (WhisperX, optional)
