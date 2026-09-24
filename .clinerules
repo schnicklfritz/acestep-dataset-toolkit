@@ -21,7 +21,11 @@
   breakage. Do not re-read entire caller files.
 - Prefer `git diff` (base vs working tree) over whole-file reads to learn what
   changed. Never `cat` a 5000-line file to find a delta.
-- Once changes are committed to git, empty `.changed_markers` (loop has absorbed).
+- Once changes are committed to git, REGENERATE `.changed_markers`
+  (`scripts/gen_changed_markers.sh`) so the next session starts from a file that
+  matches HEAD. Never "empty" it: it is a TRACKED file, so an emptied index is
+  just a permanently dirty tree. Never hand-edit it either — the hand-curated
+  ledger lives in `.agent_notes.md`, which no script ever writes.
 
 # ------------------------------------------------------------
 # INDEX VALIDITY — a stale index is worse than no index
@@ -30,33 +34,63 @@
 # `git status`, an agent scopes its work off stale information and never finds
 # out — the same silent-wrong-answer failure the UNKNOWN rule guards against,
 # but applied to the index itself rather than to an anchor.
-- BEFORE scoping any task, compare `.changed_markers` against `git status`:
-    * every dirty/untracked file in `git status` must be listed in the index, and
-    * every file the index lists must actually be dirty.
+- BEFORE scoping any task, validate the index in this order:
+    1. `grep '^# HEAD:' .changed_markers` must equal `git rev-parse HEAD`. The
+       file also carries `# generated:` and `# dirty: <n> path(s)`.
+    2. every dirty/untracked file in `git status` must be listed in the index,
+       and every file the index lists must actually be dirty.
+- SANCTIONED EXEMPTION: `.changed_markers` is excluded from its own diff by
+  design (it is tracked, and the generator rewrites it every run), and
+  `.changed_markers.*` is gitignored scratch. Their absence from the index is
+  NOT a staleness signal. Everything else must be listed.
 - On ANY disagreement: STOP. Do not scope, do not edit, do not "work around it".
-  Regenerate the index first using the recipe below. Then re-read it and continue.
+  Regenerate the index first (`scripts/gen_changed_markers.sh`). Then re-read it
+  and continue.
 - NEVER invent a scope. If the index is empty while `git status` is not, that is
   not "nothing changed" — it is a broken index.
 - After a successful commit, regenerate the index (not just empty it) so the
   next session starts from a file that matches HEAD.
+- `.agent_notes.md` is the other half of the picture and does NOT go stale with
+  the diff: unresolved causes, unverified claims, machine-local damage, the
+  baseline sweep. Read it together with the index. It is HAND-OWNED — never
+  regenerate, reflow or "tidy" it, and never move its items into the generated
+  file, where the next run would delete them.
 
 # INDEX GENERATION RECIPE (verified)
 # ---------------------------------------------------------------------------
-#   {
-#     echo "# AUTO-GENERATED — do not edit"
-#     git add -A 2>/dev/null
-#     git diff -U3 -p HEAD -- '*.py' '*.md' '*.json' '*.txt' '*.toml' '*.ini' \
-#                                 '*.cfg' '*.yaml' '*.yml' '*.sh' '*.html' '*.css'
-#   } > .changed_markers
+#   scripts/gen_changed_markers.sh
 #
-# Why the pathspec list: `-diff` in .gitattributes marks a file as binary but
-# git STILL emits a one-line "Binary files ... differ" header for it. A single
-# added .flac therefore injects noise for every binary in the working tree, and
-# that is exactly how this index was corrupted once before (69KB of binary
-# lines). Restricting the diff to text pathspecs removes the header entirely and
-# shrinks the index. Verified: a changed .flac produces zero output this way,
-# and one "Binary files ... differ" line without it.
-# When adding a new text format, add its extension to this list.
+# That script is the ONLY supported way to build this file. Two properties are
+# load-bearing and were each measured — do not "simplify" them away:
+#
+#   * IT STAGES INTO A SHADOW INDEX (GIT_INDEX_FILE), never the real one. A
+#     bare `git add -A` silently stages the entire working tree, which changes
+#     what a later `git commit` picks up and is how someone commits files they
+#     never intended to. Measured: the real `.git/index` is byte-identical
+#     before and after the script.
+#   * IT USES A TEXT-PATHSPEC ALLOWLIST, NOT A DENYLIST. `-diff` in
+#     .gitattributes marks a file as binary but git STILL emits a one-line
+#     "Binary files ... differ" header for it (re-verified with
+#     `git check-attr`), and a denylist can never enumerate every binary
+#     extension this toolkit produces. A single added .flac therefore injects
+#     noise for every binary in the working tree, and that is exactly how this
+#     index was corrupted once before (69KB of binary lines). Restricting the
+#     diff to text pathspecs removes the header entirely and shrinks the index.
+#     Measured on one identical tree: allowlist 95 bytes / 1 file / 0 headers
+#     vs denylist 317 bytes / 3 files / 2 headers.
+#   * THE TRAP IN AN ALLOWLIST: it is BLIND to files with NO extension. That
+#     included `.clinerules`, `.gitattributes` and `.gitignore` themselves, so
+#     editing the rules file produced an index with no sign of it. It was found
+#     by validating the index against `git status` — which is exactly why that
+#     rule below exists. `':(top).*'` in TEXTS closes it (matched 6 tracked
+#     paths, none binary). An extensionless text file elsewhere must be named
+#     in TEXTS explicitly.
+#
+# The shadow `git add -A` is also what makes not-yet-tracked files visible to
+# `git diff HEAD`, and what makes git emit real `rename from/to` entries for a
+# rename that is still unstaged — plain `git diff --summary -M` shows only the
+# deletion (measured). When adding a new TEXT format, add its extension to
+# TEXTS in the script, not to a denylist here.
 
 
 # ------------------------------------------------------------
@@ -64,10 +98,20 @@
 # ------------------------------------------------------------
 # A rename commit looks clean. The breakage is in the CALLERS, which did not
 # change and therefore do not appear in any diff.
-- After any rename, before committing:
-      git log --diff-filter=R --summary -1   # did a rename even happen?
-      git grep -n "old_name"                 # who still points at the old name?
+- After any rename, before committing — START WITH THE INDEX YOU ALREADY HAVE,
+  because the generator's shadow index is the only thing that makes a
+  still-unstaged rename visible at all:
+      grep -n -E '^(rename |rename from|rename to|similarity)' .changed_markers
+      git grep -n "old_name"                 # who still points to the old name?
       git grep -n "new_name"                 # did the new name actually land?
+- MEASURED, so this mistake is not repeated: on an unstaged rename,
+  `git diff --summary -M` prints ONLY `delete mode 100644 old_name` — the new
+  name is invisible — and `git status --porcelain -M` reports it as
+  `?? new_name` with no rename pairing. Detection requires the shadow index
+  (`cp .git/index /tmp/x && GIT_INDEX_FILE=/tmp/x git add -A`), which the
+  generator already does for you; the marker file carries the `rename from` /
+  `rename to` lines. Do NOT substitute `git log --diff-filter=R --summary -1`
+  here either: it inspects the LAST COMMIT and cannot see uncommitted work.
 - If rename detection and those greps DISAGREE, stop and ask. Do not reconstruct
   callers from memory — that is how live code gets deleted.
 - An anchor with no `git grep` hits means UNKNOWN, not "gone". Investigate

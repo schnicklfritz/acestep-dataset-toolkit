@@ -56,3 +56,8 @@ lyrics_profiles/
 # Research corpus for the MCP research server: third-party article/review text,
 # gathered locally. Never commit it; regenerate with the tools instead.
 docs/research/
+
+# Scratch file used by scripts/gen_changed_markers.sh while it builds the new
+# index. Normally deleted by its own EXIT trap; this only catches a hard kill,
+# so a stray temp file never becomes accidental commit material.
+.changed_markers.*

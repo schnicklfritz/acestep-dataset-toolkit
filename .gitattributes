@@ -3,7 +3,7 @@
 
 # Mark binary assets so git never attempts a textual diff of them.
 # NOTE: `-diff` alone is NOT sufficient — git still prints a one-line
-# "Binary files ... differ" header for the file. The marker-generation command
+# "Binary files ... differ" header for the file. scripts/gen_changed_markers.sh
 # restricts the diff to text pathspecs (see .clinerules), which removes it
 # entirely. These attributes remain as a second line of defence.
 *.flac -diff
@@ -16,3 +16,24 @@
 *.zip  -diff
 *.png  -diff
 *.jpg  -diff
+
+# Model weights / tensors / training artifacts. `-diff` does NOT stop git from
+# printing a one-line "Binary files ... differ" header (verified with
+# `git check-attr` + a scratch repo), it only marks the file binary. The real
+# protection is the TEXT-PATHSPEC ALLOWLIST in scripts/gen_changed_markers.sh:
+# measured on one identical tree, the allowlist produced 95 bytes / 1 file /
+# 0 binary headers while a denylist produced 317 bytes / 3 files / 2 headers.
+# These entries are the second line of defence, not the first.
+*.safetensors -diff
+*.pt    -diff
+*.ckpt  -diff
+*.onnx  -diff
+*.gguf  -diff
+*.bin   -diff
+*.npz   -diff
+*.npy   -diff
+*.pkl   -diff
+
+# Lock files: `binary` is the built-in macro for `-diff -merge -text`
+# (verified with `git check-attr diff merge text` -> all three `unset`).
+*.lock binary
