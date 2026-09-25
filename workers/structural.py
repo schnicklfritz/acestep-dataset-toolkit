@@ -376,6 +376,10 @@ class StructuralPipelineWorker(QThread):
             .replace("{{SYSTEM_PROMPT}}", json.dumps(system_prompt))
             .replace("{{MAX_NEW_TOKENS}}", str(max_tokens))
             .replace("{{MAX_AUDIO_DURATION}}", str(max_duration))
+            # FALSE on purpose: this pipeline already sliced the audio into
+            # sections, so kernel-side windowing would double-cut them. See
+            # workers/spatial.py for the same reasoning.
+            .replace("{{WHOLE_SONG}}", "False")
             .replace("{{BATCH_SIZE}}", str(max(1, int(self.config.get("caption_batch_size", 1)))))
             .replace("{{CUSTOM_TAG}}", json.dumps(""))
             .replace("{{REPETITION_PENALTY}}", str(rep_penalty))

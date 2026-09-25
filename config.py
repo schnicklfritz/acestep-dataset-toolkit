@@ -88,7 +88,13 @@ DEFAULT_CONFIG = {
     "caption_repetition_penalty": 1.15,   # 1.0 = off
     "caption_no_repeat_ngram": 6,         # tokens; 0 = off
     "caption_max_tokens": 512,
-    "caption_max_audio_duration": 120,   # seconds (0 = whole file)
+    # SECONDS PER PASS over the audio (0 = the whole file in one pass). This is not
+    # the coverage: with caption_whole_song the passes tile the WHOLE track.
+    "caption_max_audio_duration": 120,
+    # Cover the whole track in several passes and merge them into ONE caption.
+    # OFF = one pass over the first caption_max_audio_duration seconds, i.e. most of
+    # every song is never heard. ON costs roughly 2-3x the GPU time per track.
+    "caption_whole_song": True,
     "caption_batch_size": 1,             # chunks per captioner forward pass on the Kaggle GPU
     # caption_prompt_addendum: EXTRA text APPENDED to the user turn (the task
     # prompt). The schema lives in the SYSTEM prompt and cannot be replaced; this

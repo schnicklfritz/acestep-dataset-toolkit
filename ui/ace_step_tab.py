@@ -317,13 +317,33 @@ def build_ace_step_tab(manager, parent):
         0, 3600, int(manager.config.get("caption_max_audio_duration", 120))
     )
     manager.max_dur_spin.setToolTip(
-        "Seconds of each track fed to the captioner — 0 = the WHOLE FILE.\n\n"
-        "This is the only truncation in the pipeline, and it exists for GPU "
-        "memory, not for reporting: two T4s hold ~120 s of audio comfortably, so "
-        "raising it is the first thing to lower if a run starts failing to load. "
-        "The effective value is printed in the kernel log."
+        "SECONDS PER PASS — not how much of the song you get.\n\n"
+        "A pass is one model call, and it is capped by GPU memory: two T4s hold "
+        "~120 s of audio comfortably, so this is the value that works. It is the "
+        "first thing to lower again if runs start failing to load.\n\n"
+        "0 = the whole file in one pass (no cutting at all — which is how a long "
+        "song runs out of memory). The value actually used is printed in the "
+        "kernel log."
     )
-    p_form.addRow("Max audio (sec):", manager.max_dur_spin)
+    p_form.addRow("Pass length (sec):", manager.max_dur_spin)
+
+    manager.caption_whole_song_check = QCheckBox(
+        "Caption the whole song (2+ passes per track)"
+    )
+    manager.caption_whole_song_check.setChecked(
+        bool(manager.config.get("caption_whole_song", True))
+    )
+    manager.caption_whole_song_check.setToolTip(
+        "ON: a song longer than one pass is captioned in several passes that "
+        "together cover the WHOLE track, and their captions are merged into one — "
+        "so the caption can describe how the song develops from beginning to end, "
+        "which the schema demands.\n\n"
+        "OFF: one pass only, so everything after the first “Pass length” seconds "
+        "is never heard.\n\n"
+        "COST: every pass is a separate GPU call, so this is roughly 2-3× the GPU "
+        "time per track, and the run's wait budget grows with it."
+    )
+    p_form.addRow("", manager.caption_whole_song_check)
 
     manager.batch_size_spin = _spin(
         1, 64, int(manager.config.get("caption_batch_size", 1))

@@ -13,9 +13,12 @@ its identity.
 Nothing is truncated on the way out: the full caption is printed for every track
 and every caption is written to the JSON. (An earlier version printed only the
 first 100 characters of each caption, which made a good caption look cut off in
-the log and hid where a bad one started to go wrong.) The only length control is
-``MAX_AUDIO_DURATION`` — seconds of audio fed to the model, 0 = the whole file —
-which is a GPU-memory limit, not a reporting one.
+the log and hid where a bad one started to go wrong.) The length control is ``MAX_AUDIO_DURATION`` — one PASS over the audio, in
+seconds (0 = whole file in a single pass) — which is a GPU-memory limit, not a
+reporting one. With ``WHOLE_SONG`` (the default) a track longer than one pass is
+covered by passes that together span the WHOLE file, and their captions are merged
+into a single one by a text-only pass: the schema asks how the track develops from
+beginning to end, which no single pass can answer.
 
 Placeholders substituted by the app at push time:
   {{AUDIO_DATASET_PATH}}  -> /kaggle/input/<audio-dataset-name>
@@ -24,8 +27,9 @@ Placeholders substituted by the app at push time:
                              as a JSON string literal. Appended to the model's
                              own identity line, never substituted for it.
   {{MAX_NEW_TOKENS}}      -> int (Concise Tags ~64, else ~512)
-  {{MAX_AUDIO_DURATION}}  -> int seconds, 0 = whole file
-  {{BATCH_SIZE}}          -> int
+  {{MAX_AUDIO_DURATION}}  -> int seconds per pass, 0 = whole file in one pass
+  {{WHOLE_SONG}}          -> bool: cover the whole file in several passes
+  {{BATCH_SIZE}}          -> int (single-pass mode only)
   {{CUSTOM_TAG}}          -> trigger tag as a JSON string literal
   {{REPETITION_PENALTY}}  -> float, 1.0 = off
   {{NO_REPEAT_NGRAM}}     -> int, 0 = off
@@ -126,6 +130,10 @@ BATCH_SIZE = {{BATCH_SIZE}}
 CUSTOM_TAG = {{CUSTOM_TAG}}
 REPETITION_PENALTY = {{REPETITION_PENALTY}}
 NO_REPEAT_NGRAM = {{NO_REPEAT_NGRAM}}
+# Caption the WHOLE file: a track longer than one pass is covered by several
+# passes and their captions are merged into one. OFF = a single pass over the
+# first MAX_AUDIO_DURATION seconds, i.e. the rest of the song is discarded.
+WHOLE_SONG = {{WHOLE_SONG}}
 
 # The model's own identity line, kept verbatim (set in stone). The ACE-Step
 # annotation SCHEMA in SYSTEM_PROMPT is APPENDED to it, never substituted for it.
@@ -138,6 +146,7 @@ SUPPORTED_FORMATS = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.wma'}
 
 print("[caption] limits       : max_new_tokens=" + str(MAX_NEW_TOKENS)
       + " max_audio_s=" + str({{MAX_AUDIO_DURATION}})
+      + " whole_song=" + str(WHOLE_SONG)
       + " batch=" + str(BATCH_SIZE)
       + " rep_penalty=" + str(REPETITION_PENALTY)
       + " no_repeat_ngram=" + str(NO_REPEAT_NGRAM), flush=True)
@@ -209,9 +218,16 @@ def _walk_for_audio(base):
     was simply not where the path said it was. Mirrors
     kernels/moss_caption_kernel.py, which credits
     kernels/stem_separation_kernel.py for finding this first.
+
+    Returns ``Path`` objects, NOT strings: every caller below uses the Path API
+    (``batch[0].name`` for the progress line, ``f.name`` as the key written into
+    captions_out.json). The MOSS kernel's twin returns STRINGS because its caller
+    uses ``os.path.basename`` -- copying that function without its caller's
+    contract crashed this kernel once, four minutes into a real run, right after
+    the model had loaded and the mount fallback had correctly found the audio.
     """
     return sorted(
-        os.path.join(root, name)
+        Path(os.path.join(root, name))
         for root, _dirs, names in os.walk(base)
         for name in names
         if os.path.splitext(name)[1].lower() in SUPPORTED_FORMATS
@@ -219,13 +235,18 @@ def _walk_for_audio(base):
 
 
 audio_files = _walk_for_audio(AUDIO_FOLDER)
+searched = AUDIO_FOLDER
 if not audio_files and os.path.isdir("/kaggle/input"):
     audio_files = _walk_for_audio("/kaggle/input")
     if audio_files:
+        searched = "/kaggle/input"
         print(f"[caption] {AUDIO_FOLDER} was empty; found audio elsewhere under "
               "/kaggle/input instead.", flush=True)
 
-print(f"[caption] audio files  : {len(audio_files)} under {AUDIO_FOLDER}", flush=True)
+# Say which folder actually supplied the files. The count line used to claim the
+# expected folder even when the fallback had found them somewhere else, so the log
+# contradicted itself one line apart.
+print(f"[caption] audio files  : {len(audio_files)} (searched {searched})", flush=True)
 if not audio_files:
     # FAIL LOUDLY. A zero-track result surfaced in the app as "no captions came
     # back" instead of "there was no audio to read", which is what sent this
@@ -244,13 +265,59 @@ elif len(audio_files) == 1:
           "mount is wrong.", flush=True)
 
 
-def truncate_audio(audio_path, max_seconds={{MAX_AUDIO_DURATION}}):
+def _duration_seconds(path):
+    """Length of an audio file in seconds (0.0 when it cannot be read)."""
+    try:
+        import soundfile as sf  # noqa: PLC0415
+
+        info = sf.info(str(path))
+        return float(info.frames) / float(info.samplerate or 1)
+    except Exception:                                        # noqa: BLE001
+        return 0.0
+
+
+def _windows_for(path, pass_sec):
+    """``[(offset, length), ...]`` covering the WHOLE file, or ``[(0, 0)]``.
+
+    ``(0, 0)`` means "one pass over the whole file", which is what this kernel
+    always did. A pass is capped by GPU memory (~120 s on two T4s), so a full song
+    is captioned in several passes whose captions are then merged -- the same shape
+    ``kernels/moss_caption_kernel.py`` uses (``for offset, window in windows``) and
+    for the same reason: a caption has to describe the whole track, not its first
+    two minutes. The final window is clamped to the real end, and a sub-second tail
+    is folded into the window before it rather than becoming its own pass.
+    """
+    if not pass_sec or pass_sec <= 0:
+        return [(0, 0)]
+    total = _duration_seconds(path)
+    if not total or total <= pass_sec:
+        return [(0, 0)]
+    spans, offset = [], 0.0
+    while offset < total - 0.5:
+        spans.append((offset, min(float(pass_sec), total - offset)))
+        offset += pass_sec
+    return spans
+
+
+def truncate_audio(audio_path, max_seconds={{MAX_AUDIO_DURATION}}, offset=0.0):
+    """One PASS of ``audio_path``: ``max_seconds`` starting at ``offset``.
+
+    ``0`` / ``None`` for ``max_seconds`` means the whole file from ``offset``, and
+    when there is nothing to cut the ORIGINAL path is returned so the common case
+    copies no audio at all. Otherwise the pass is written to a fresh temp file,
+    because the processor reads the path it is handed.
+    """
     if not max_seconds or max_seconds <= 0:
-        return audio_path
+        if not offset:
+            return audio_path
+        max_seconds = None
     import librosa  # noqa: PLC0415
     import soundfile as sf  # noqa: PLC0415
     try:
-        y, sr = librosa.load(audio_path, sr=None, mono=False, duration=max_seconds)
+        y, sr = librosa.load(audio_path, sr=None, mono=False,
+                             offset=offset, duration=max_seconds)
+        if not len(y):
+            return audio_path
         ext = os.path.splitext(audio_path)[1]
         fd, tmp = tempfile.mkstemp(suffix=ext)
         os.close(fd)
@@ -271,69 +338,168 @@ def extract_reply(text):
     return text.strip()
 
 
-results = []
-for i in range(0, len(audio_files), BATCH_SIZE):
-    batch = audio_files[i:i + BATCH_SIZE]
-    print(f"[caption] captioning {i + 1}/{len(audio_files)}: {batch[0].name} "
-          f"(~30-120s, no output until the first one finishes)", flush=True)
-    try:
-        truncated = []
-        for f in batch:
-            truncated.append(truncate_audio(str(f)))
-
-        conversations = [
-            [
-                {"role": "system", "content": [{"type": "text", "text": (
-                    QWEN_IDENTITY + "\n\n" + SYSTEM_PROMPT)}]},
-                {"role": "user", "content": [
-                    {"type": "audio", "audio": t},
-                    {"type": "text", "text": CAPTION_PROMPT},
-                ]},
-            ]
-            for t in truncated
+def _caption_audio_clips(clip_paths):
+    """One generated caption per clip path, in order — a single model call."""
+    conversations = [
+        [
+            {"role": "system", "content": [{"type": "text", "text": (
+                QWEN_IDENTITY + "\n\n" + SYSTEM_PROMPT)}]},
+            {"role": "user", "content": [
+                {"type": "audio", "audio": t},
+                {"type": "text", "text": CAPTION_PROMPT},
+            ]},
         ]
-        text_input = processor.apply_chat_template(
-            conversations, add_generation_prompt=True, tokenize=False
-        )
-        audios, images, videos = process_mm_info(conversations, use_audio_in_video=False)
-        inputs = processor(
-            text=text_input, audio=audios, images=images, videos=videos,
-            return_tensors="pt", padding=True, use_audio_in_video=False,
-        ).to(model.device).to(model.dtype)
+        for t in clip_paths
+    ]
+    text_input = processor.apply_chat_template(
+        conversations, add_generation_prompt=True, tokenize=False
+    )
+    audios, images, videos = process_mm_info(conversations, use_audio_in_video=False)
+    inputs = processor(
+        text=text_input, audio=audios, images=images, videos=videos,
+        return_tensors="pt", padding=True, use_audio_in_video=False,
+    ).to(model.device).to(model.dtype)
 
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs, use_audio_in_video=False, return_audio=False,
-                max_new_tokens=MAX_NEW_TOKENS,
-                # Greedy decoding with no penalty is what let a caption loop on a
-                # repeated lyric phrase ~200 times until the token cap.
-                repetition_penalty=REPETITION_PENALTY,
-                no_repeat_ngram_size=NO_REPEAT_NGRAM,
-            )
-        full_texts = processor.batch_decode(
-            output_ids, skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs, use_audio_in_video=False, return_audio=False,
+            max_new_tokens=MAX_NEW_TOKENS,
+            # Greedy decoding with no penalty is what let a caption loop on a
+            # repeated lyric phrase ~200 times until the token cap.
+            repetition_penalty=REPETITION_PENALTY,
+            no_repeat_ngram_size=NO_REPEAT_NGRAM,
         )
-        for f, t, ft in zip(batch, truncated, full_texts):
-            caption = extract_reply(ft)
+    full_texts = processor.batch_decode(
+        output_ids, skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    return [extract_reply(t) for t in full_texts]
+
+
+def _merge_part_captions(name, spans, parts):
+    """Merge per-pass captions into ONE caption in the same schema — text only.
+
+    WHY A SECOND CALL: the schema demands how the track develops "from beginning
+    to end", and no single pass can see that. The merge is a TEXT conversation with
+    the SAME system prompt, so the result is schema-shaped by construction and
+    costs seconds — the audio is not re-read.
+    """
+    listing = "\n".join(
+        f"Part {i + 1} (from {int(offset)}s): {text}"
+        for i, ((offset, _length), text) in enumerate(zip(spans, parts))
+    )
+    instruction = (
+        f"These are descriptions of {len(parts)} consecutive parts of ONE song "
+        f"({name}). Merge them into a SINGLE caption for the whole track, in the "
+        "exact schema above: the front-loaded comma-separated keyword list first, "
+        "then 2-3 sentences describing how the track develops from beginning to "
+        "end. Do not mention that the song was split into parts, do not repeat the "
+        "keyword list, and output ONLY the merged caption text.\n\n" + listing
+    )
+    conversation = [[
+        {"role": "system", "content": [{"type": "text", "text": (
+            QWEN_IDENTITY + "\n\n" + SYSTEM_PROMPT)}]},
+        {"role": "user", "content": [{"type": "text", "text": instruction}]},
+    ]]
+    text_input = processor.apply_chat_template(
+        conversation, add_generation_prompt=True, tokenize=False
+    )
+    inputs = processor(text=text_input, return_tensors="pt").to(
+        model.device).to(model.dtype)
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs, return_audio=False,
+            max_new_tokens=MAX_NEW_TOKENS,
+            repetition_penalty=REPETITION_PENALTY,
+            no_repeat_ngram_size=NO_REPEAT_NGRAM,
+        )
+    return extract_reply(processor.batch_decode(
+        output_ids, skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0])
+
+
+results = []
+if WHOLE_SONG:
+    # ONE track at a time, several passes each, then a merge. Batching is
+    # deliberately off in this mode: the passes already fill the GPU, and batching
+    # multi-pass tracks is exactly how a T4 runs out of memory.
+    for index, path in enumerate(audio_files, start=1):
+        spans = _windows_for(path, MAX_AUDIO_DURATION)
+        print(f"[caption] ({index}/{len(audio_files)}) {path.name} — "
+              f"{len(spans)} pass(es)", flush=True)
+        temps = []
+        try:
+            clips = []
+            for pass_no, (offset, length) in enumerate(spans, start=1):
+                if len(spans) > 1:
+                    print(f"[caption]   pass {pass_no}/{len(spans)} "
+                          f"[{int(offset)}-{int(offset + length)}s]", flush=True)
+                clip = truncate_audio(str(path), length, offset=offset)
+                if clip != str(path):
+                    temps.append(clip)
+                clips.append(clip)
+
+            parts = _caption_audio_clips(clips)
+            if len(parts) == 1:
+                caption = parts[0]
+            else:
+                try:
+                    caption = _merge_part_captions(path.name, spans, parts)
+                except Exception:                            # noqa: BLE001
+                    import traceback                    # noqa: PLC0415
+                    traceback.print_exc()
+                    caption = ""
+                if not caption.strip():
+                    # Never lose a track to a failed merge: the first pass alone is
+                    # a valid caption for the opening of the song.
+                    caption = parts[0]
             if CUSTOM_TAG:
                 caption = f"{CUSTOM_TAG}, {caption}"
-            results.append({"file": f.name, "caption": caption})
-            # FULL caption, never a character-limited preview: the preview is the
-            # only place a caption can be checked from the log, and silently
-            # cutting it off is how a truncated-looking caption gets blamed on the
-            # model.
-            print("OK", f.name, caption, flush=True)
-            if t != str(f) and t.startswith(tempfile.gettempdir()):
-                try:
-                    os.remove(t)
-                except Exception:
-                    pass
-    except Exception as e:
-        import traceback  # noqa: PLC0415
-        traceback.print_exc()
-        for f in batch:
-            results.append({"file": f.name, "caption": f"ERROR: {e}"})
+            results.append({"file": path.name, "caption": caption})
+            print("OK", path.name, caption, flush=True)
+        except Exception as e:
+            import traceback                                # noqa: PLC0415
+            traceback.print_exc()
+            results.append({"file": path.name, "caption": f"ERROR: {e}"})
+        finally:
+            for t in temps:
+                if t.startswith(tempfile.gettempdir()):
+                    try:
+                        os.remove(t)
+                    except Exception:
+                        pass
+else:
+    for i in range(0, len(audio_files), BATCH_SIZE):
+        batch = audio_files[i:i + BATCH_SIZE]
+        print(f"[caption] captioning {i + 1}/{len(audio_files)}: {batch[0].name} "
+              f"(~30-120s, no output until the first one finishes)", flush=True)
+        try:
+            truncated = []
+            for f in batch:
+                truncated.append(truncate_audio(str(f)))
+
+            full_texts = _caption_audio_clips(truncated)
+            for f, t, ft in zip(batch, truncated, full_texts):
+                caption = ft
+                if CUSTOM_TAG:
+                    caption = f"{CUSTOM_TAG}, {caption}"
+                results.append({"file": f.name, "caption": caption})
+                # FULL caption, never a character-limited preview: the preview is
+                # the only place a caption can be checked from the log, and
+                # silently cutting it off is how a truncated-looking caption gets
+                # blamed on the model.
+                print("OK", f.name, caption, flush=True)
+                if t != str(f) and t.startswith(tempfile.gettempdir()):
+                    try:
+                        os.remove(t)
+                    except Exception:
+                        pass
+        except Exception as e:
+            import traceback                                # noqa: PLC0415
+            traceback.print_exc()
+            for f in batch:
+                results.append({"file": f.name, "caption": f"ERROR: {e}"})
 
 with open("/kaggle/working/captions_out.json", "w") as out_f:
     json.dump({"results": results}, out_f, indent=2)

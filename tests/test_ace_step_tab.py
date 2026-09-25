@@ -509,3 +509,27 @@ def test_the_uploaded_dataset_slug_is_remembered_and_shown(qapp, tmp_path, monke
     assert manager.config["caption_audio_dataset"] == "akronohio/ace-audio-d66edb"
     assert manager.caption_audio_dataset_edit.text() == "akronohio/ace-audio-d66edb"
 
+
+def test_the_whole_song_option_is_offered_and_defaults_on(qapp):
+    """The DEFAULT must be the correct caption (whole song), not the cheap one.
+
+    Reported by the user as "120 seconds is not good, that is less than half": a
+    single pass discarded the rest of every song, so the caption described the
+    first two minutes of a four-minute track.
+    """
+    from config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["caption_whole_song"] is True
+    manager = _built_page()
+    assert manager.caption_whole_song_check.isChecked() is True
+    assert "whole song" in manager.caption_whole_song_check.text()
+    # ...and it is respected when the user turns it off.
+    assert _built_page({"caption_whole_song": False}).caption_whole_song_check.isChecked() is False
+
+
+def test_the_pass_length_is_labelled_as_a_pass_not_a_limit(qapp):
+    """The spin sets the CHUNK size; coverage comes from the option above."""
+    manager = _built_page({"caption_max_audio_duration": 90})
+    assert manager.max_dur_spin.value() == 90
+    assert "SECONDS PER PASS" in manager.max_dur_spin.toolTip()
+

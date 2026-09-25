@@ -101,7 +101,7 @@ hand-edit the cell.
 
 def fill_kernel(source, prompt=None, tag="", max_tokens=512, max_duration=120,
                 batch_size=1, audio_folder="/kaggle/input/acestep-audio",
-                prompt_addendum=""):
+                prompt_addendum="", whole_song=True):
     """Substitute every {{PLACEHOLDER}} and inject the audio auto-resolve."""
     config = {}
     if prompt:
@@ -117,6 +117,8 @@ def fill_kernel(source, prompt=None, tag="", max_tokens=512, max_duration=120,
         "{{SYSTEM_PROMPT}}": json.dumps(caption_spec.system_prompt_from_config(config)),
         "{{MAX_NEW_TOKENS}}": str(int(max_tokens)),
         "{{MAX_AUDIO_DURATION}}": str(int(max_duration)),
+        # Passes per track: True covers the whole song (several passes + a merge).
+        "{{WHOLE_SONG}}": str(bool(whole_song)),
         "{{BATCH_SIZE}}": str(int(batch_size)),
         "{{CUSTOM_TAG}}": json.dumps(tag or ""),
         "{{REPETITION_PENALTY}}": "1.15",
@@ -202,6 +204,10 @@ def main(argv=None):
     parser.add_argument("--prompt-addendum", default="",
                         help="extra text appended to the caption prompt "
                              "(e.g. '1970s live bootleg')")
+    parser.add_argument("--one-pass", action="store_true",
+                        help="one pass per track over the first --max-audio-duration "
+                             "seconds only (default: cover the whole song in "
+                             "several passes and merge them)")
     args = parser.parse_args(argv)
 
     script = build(
@@ -209,6 +215,7 @@ def main(argv=None):
         max_duration=args.max_audio_duration, batch_size=args.batch_size,
         audio_folder=args.audio_folder,
         prompt_addendum=args.prompt_addendum,
+        whole_song=not args.one_pass,
     )
     print(f"wrote {args.out}")
     print(f"wrote {os.path.splitext(args.out)[0]}.py  (paste this into Kaggle)")

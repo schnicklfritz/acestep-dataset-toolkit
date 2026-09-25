@@ -149,3 +149,103 @@ class TestAudioDiscovery:
         assert "No supported audio found under" in src
         assert "raise SystemExit(" in src
 
+
+# ---------------------------------------------------------------------------
+# runtime contracts: these functions are EXECUTED, not grepped
+# ---------------------------------------------------------------------------
+
+def _kernel_function(name, extra_globals=None):
+    """Compile ONE function out of the kernel template and return it callable.
+
+    WHY: every other test in this file greps the SOURCE TEXT, and a source-text
+    assertion cannot see a TYPE mismatch. Porting ``_walk_for_audio`` from the MOSS
+    kernel (whose caller uses ``os.path.basename``) into this one (whose callers use
+    the Path API) satisfied every grep here and then crashed a real Kaggle run four
+    minutes in, right after the model had loaded. Anything with a runtime contract
+    is EXECUTED in this section instead.
+    """
+    tree = ast.parse(_source())
+    node = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+    namespace = dict(extra_globals or {})
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "<kernel>", "exec"),
+         namespace)
+    return namespace[name]
+
+
+def test_walk_for_audio_returns_paths_the_kernel_can_use(tmp_path):
+    """The callers use Path (``batch[0].name``, ``f.name``) — strings crashed."""
+    from pathlib import Path
+
+    walk = _kernel_function(
+        "_walk_for_audio", {"os": os, "Path": Path, "SUPPORTED_FORMATS": {".mp3"}}
+    )
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "song.mp3").write_bytes(b"x")
+    (tmp_path / "notes.txt").write_bytes(b"x")
+
+    found = walk(str(tmp_path))
+    assert len(found) == 1
+    # THE call that killed run ace-caption-2f8e84: a str has no .name.
+    assert found[0].name == "song.mp3"
+
+
+def test_window_math_covers_the_whole_song():
+    """A 4-minute song must be TWO passes, not one 120 s slice that discards half."""
+    windows = _kernel_function(
+        "_windows_for", {"os": os, "_duration_seconds": lambda _path: 240.0}
+    )
+    spans = windows("x.mp3", 120)
+    assert spans == [(0.0, 120.0), (120.0, 120.0)]
+    # Coverage, not truncation: the spans tile the file end to end.
+    assert sum(length for _offset, length in spans) == 240.0
+
+
+def test_the_last_window_is_clamped_to_the_end():
+    windows = _kernel_function(
+        "_windows_for", {"os": os, "_duration_seconds": lambda _path: 300.0}
+    )
+    assert windows("x.mp3", 120) == [(0.0, 120.0), (120.0, 120.0), (240.0, 60.0)]
+
+
+def test_a_sub_second_tail_does_not_become_its_own_pass():
+    windows = _kernel_function(
+        "_windows_for", {"os": os, "_duration_seconds": lambda _path: 240.3}
+    )
+    assert windows("x.mp3", 120) == [(0.0, 120.0), (120.0, 120.0)]
+
+
+def test_a_short_track_is_a_single_pass_and_zero_disables_windowing():
+    windows = _kernel_function(
+        "_windows_for", {"os": os, "_duration_seconds": lambda _path: 90.0}
+    )
+    assert windows("x.mp3", 120) == [(0, 0)]      # already fits one pass
+    assert windows("x.mp3", 0) == [(0, 0)]        # 0 = whole file, single pass
+
+
+class TestWholeSongWiring:
+    """Source assertions for the parts that only exist on Kaggle."""
+
+    def test_the_kernel_covers_whole_songs_by_default(self):
+        src = _source()
+        assert "WHOLE_SONG = {{WHOLE_SONG}}" in src
+        assert "if WHOLE_SONG:" in src
+        assert "def _windows_for(path, pass_sec):" in src
+        assert "def _merge_part_captions(name, spans, parts):" in src
+
+    def test_the_parts_are_merged_into_one_caption(self):
+        src = _source()
+        assert "_merge_part_captions(path.name, spans, parts)" in src
+        assert "Merge them into a SINGLE caption" in src
+
+    def test_a_failed_or_empty_merge_still_yields_a_caption(self):
+        # Never lose a track: the first pass alone is a valid opening caption.
+        src = _source()
+        assert "if not caption.strip():" in src
+        assert "caption = parts[0]" in src
+
+    def test_the_single_pass_path_is_still_available(self):
+        # OFF must keep working exactly as before (one pass, batch as configured).
+        src = _source()
+        assert "for i in range(0, len(audio_files), BATCH_SIZE):" in src
+

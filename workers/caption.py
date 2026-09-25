@@ -277,6 +277,8 @@ class RemoteCaptionWorker(QThread):
             .replace("{{CUSTOM_TAG}}", json.dumps(self.general_meta.get("custom_tag", "")))
             .replace("{{REPETITION_PENALTY}}", str(rep_penalty))
             .replace("{{NO_REPEAT_NGRAM}}", str(no_repeat))
+            .replace("{{WHOLE_SONG}}",
+                     str(bool(self.config.get("caption_whole_song", True))))
         )
 
         kernel_slug = f"ace-caption-{uuid.uuid4().hex[:6]}"
@@ -312,7 +314,18 @@ class RemoteCaptionWorker(QThread):
         self.progress.emit(50, "Pushing caption kernel to Kaggle GPU…")
         push_kernel(self.config, kernel_dir, kernel_slug)
         self.progress.emit(60, "Kaggle GPU captioning in progress…")
-        ok = wait_kernel_done(self.config, kernel_slug)
+        # BUDGET the wait from the work rather than assuming 20 minutes. With
+        # whole-song captioning every track is several passes plus a merge, so the
+        # old fixed timeout would abort a real set while it was still working - and
+        # a timeout looks exactly like a failure.
+        passes = (3 if self.config.get("caption_whole_song", True) else 1)
+        budget = min(4 * 3600, 900 + int(len(staged_tracks) or 1) * passes * 90)
+        self.progress.emit(
+            58,
+            f"Waiting up to {budget // 60} min for {len(staged_tracks)} track(s) "
+            f"at {passes} pass(es) each…",
+        )
+        ok = wait_kernel_done(self.config, kernel_slug, timeout=budget)
         if not ok:
             raise RuntimeError(
                 "The Kaggle caption kernel did not finish successfully. "

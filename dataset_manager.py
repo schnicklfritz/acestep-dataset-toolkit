@@ -1368,6 +1368,7 @@ class DatasetManager(QMainWindow):
             (self.caption_bitrate_combo, "currentTextChanged"),
             (self.caption_convert_check, "toggled"),
             (self.caption_batch_review_check, "toggled"),
+            (self.caption_whole_song_check, "toggled"),
         ):
             getattr(widget, signal).connect(self.save_pipeline_defaults)
 
@@ -4188,6 +4189,12 @@ class DatasetManager(QMainWindow):
             self.config["caption_system_prompt"] = system_editor.toPlainText().strip()
         self.config["caption_max_tokens"] = self.max_tokens_spin.value()
         self.config["caption_max_audio_duration"] = self.max_dur_spin.value()
+        # Guarded: this page may not be built yet if another tab triggers a save
+        # first, and a missing attribute here would crash the save of every other
+        # setting too.
+        whole_song = getattr(self, "caption_whole_song_check", None)
+        if whole_song is not None:
+            self.config["caption_whole_song"] = whole_song.isChecked()
         self.config["caption_batch_size"] = self.batch_size_spin.value()
         # ACE-Step page: the prompt add-on and the run paths. getattr-guarded for
         # the same reason as the system prompt above — this method can run before
