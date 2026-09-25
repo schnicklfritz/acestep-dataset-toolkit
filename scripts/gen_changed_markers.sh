@@ -35,10 +35,35 @@
 #      `mv` is an atomic rename rather than a cross-device copy, and it is
 #      covered by `.changed_markers.*` in .gitignore.
 #
+#   5. THE OUTPUT IS UNTRACKED (gitignored). A tracked marker can never be
+#      valid at a commit: a commit cannot contain its own SHA, so a committed
+#      marker always stamps the PREVIOUS HEAD, and every regeneration rewrites
+#      the HEAD/generated lines, leaving the tree permanently dirty.
+#      Measured on bea90ea: its committed marker said HEAD d5b4ea0.
+#
+#   6. THE SHADOW ADD IS `add -N` ON THE TEXT ALLOWLIST ONLY. A bare
+#      `git add -A` writes a blob into .git/objects for EVERY untracked file,
+#      binaries included (measured: one 20 MB .wav grew .git/objects by
+#      19.5 MB per run). Intent-to-add records the path without hashing the
+#      content, and still gives full new-file hunks and rename pairing.
+#
+# Usage:
+#   scripts/gen_changed_markers.sh            write .changed_markers
+#   scripts/gen_changed_markers.sh --stdout   print the index instead (for an
+#                                             agent SessionStart hook; nothing
+#                                             is written, so nothing goes stale)
+#
 # THIS SCRIPT DOES NOT TOUCH .agent_notes.md. The generated index and the
 # hand-curated ledger are deliberately separate files: this one is overwritten
 # on every run, the other is never written by a machine.
 set -euo pipefail
+
+to_stdout=0
+case "${1-}" in
+  --stdout) to_stdout=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--stdout]" >&2; exit 2 ;;
+esac
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
@@ -107,8 +132,6 @@ rm -f "$tmp_index"
 cp "$git_dir/index" "$tmp_index"
 export GIT_INDEX_FILE="$tmp_index"
 
-# Stage everything -- into the shadow index only.
-git add -A
 
 TEXTS=( '*.py' '*.md' '*.json' '*.txt' '*.toml' '*.ini' '*.cfg' '*.yaml' '*.yml'
         '*.sh' '*.html' '*.css'
@@ -117,8 +140,18 @@ TEXTS=( '*.py' '*.md' '*.json' '*.txt' '*.toml' '*.ini' '*.cfg' '*.yaml' '*.yml'
         # edit to the rules file produced an index with no sign of it. This spec
         # matched exactly 6 tracked paths and none of them were binary. Any
         # extensionless text file elsewhere in the tree must be named here too.
-        ':(top).*' )
+        # `glob` magic: without it `*` also matches `/`, so ':(top).*' pulled
+        # in everything under .agents/ and .claude/ as well.
+        ':(top,glob).*' )
 EXCLUDES=( ':(exclude).changed_markers' ':(exclude).changed_markers.*' )
+
+# Intent-to-add, allowlist only, shadow index only: makes untracked TEXT files
+# and unstaged renames visible to `git diff HEAD` without hashing any content.
+# Deletions of tracked files need no staging: `git diff HEAD` already sees them.
+# (`git add` itself would die on any allowlist pattern that matches nothing,
+# so list the untracked paths first and add only those.)
+git ls-files -z --others --exclude-standard -- "${TEXTS[@]}" "${EXCLUDES[@]}" \
+  | xargs -0 -r git add -N --
 
 {
   echo "# AUTO-GENERATED -- do not edit. Regenerate: scripts/gen_changed_markers.sh"
@@ -129,8 +162,8 @@ EXCLUDES=( ':(exclude).changed_markers' ':(exclude).changed_markers.*' )
   echo "# VALIDATE ME BEFORE SCOPING ANY WORK:"
   echo "#   - '# HEAD:' must equal \`git rev-parse HEAD\`"
   echo "#   - the DIRTY block below must match \`git status --porcelain\`"
-  echo "#     (ignoring .changed_markers itself -- tracked and rewritten by this"
-  echo "#      script -- and .changed_markers.*, which is gitignored scratch)."
+  echo "#     (ignoring .changed_markers itself and its .changed_markers.* scratch"
+  echo "#      file -- both gitignored, both written only by this script)."
   echo "#   - git status collapses an untracked DIRECTORY to one line while the"
   echo "#     diff below expands it to one entry per file. Expected, not drift."
   echo "#   - cross-check against .agent_notes.md, which is hand-owned."
@@ -170,5 +203,9 @@ EXCLUDES=( ':(exclude).changed_markers' ':(exclude).changed_markers.*' )
   fi
 } > "$tmp_markers"
 
+if [ "$to_stdout" = 1 ]; then
+  cat "$tmp_markers"
+  exit 0
+fi
 mv "$tmp_markers" "$markers"
 echo "gen_changed_markers: wrote $markers ($(wc -l < "$markers") lines)"

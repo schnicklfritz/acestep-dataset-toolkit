@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/gen_changed_markers.sh --stdout",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

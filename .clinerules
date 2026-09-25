@@ -23,8 +23,9 @@
   changed. Never `cat` a 5000-line file to find a delta.
 - Once changes are committed to git, REGENERATE `.changed_markers`
   (`scripts/gen_changed_markers.sh`) so the next session starts from a file that
-  matches HEAD. Never "empty" it: it is a TRACKED file, so an emptied index is
-  just a permanently dirty tree. Never hand-edit it either — the hand-curated
+  matches HEAD. It is GITIGNORED derived data: never commit it (a commit cannot
+  carry its own SHA, so a committed marker is stale by construction) and never
+  hand-edit it — the hand-curated
   ledger lives in `.agent_notes.md`, which no script ever writes.
 
 # ------------------------------------------------------------
@@ -39,9 +40,8 @@
        file also carries `# generated:` and `# dirty: <n> path(s)`.
     2. every dirty/untracked file in `git status` must be listed in the index,
        and every file the index lists must actually be dirty.
-- SANCTIONED EXEMPTION: `.changed_markers` is excluded from its own diff by
-  design (it is tracked, and the generator rewrites it every run), and
-  `.changed_markers.*` is gitignored scratch. Their absence from the index is
+- SANCTIONED EXEMPTION: `.changed_markers` and its `.changed_markers.*`
+  scratch file are gitignored and excluded from their own diff. Their absence from the index is
   NOT a staleness signal. Everything else must be listed.
 - On ANY disagreement: STOP. Do not scope, do not edit, do not "work around it".
   Regenerate the index first (`scripts/gen_changed_markers.sh`). Then re-read it
@@ -82,11 +82,17 @@
 #     included `.clinerules`, `.gitattributes` and `.gitignore` themselves, so
 #     editing the rules file produced an index with no sign of it. It was found
 #     by validating the index against `git status` — which is exactly why that
-#     rule below exists. `':(top).*'` in TEXTS closes it (matched 6 tracked
-#     paths, none binary). An extensionless text file elsewhere must be named
+#     rule below exists. `':(top,glob).*'` in TEXTS closes it. The `glob`
+#     magic matters: without it `*` also matches `/`, so the spec silently
+#     pulled in everything under .agents/ and .claude/ too. An extensionless text file elsewhere must be named
 #     in TEXTS explicitly.
 #
-# The shadow `git add -A` is also what makes not-yet-tracked files visible to
+#   * THE SHADOW ADD IS `git add -N` (intent-to-add) ON UNTRACKED ALLOWLIST
+#     PATHS ONLY. A shadow `git add -A` hashes every untracked file into
+#     .git/objects, binaries included: one 20 MB .wav grew it by 19.5 MB per
+#     run (measured). `-N` records the path without its content.
+#
+# The shadow intent-to-add is also what makes not-yet-tracked files visible to
 # `git diff HEAD`, and what makes git emit real `rename from/to` entries for a
 # rename that is still unstaged — plain `git diff --summary -M` shows only the
 # deletion (measured). When adding a new TEXT format, add its extension to
@@ -108,7 +114,7 @@
   `git diff --summary -M` prints ONLY `delete mode 100644 old_name` — the new
   name is invisible — and `git status --porcelain -M` reports it as
   `?? new_name` with no rename pairing. Detection requires the shadow index
-  (`cp .git/index /tmp/x && GIT_INDEX_FILE=/tmp/x git add -A`), which the
+  (`cp .git/index /tmp/x && GIT_INDEX_FILE=/tmp/x git add -N <new paths>`), which the
   generator already does for you; the marker file carries the `rename from` /
   `rename to` lines. Do NOT substitute `git log --diff-filter=R --summary -1`
   here either: it inspects the LAST COMMIT and cannot see uncommitted work.

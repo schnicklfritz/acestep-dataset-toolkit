@@ -23,6 +23,8 @@ vocal_split/
 
 # Local User Settings & Secrets (Keep your Kaggle keys private)
 settings.json
+# ...but the Claude Code project hook config holds no secrets and must be shared.
+!.claude/settings.json
 kaggle.json
 *.local
 
@@ -57,7 +59,9 @@ lyrics_profiles/
 # gathered locally. Never commit it; regenerate with the tools instead.
 docs/research/
 
-# Scratch file used by scripts/gen_changed_markers.sh while it builds the new
-# index. Normally deleted by its own EXIT trap; this only catches a hard kill,
-# so a stray temp file never becomes accidental commit material.
+# The generated change index and its scratch file. Both are derived data and
+# must NOT be tracked: a commit cannot contain its own SHA, so a committed
+# marker is always stamped with the previous HEAD, and every regeneration
+# dirties the tree. Regenerate with scripts/gen_changed_markers.sh.
+.changed_markers
 .changed_markers.*
