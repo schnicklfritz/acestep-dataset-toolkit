@@ -134,6 +134,12 @@ NO_REPEAT_NGRAM = {{NO_REPEAT_NGRAM}}
 # passes and their captions are merged into one. OFF = a single pass over the
 # first MAX_AUDIO_DURATION seconds, i.e. the rest of the song is discarded.
 WHOLE_SONG = {{WHOLE_SONG}}
+# The pass length as a REAL NAME. The app substitutes a LITERAL for
+# {{MAX_AUDIO_DURATION}}, so it is a value wherever it appears -- referencing
+# MAX_AUDIO_DURATION without this binding is a NameError that surfaces only on
+# Kaggle, minutes in, which is exactly how the first whole-song run died at its
+# first track. 0 = the whole file in one pass.
+MAX_AUDIO_DURATION = {{MAX_AUDIO_DURATION}}
 
 # The model's own identity line, kept verbatim (set in stone). The ACE-Step
 # annotation SCHEMA in SYSTEM_PROMPT is APPENDED to it, never substituted for it.
@@ -145,7 +151,7 @@ QWEN_IDENTITY = (
 SUPPORTED_FORMATS = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.wma'}
 
 print("[caption] limits       : max_new_tokens=" + str(MAX_NEW_TOKENS)
-      + " max_audio_s=" + str({{MAX_AUDIO_DURATION}})
+      + " max_audio_s=" + str(MAX_AUDIO_DURATION)
       + " whole_song=" + str(WHOLE_SONG)
       + " batch=" + str(BATCH_SIZE)
       + " rep_penalty=" + str(REPETITION_PENALTY)
@@ -299,7 +305,7 @@ def _windows_for(path, pass_sec):
     return spans
 
 
-def truncate_audio(audio_path, max_seconds={{MAX_AUDIO_DURATION}}, offset=0.0):
+def truncate_audio(audio_path, max_seconds=MAX_AUDIO_DURATION, offset=0.0):
     """One PASS of ``audio_path``: ``max_seconds`` starting at ``offset``.
 
     ``0`` / ``None`` for ``max_seconds`` means the whole file from ``offset``, and

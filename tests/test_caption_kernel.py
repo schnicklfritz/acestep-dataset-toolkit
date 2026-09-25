@@ -249,3 +249,68 @@ class TestWholeSongWiring:
         src = _source()
         assert "for i in range(0, len(audio_files), BATCH_SIZE):" in src
 
+
+# ---------------------------------------------------------------------------
+# static check on the FILLED kernel: a substituted literal is not a variable
+# ---------------------------------------------------------------------------
+
+def _unbound_names(source):
+    """Names READ but never bound anywhere in the file (a crude F821).
+
+    WHY: a NameError happens only at RUNTIME — on Kaggle, minutes in, after a
+    multi-GB model load. ``MAX_AUDIO_DURATION`` existed only as a SUBSTITUTED
+    LITERAL (``{{MAX_AUDIO_DURATION}}`` becomes ``120``), so referring to it as a
+    variable killed the first whole-song run at its first track::
+
+        spans = _windows_for(path, MAX_AUDIO_DURATION)
+        NameError: name 'MAX_AUDIO_DURATION' is not defined
+
+    Deliberately CONSERVATIVE: a name bound ANYWHERE — a nested function, a loop
+    target, an import, a function argument — counts as bound, so this cannot fire on
+    valid code. It only reports names that are read and never bound at all.
+    """
+    import builtins
+
+    tree = ast.parse(source)
+    bound, loaded = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                bound.add(node.id)
+            else:
+                loaded.add(node.id)
+    return sorted(loaded - bound - set(dir(builtins)))
+
+
+def test_no_kernel_name_is_read_without_ever_being_bound():
+    """Checked on the FILLED kernel: every {{X}} becomes a literal, not a name."""
+    from scripts.build_caption_notebook import fill_kernel
+
+    script = fill_kernel(_source())
+    assert "{{" not in script, "fill_kernel left a placeholder behind"
+    assert _unbound_names(script) == []
+
+
+def test_the_unbound_name_check_would_have_caught_the_nameerror():
+    """Guard the guard: a test that cannot fire is worse than no test."""
+    broken = (
+        "MAX_NEW_TOKENS = 512\n"
+        "def _windows_for(path, pass_sec):\n"
+        "    return [(0, pass_sec)]\n"
+        "def run(path):\n"
+        "    return _windows_for(path, MAX_AUDIO_DURATION)\n"
+    )
+    # MAX_AUDIO_DURATION is READ and bound NOWHERE — the exact Kaggle failure.
+    assert _unbound_names(broken) == ["MAX_AUDIO_DURATION"]
+    # ...and silent once it is bound, which is what the fixed kernel does.
+    assert _unbound_names("MAX_AUDIO_DURATION = 120\n" + broken) == []
+
