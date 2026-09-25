@@ -223,6 +223,20 @@ def test_a_short_track_is_a_single_pass_and_zero_disables_windowing():
     assert windows("x.mp3", 0) == [(0, 0)]        # 0 = whole file, single pass
 
 
+def test_windows_are_never_batched_into_one_forward_pass():
+    """The 32.61 GiB lesson, as an EXECUTED rule.
+
+    Two 120 s clips in one audio forward pass asked a 14.56 GiB T4 for 32.61 GiB
+    (the audio tower's attention is quadratic in the audio tokens), which killed
+    run ace-caption-b34710 after the model had loaded. One clip per pass is the
+    profile that has always worked here.
+    """
+    batches = _kernel_function("_pass_batches", {})
+    assert batches(["a", "b", "c"]) == [["a"], ["b"], ["c"]]
+    assert batches([]) == []
+    assert batches(["only"]) == [["only"]]
+
+
 class TestWholeSongWiring:
     """Source assertions for the parts that only exist on Kaggle."""
 
@@ -248,6 +262,12 @@ class TestWholeSongWiring:
         # OFF must keep working exactly as before (one pass, batch as configured).
         src = _source()
         assert "for i in range(0, len(audio_files), BATCH_SIZE):" in src
+
+    def test_the_windowed_path_goes_through_the_single_clip_batches(self):
+        # Batching the windows is what asked for 32.61 GiB and OOM'd the run.
+        src = _source()
+        assert "def _pass_batches(clips):" in src
+        assert "_pass_batches(clips)" in src
 
 
 # ---------------------------------------------------------------------------

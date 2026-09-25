@@ -382,6 +382,22 @@ def _caption_audio_clips(clip_paths):
     return [extract_reply(t) for t in full_texts]
 
 
+def _pass_batches(clips):
+    """One forward pass PER clip: never batch the windows of a single track.
+
+    WHY THIS EXISTS: sending the two 120 s windows of one song through the model in
+    a single pass asked the audio tower for 32.61 GiB on a 14.56 GiB T4 (its
+    attention cost is quadratic in the audio tokens, so two clips is far more than
+    twice one) and killed the run with an OOM. One clip per pass is the profile that
+    has always worked here: the single-pass kernel captioned 34 tracks at 120 s each
+    on the same two T4s.
+
+    It is a separate function, rather than a comment, so that a future "let us batch
+    this for speed" change has to break a TEST to reintroduce the OOM.
+    """
+    return [[clip] for clip in clips]
+
+
 def _merge_part_captions(name, spans, parts):
     """Merge per-pass captions into ONE caption in the same schema — text only.
 
@@ -446,7 +462,18 @@ if WHOLE_SONG:
                     temps.append(clip)
                 clips.append(clip)
 
-            parts = _caption_audio_clips(clips)
+            # ONE clip per forward pass — see _pass_batches for the 32.61 GiB OOM
+            # that batching the windows caused.
+            parts = []
+            for pass_no, batch_clips in enumerate(_pass_batches(clips), start=1):
+                parts.append(_caption_audio_clips(batch_clips)[0])
+                # Release the finished pass's activations before the next one. The
+                # model is spread over two 14.56 GiB cards, so a stale cache is what
+                # turns a tight-but-fine pass into an OOM.
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                print(f"[caption]   pass {pass_no}/{len(clips)} done "
+                      f"({len(parts[-1])} chars)", flush=True)
             if len(parts) == 1:
                 caption = parts[0]
             else:
