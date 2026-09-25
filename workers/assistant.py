@@ -5,7 +5,6 @@ document, and can reason about the user's current dataset (summary provided at
 request time). It uses the same DeepSeek key as the captioner aggregator.
 """
 from PySide6.QtCore import QThread, Signal
-from openai import OpenAI
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 

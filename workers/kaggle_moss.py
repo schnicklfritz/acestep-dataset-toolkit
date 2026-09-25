@@ -263,7 +263,6 @@ def run_kaggle_moss(audio_paths, config, custom_tag="", progress_cb=None):
 
         progress_cb(85, "Retrieving results...")
         from modules.kaggle import (
-            download_kernel_output,
             extract_marked_json,
             kernel_stdout,
         )

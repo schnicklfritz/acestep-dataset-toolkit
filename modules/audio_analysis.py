@@ -8,7 +8,6 @@ uses) so instrument detection can caption each section independently.
 from pathlib import Path
 
 import librosa
-import numpy as np
 import soundfile as sf
 
 

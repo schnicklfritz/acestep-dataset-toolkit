@@ -5,7 +5,6 @@ import html
 import uuid
 import time
 import shutil
-from stem_separator import StemSeparator
 from pathlib import Path
 
 from config import DEFAULT_CONFIG
@@ -20,8 +19,6 @@ from workers.tag_creator import TagCreatorWorker
 from workers.musicbrainz import MusicBrainzWorker
 from modules.lyrics_tools import split_long_lines
 from modules.dataset_schema import (
-    LANGS,
-    TIME_SIGNATURES,
     derive_instrumental_mode,
     new_sample,
     normalize_dataset,
@@ -29,9 +26,7 @@ from modules.dataset_schema import (
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
-from workers.spatial import SpatialPipelineWorker
 from workers.structural import (
-    StructuralPipelineWorker,
     StructuralPipelineBatchWorker,
 )
 from workers.assistant import (
@@ -41,9 +36,8 @@ from workers.assistant import (
 
 # --- NEW: extracted widgets/orchestrator (replaces inline class definitions below) ---
 from widgets import WaveformWidget, ScatterPlotWidget
-from orchestrator import DeepSeekMusicOrchestrator, AdvancedDatasetOrchestratorWorker
+from workers.advanced import AdvancedDatasetOrchestratorWorker
 from workers.dsp_normalizer import DspNormalizerWorker
-from ui.settings_tab import build_settings_tab
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -3393,63 +3387,6 @@ class DatasetManager(QMainWindow):
             self.notebook_status.setStyleSheet("color: #FF9800;")
 
     def run_spatial_pipeline(self):
-        selected = self.get_selected_sample()
-        if not selected:
-            QMessageBox.warning(self, "Selection Missing", "Please select a track first.")
-            return
-
-        if not self.spatial_warning_check.isChecked():
-            QMessageBox.warning(self, "Acknowledge Warning", "You must check 'I understand the requirements' before running.")
-            return
-
-        stem_source = self.stem_source_combo.currentText()
-        if stem_source == "Separate via MVSEP":
-            if not self.config.get("mvsep_api_key"):
-                key, ok = QInputDialog.getText(self, "MVSEP API Key", "Enter your MVSEP API key:", QLineEdit.Password)
-                if ok and key.strip():
-                    self.config["mvsep_api_key"] = key.strip()
-                    self.mvsep_key.setText(key.strip())
-                else:
-                    return
-
-        if self.use_deepseek_check.isChecked() and not self.config.get("custom_key"):
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter your DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
-            else:
-                return
-
-        # ONE shared prompt (it also carries the "remember on this device"
-        # choice) instead of three copies that could drift apart.
-        if not self._ensure_kaggle_credentials():
-            return
-
-        options = {
-            "stem_source": ("kaggle_demucs" if stem_source == "Separate via Kaggle (Demucs)" else ("mvsep" if stem_source == "Separate via MVSEP" else "import")),
-            "use_spatial": True,
-            "use_deepseek": self.use_deepseek_check.isChecked(),
-            "custom_endpoint": self.custom_endpoint_check.isChecked()
-        }
-
-        self.run_spatial_btn.setEnabled(False)
-        self.spatial_progress.setVisible(True)
-        self.spatial_progress.setValue(0)
-        self.spatial_status.setText("Starting spatial pipeline...")
-
-        self.active_worker = SpatialPipelineWorker(
-            track_id=selected["id"],
-            file_path=selected["audio_path"],
-            config=self.config,
-            options=options
-        )
-        self.active_worker.progress.connect(self.on_spatial_progress)
-        self.active_worker.step_completed.connect(self.on_spatial_step)
-        self.active_worker.pipeline_finished.connect(self.on_spatial_finished)
-        self.active_worker.error_occurred.connect(self.on_spatial_error)
-        self.active_worker.start()
-
-    def run_spatial_pipeline(self):
         # ---- Determine which tracks to process based on scope ----
         scope = self.struct_scope_combo.currentText()
         if scope == "All Tracks":
@@ -3904,15 +3841,6 @@ class DatasetManager(QMainWindow):
         band_data = profiles.get(band_name, {})
         for era in band_data.get("eras", []):
             self.era_combo.addItem(era["name"])
-
-    def on_struct_scope_changed(self, scope_text):
-        show = scope_text.strip() == "Selected Tracks (from list)"
-
-        self.track_list_widget.setVisible(show)
-        self.track_numbers_input.setVisible(show)
-
-        if show:
-            self.refresh_track_list()
 
     def get_structural_scope_samples(self):
         """Return tracks selected by the Structural Pipeline scope pulldown."""
@@ -6845,7 +6773,6 @@ class DatasetManager(QMainWindow):
         lay.addWidget(self.ver_list, 1)
 
         def create_snapshot():
-            from modules.versioning import save_version
             path = save_version(self.dataset, label="manual")
             self.status_label.setText(f"Snapshot saved: {path}")
             refresh()
@@ -6855,7 +6782,6 @@ class DatasetManager(QMainWindow):
             if not item:
                 QMessageBox.information(self, "Versioning", "Select a snapshot to diff.")
                 return
-            from modules.versioning import load_version, diff_json
             snap = load_version(item.data(Qt.UserRole))
             text = diff_json(snap, self.dataset)
             d = QDialog(self); d.setWindowTitle("Version Diff"); d.resize(720, 500)
@@ -6869,7 +6795,6 @@ class DatasetManager(QMainWindow):
             if not item:
                 QMessageBox.information(self, "Versioning", "Select a snapshot to restore.")
                 return
-            from modules.versioning import load_version
             reply = QMessageBox.question(self, "Restore Snapshot",
                                          "Replace the current dataset with this snapshot?",
                                          QMessageBox.Yes | QMessageBox.No)

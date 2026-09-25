@@ -3,7 +3,6 @@
 This round-trip is what broke in the real app (markers eaten by the punctuation
 stripper), so it is pinned down explicitly. Needs Qt, so it uses the qapp fixture.
 """
-import pytest
 
 from modules.lyrics_normalizer import normalize_lyrics
 from ui.lyrics_tab import (

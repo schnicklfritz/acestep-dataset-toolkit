@@ -16,18 +16,14 @@ Nothing touches the dataset until Apply is pressed and confirmed.
 Built by ``build_bulk_edit_panel(manager, parent)`` following the
 ui/settings_tab.py pattern; widgets are stored as ``manager.<name>``.
 """
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
-    QWidget,
 )
 
 from modules.dataset_schema import LANGS, TAG_POSITIONS, TIME_SIGNATURES
@@ -261,5 +257,3 @@ def read_bulk_edits(manager):
             rewrite = (find, repl)
 
     return out, meta, rewrite
-
-    outer.addLayout(row)

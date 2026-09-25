@@ -1,5 +1,4 @@
 import os
-import re
 import librosa
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPalette

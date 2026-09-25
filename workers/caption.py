@@ -1,7 +1,9 @@
-import os, json, uuid, tempfile, subprocess, time
-from pathlib import Path
+import os
+import json
+import uuid
+import tempfile
+import subprocess
 from PySide6.QtCore import QThread, Signal
-from workers.deepseek import DeepSeekMusicOrchestrator
 from workers.caption_backends import GeminiBackend, CustomOpenAICompatBackend
 from modules import caption_spec
 from modules.caption_quality import trim_to_caption

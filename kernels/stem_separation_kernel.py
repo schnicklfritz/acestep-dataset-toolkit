@@ -14,7 +14,6 @@ Two placeholders are substituted by the app at push time:
   ``{{MODEL}}``     e.g. ``htdemucs_ft``
   ``{{TWO_STEMS}}`` e.g. ``vocals`` (or empty for full multi-stem output)
 """
-import glob
 import json
 import os
 import subprocess

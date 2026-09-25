@@ -10,9 +10,7 @@ Mirrors the Kaggle push/poll/download pattern already used by
 import json
 import os
 import shutil
-import subprocess
 import tempfile
-import time
 import uuid
 from pathlib import Path
 

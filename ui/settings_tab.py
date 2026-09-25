@@ -14,8 +14,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QScrollArea, QFrame, QWidget,
-    QGroupBox, QLabel, QLineEdit, QCheckBox, QTextEdit,
-    QFontComboBox, QPushButton,
+    QGroupBox, QLabel, QLineEdit, QCheckBox, QFontComboBox,
+    QPushButton,
 )
 # Scroll-wheel-guarded value widgets (see modules/wheel_guard.py): the wheel
 # only changes these after the control has been clicked, so scrolling this pane

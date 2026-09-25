@@ -1,9 +1,11 @@
-import os, json, uuid, tempfile, subprocess, shutil, time, struct
+import os
+import json
+import uuid
+import tempfile
+import shutil
 from pathlib import Path
 import librosa
-import numpy as np
 import soundfile as sf
-from openai import OpenAI
 from PySide6.QtCore import QThread, Signal
 from stem_separator import StemSeparator
 from workers.deepseek import DeepSeekMusicOrchestrator

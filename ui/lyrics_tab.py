@@ -11,7 +11,6 @@ persisted to settings, because the right spelling is singer-dependent.
 Follows the ui/settings_tab.py pattern: ``build_lyrics_tab(manager, parent)``
 stores every widget as ``manager.<name>``.
 """
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,

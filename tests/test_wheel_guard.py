@@ -3,11 +3,9 @@
 Regression guard for the accident where scrolling the dataset silently changed
 a combo/spin/slider the cursor merely passed over.
 """
-import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QComboBox,
     QDoubleSpinBox,
     QScrollArea,

@@ -1,14 +1,9 @@
 import os
-import json
 import time
-import tempfile
 import shutil
 import requests
 from pathlib import Path
 from modules.mvsep_api import get_algorithms
-import librosa
-import soundfile as sf
-import numpy as np
 
 # ----------------------------------------------------------------------
 # StemSeparator – Unified stem separation with MVSEP API
