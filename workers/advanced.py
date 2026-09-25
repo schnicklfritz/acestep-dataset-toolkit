@@ -1,6 +1,5 @@
 import os
 import librosa
-import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QThread, Signal
 from workers.deepseek import DeepSeekMusicOrchestrator
@@ -10,13 +9,12 @@ class AdvancedDatasetOrchestratorWorker(QThread):
     track_processing_complete = Signal(str, dict, str)
     error_occurred = Signal(str)
 
-    def __init__(self, track_id, file_path, target_genre, api_key, use_spatial_module):
+    def __init__(self, track_id, file_path, target_genre, api_key):
         super().__init__()
         self.track_id = track_id
         self.file_path = file_path
         self.target_genre = target_genre
         self.api_key = api_key
-        self.use_spatial = use_spatial_module
         self._is_cancelled = False
 
     def run(self):
@@ -59,23 +57,8 @@ class AdvancedDatasetOrchestratorWorker(QThread):
                     "end_sec": round(end, 2),
                     "slice_path": out_path,
                     "caption": "",
-                    "spatial_tokens": {}
                 })
                 self.progress.emit(50 + int(i*5), f"Sliced: {name}")
-
-            if self.use_spatial and y.ndim > 1:
-                for seg in segments:
-                    slice_y, _ = librosa.load(seg["slice_path"], sr=None, mono=False)
-                    if slice_y.ndim > 1:
-                        left_en = np.sum(librosa.feature.rms(y=slice_y[0]))
-                        right_en = np.sum(librosa.feature.rms(y=slice_y[1]))
-                        ratio = left_en / (right_en + 1e-9)
-                        if ratio > 2.0:
-                            seg["spatial_tokens"]["stereo_balance"] = "heavy left"
-                        elif ratio < 0.5:
-                            seg["spatial_tokens"]["stereo_balance"] = "heavy right"
-                        else:
-                            seg["spatial_tokens"]["stereo_balance"] = "balanced"
 
             self.progress.emit(85, "Calling DeepSeek for aggregation...")
             orchestrator = DeepSeekMusicOrchestrator(api_key=self.api_key)
@@ -95,7 +78,3 @@ class AdvancedDatasetOrchestratorWorker(QThread):
 
     def cancel(self):
         self._is_cancelled = True
-
-# ============================================================================
-# NEW: Spatial Pipeline Worker (MVSEP, Slicing, L/R, Kaggle, DeepSeek)
-# ============================================================================

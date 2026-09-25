@@ -18,10 +18,9 @@ auditing, normalizing and auto-captioning ACE-Step training datasets.
 == TABS ==
 1. Dataset Studio — add/import audio tracks, per-track table, live quality gauge.
 2. Structural Pipeline — full song structure analysis + instrument extraction.
-3. Spatial Pipeline — L/R spatial analysis variant.
-4. MVSEP / Kaggle Separator — stem separation (cloud backends).
-5. Advanced Tools — DeepSeek master-prompt orchestration.
-6. Appearance & Customization — themes, fonts, UI zoom.
+3. MVSEP / Kaggle Separator — stem separation (cloud backends).
+4. Advanced Tools — DeepSeek master-prompt orchestration.
+5. Appearance & Customization — themes, fonts, UI zoom.
 7. AI Assistant (this tab) — ask anything about the app or your dataset.
 
 == CORE WORKFLOW ==

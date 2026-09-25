@@ -3083,11 +3083,6 @@ class DatasetManager(QMainWindow):
         group = QGroupBox("🧠 Advanced Structural Pipeline (DeepSeek + Librosa)")
         inner = QVBoxLayout(group)
 
-        self.spatial_module_checkbox = QCheckBox("Enable Dual-Channel Spatial Profiling")
-        self.spatial_module_checkbox.setToolTip("Analyzes left/right channel differences for stereo placement.")
-        self.spatial_module_checkbox.setChecked(True)
-        inner.addWidget(self.spatial_module_checkbox)
-
         self.advanced_pipeline_btn = QPushButton("🚀 Run Advanced Pipeline on Selected Track")
         self.advanced_pipeline_btn.clicked.connect(self.trigger_advanced_ai_pipeline)
         inner.addWidget(self.advanced_pipeline_btn)
@@ -3117,8 +3112,7 @@ class DatasetManager(QMainWindow):
         info = QLabel(
             "This pipeline separates stems (import or MVSEP), finds structural boundaries,\n"
             "captions each section per stem, and aggregates via DeepSeek to produce a\n"
-            "master caption for the whole track.\n"
-            "No spatial L/R processing – suitable for general LoRA training."
+            "master caption for the whole track."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa; padding: 10px;")
@@ -3643,7 +3637,6 @@ class DatasetManager(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Starting advanced structural segmentation and captioning...")
 
-        use_spatial = self.spatial_module_checkbox.isChecked()
         api_key = self.config.get("custom_key", "").strip()
         if not api_key:
             key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter DeepSeek API key:", QLineEdit.Password)
@@ -3662,7 +3655,6 @@ class DatasetManager(QMainWindow):
             file_path=selected["audio_path"],
             target_genre=target_genre,
             api_key=api_key,
-            use_spatial_module=use_spatial
         )
         self.active_worker.progress.connect(self.on_worker_progress)
         self.active_worker.track_processing_complete.connect(self.on_advanced_pipeline_success)

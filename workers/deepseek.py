@@ -26,25 +26,19 @@ class DeepSeekMusicOrchestrator:
             self.provider = "deepseek"
             self.model = "deepseek-chat"
 
-    def generate_master_dataset_prompt(self, target_genre, global_bpm, segments, spatial_tokens=None, lyrics=None):
+    def generate_master_dataset_prompt(self, target_genre, global_bpm, segments, lyrics=None):
         system_prompt = (
-            "You are an elite music prompt engineer for ACE-Step. Synthesize a cohesive master prompt from structural segments, "
-            "spatial instrument placement, and lyrical content. Output ONLY the final prompt, no introductory text. "
-            "Structure: [Genre/Vibe], [Production Texture], [Instrumentation with spatial placement], [Dynamics/Energy], [Structural flow]."
+            "You are an elite music prompt engineer for ACE-Step. Synthesize a cohesive master prompt from structural segments "
+            "and lyrical content. Output ONLY the final prompt, no introductory text. "
+            "Structure: [Genre/Vibe], [Production Texture], [Instrumentation], [Dynamics/Energy], [Structural flow]."
         )
         user_context = f"TARGET GENRE: {target_genre}\nGLOBAL BPM: {global_bpm}\n\n"
-        if spatial_tokens:
-            user_context += "SPATIAL PLACEMENT:\n"
-            for instr, pos in spatial_tokens.items():
-                user_context += f"  {instr}: {pos}\n"
         user_context += "\nSTRUCTURAL SEGMENTS:\n"
         for seg in segments:
             user_context += f"  [{seg['name']}] {seg['start_sec']}s - {seg['end_sec']}s\n"
             user_context += f"  Caption: {seg.get('caption', '')}\n"
             if lyrics and seg['name'] in lyrics:
                 user_context += f"  Lyrics: {lyrics[seg['name']]}\n"
-            if 'spatial_tokens' in seg and seg['spatial_tokens']:
-                user_context += f"  Spatial: {seg['spatial_tokens']}\n"
             user_context += "\n"
         user_context += "Compile final master caption now:"
 
