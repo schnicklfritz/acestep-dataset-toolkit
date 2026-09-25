@@ -204,7 +204,6 @@ def test_the_preflight_fails_on_a_bad_slug_alone(monkeypatch):
     "workers/kaggle_lyrics.py",     # Kaggle lyrics
     "workers/kaggle_stems.py",      # Demucs stems
     "workers/structure.py",         # SongFormer structure
-    "workers/spatial.py",           # L/R spatial captioning
     "workers/structural.py",        # section captioning
 ])
 def test_every_kaggle_run_path_runs_the_preflight(path):

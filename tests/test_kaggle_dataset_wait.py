@@ -101,7 +101,7 @@ def test_every_caption_kernel_pusher_uses_the_dataset_sources_helper():
     problems = []
     for path in sorted(glob.glob(os.path.join(WORKERS, "*.py"))):
         name = os.path.basename(path)
-        if name not in ("caption.py", "spatial.py", "structural.py"):
+        if name not in ("caption.py", "structural.py"):
             continue
         with open(path, encoding="utf-8") as fh:
             source = fh.read()

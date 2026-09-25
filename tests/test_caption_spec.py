@@ -255,7 +255,6 @@ def test_trim_keeps_flow_from_a_single_run_on_sentence():
 CAPTION_KERNEL = "kernels/caption_kernel.py"
 CAPTION_KERNEL_PUSHERS = (
     "workers/caption.py",      # Caption tab
-    "workers/spatial.py",      # spatial pipeline
     "workers/structural.py",   # structural pipeline
 )
 

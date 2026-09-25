@@ -275,8 +275,6 @@ class DatasetManager(QMainWindow):
         advanced_tab = QWidget()
         self.init_advanced_tab(advanced_tab)
 
-        spatial_tab = QWidget()
-        self.init_spatial_tab(spatial_tab)
         struct_tab = QWidget()
         self.init_structural_tab(struct_tab)
 
@@ -296,13 +294,12 @@ class DatasetManager(QMainWindow):
         self.init_ace_step_tab(ace_step_tab)
 
         # --- Grouped tabs: keep the top level to a short, scannable list ----
-        # Pipelines (Structural / Spatial / Advanced) share one tab with inner
+        # Pipelines (Structural / Advanced) share one tab with inner
         # sub-tabs; Organize (Tag Manager / Embedding Map) likewise.
         pipelines_tab = self._build_grouped_tab(
             "Pipeline",
             [
                 ("🎶 Structural", struct_tab),
-                ("🌐 Spatial", spatial_tab),
                 ("🧠 Advanced", advanced_tab),
             ],
         )
@@ -3108,86 +3105,8 @@ class DatasetManager(QMainWindow):
         layout.addStretch()
 
     # -----------------------------------------------------------------------
-    # Spatial Pipeline Tab
+    # Structural Pipeline Tab
     # -----------------------------------------------------------------------
-    def init_spatial_tab(self, parent):
-        layout = QVBoxLayout(parent)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        warning_box = QGroupBox("⚠️ Advanced Spatial Pipeline")
-        warning_box.setStyleSheet("QGroupBox { border: 2px solid #FF9800; }")
-        warn_layout = QVBoxLayout(warning_box)
-        warn_label = QLabel(
-            "This pipeline performs stem separation (MVSEP), structural slicing, L/R channel extraction, "
-            "captioning via Kaggle, spatial evaluation, and DeepSeek aggregation.\n"
-            "It requires API keys for MVSEP, DeepSeek, and Kaggle credentials.\n"
-            "Proceed only if you have these services set up."
-        )
-        warn_label.setWordWrap(True)
-        warn_label.setStyleSheet("color: #ffcc80;")
-        warn_layout.addWidget(warn_label)
-
-        self.spatial_warning_check = QCheckBox("I understand the requirements and have the necessary API keys.")
-        warn_layout.addWidget(self.spatial_warning_check)
-        layout.addWidget(warning_box)
-
-        options_box = QGroupBox("Pipeline Options")
-        opts_layout = QFormLayout(options_box)
-
-        self.stem_source_combo = QComboBox()
-        self.stem_source_combo.addItems(["Import existing stems", "Separate via MVSEP", "Separate via Kaggle (Demucs)"])
-
-        opts_layout.addRow("Stem source:", self.stem_source_combo)
-
-
-        self.use_deepseek_check = QCheckBox("Use DeepSeek for aggregation")
-        self.use_deepseek_check.setChecked(True)
-        opts_layout.addRow(self.use_deepseek_check)
-
-        self.custom_endpoint_check = QCheckBox("Use Custom Endpoint instead of Kaggle/DeepSeek")
-        self.custom_endpoint_check.toggled.connect(self.toggle_custom_endpoint)
-        opts_layout.addRow(self.custom_endpoint_check)
-
-        self.custom_endpoint_url = QLineEdit()
-        self.custom_endpoint_url.setPlaceholderText("http://localhost:8000/spatial")
-        self.custom_endpoint_url.setEnabled(False)
-        opts_layout.addRow("Endpoint URL:", self.custom_endpoint_url)
-
-        layout.addWidget(options_box)
-
-        notebook_box = QGroupBox("🔒 Kaggle Notebook Access")
-        nb_layout = QVBoxLayout(notebook_box)
-
-        unlock_btn = QPushButton("Unlock Notebook (Advanced)")
-        unlock_btn.clicked.connect(self.unlock_kaggle_notebook)
-        nb_layout.addWidget(unlock_btn)
-
-        self.notebook_edit_area = QTextEdit()
-        self.notebook_edit_area.setPlaceholderText("Paste custom Kaggle notebook code here (only if unlocked).")
-        self.notebook_edit_area.setEnabled(False)
-        self.notebook_edit_area.setMaximumHeight(200)
-        nb_layout.addWidget(self.notebook_edit_area)
-
-        self.notebook_status = QLabel("Notebook locked. Click the button to unlock.")
-        self.notebook_status.setStyleSheet("color: #aaa;")
-        nb_layout.addWidget(self.notebook_status)
-
-        layout.addWidget(notebook_box)
-
-        self.run_spatial_btn = QPushButton("🚀 Run Spatial Pipeline on Selected Track")
-        self.run_spatial_btn.setStyleSheet("font-weight: bold; background-color: #0e639c; padding: 10px;")
-        self.run_spatial_btn.clicked.connect(self.run_spatial_pipeline)
-        layout.addWidget(self.run_spatial_btn)
-
-        self.spatial_progress = QProgressBar()
-        self.spatial_progress.setVisible(False)
-        layout.addWidget(self.spatial_progress)
-
-        self.spatial_status = QLabel("Ready")
-        layout.addWidget(self.spatial_status)
-
-        layout.addStretch()
-
     def init_structural_tab(self, parent):
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -3354,212 +3273,6 @@ class DatasetManager(QMainWindow):
 
         layout.addWidget(group)
         layout.addStretch()
-
-    # -----------------------------------------------------------------------
-    # Spatial Pipeline Methods
-    # -----------------------------------------------------------------------
-    def toggle_custom_endpoint(self, checked):
-        self.custom_endpoint_url.setEnabled(checked)
-        if checked:
-            self.use_deepseek_check.setChecked(False)
-            self.use_deepseek_check.setEnabled(False)
-        else:
-            self.use_deepseek_check.setEnabled(True)
-
-    def unlock_kaggle_notebook(self):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Unlock Kaggle Notebook")
-        msg.setIcon(QMessageBox.Warning)
-        msg.setText(
-            "Editing the Kaggle notebook may break the captioning pipeline.\n"
-            "Only proceed if you understand the code and the risks.\n\n"
-            "I know what I am doing."
-        )
-        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        ret = msg.exec()
-        if ret == QMessageBox.Ok:
-            self.kaggle_notebook_unlocked = True
-            self.notebook_edit_area.setEnabled(True)
-            self.notebook_status.setText("✅ Notebook unlocked. You may edit the code below.")
-            self.notebook_status.setStyleSheet("color: #4CAF50;")
-        else:
-            self.notebook_status.setText("❌ Notebook remains locked.")
-            self.notebook_status.setStyleSheet("color: #FF9800;")
-
-    def run_spatial_pipeline(self):
-        # ---- Determine which tracks to process based on scope ----
-        scope = self.struct_scope_combo.currentText()
-        if scope == "All Tracks":
-            tracks = self.dataset.get("samples", [])
-            if not tracks:
-                QMessageBox.warning(self, "No Tracks", "The dataset is empty.")
-                return
-        elif scope == "Tracks Missing Captions":
-            tracks = [s for s in self.dataset.get("samples", []) if not s.get("caption", "").strip()]
-            if not tracks:
-                QMessageBox.information(self, "Nothing to Process", "All tracks already have captions.")
-                return
-        else:  # "Selected Tracks (from list)"
-            # First, try to use the text input if non‑empty
-            numbers_text = self.track_numbers_input.text().strip()
-            if numbers_text:
-                indices = self._parse_track_numbers(numbers_text)
-                if indices is None:
-                    QMessageBox.warning(self, "Invalid Input", "Invalid track number format. Use numbers separated by spaces, commas, or ranges (e.g., 1-3,5).")
-                    return
-                all_samples = self.dataset.get("samples", [])
-                valid_indices = [i for i in indices if 1 <= i <= len(all_samples)]
-                if not valid_indices:
-                    QMessageBox.warning(self, "No Valid Tracks", "None of the numbers correspond to existing tracks.")
-                    return
-                tracks = [all_samples[i-1] for i in valid_indices]
-            else:
-                # Fallback to list selection
-                selected_items = self.track_list_widget.selectedItems()
-                if not selected_items:
-                    QMessageBox.warning(self, "No Selection", "Please select at least one track from the list or enter numbers.")
-                    return
-                indices = []
-                for item in selected_items:
-                    try:
-                        num = int(item.text().split(' - ')[0])
-                        indices.append(num)
-                    except:
-                        continue
-                if not indices:
-                    QMessageBox.warning(self, "Invalid Selection", "Could not parse track numbers.")
-                    return
-                all_samples = self.dataset.get("samples", [])
-                tracks = [all_samples[i-1] for i in indices if 1 <= i <= len(all_samples)]
-
-        # ---- Read UI options ----
-        stem_source = self.struct_stem_combo.currentText()
-        if stem_source == "Separate via MVSEP":
-            if not self.config.get("mvsep_api_key"):
-                key, ok = QInputDialog.getText(self, "MVSEP API Key", "Enter your MVSEP API key:", QLineEdit.Password)
-                if ok and key.strip():
-                    self.config["mvsep_api_key"] = key.strip()
-                    self.mvsep_key.setText(key.strip())
-                else:
-                    return
-
-        if self.struct_deepseek_check.isChecked() and not self.config.get("custom_key"):
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter your DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
-            else:
-                return
-
-        # ONE shared prompt (it also carries the "remember on this device"
-        # choice) instead of three copies that could drift apart.
-        if not self._ensure_kaggle_credentials():
-            return
-
-        # ---- Band profile ----
-        band = self.band_combo.currentText()
-        era = self.era_combo.currentText()
-        extra_notes = self.band_notes.text()
-        band_context = ""
-        instrument_context = ""
-        production_context = ""
-        vocal_context = ""
-        humanize_preset = "None"
-
-        if band != "None" and era != "None":
-            profiles = self.load_band_profiles()
-            band_data = profiles.get(band, {})
-            era_data = next((e for e in band_data.get("eras", []) if e["name"] == era), {})
-            band_context = f"{band} – {era}"
-            instrument_context = era_data.get("instruments", "")
-            production_context = era_data.get("production", "")
-            vocal_context = era_data.get("vocal_character", "")
-            humanize_preset = era_data.get("humanization_preset", "None")
-
-        # ---- Humanization and stem options ----
-        humanize = self.humanize_check.isChecked()
-        stem_options = {}
-        if self.instrument_extraction_check.isChecked():
-            sample = tracks[0] if tracks else None
-            caption_text = sample.get("caption", "") if sample else ""
-            if caption_text:
-                stem_options['use_caption_recommendation'] = True
-                stem_options['caption_text'] = caption_text
-            extra_models = self.extra_models_input.text().strip()
-            if extra_models:
-                models = [m.strip() for m in extra_models.split(',') if m.strip()]
-                stem_options['instrument_models'] = models
-
-        options = {
-            "stem_source": ("kaggle_demucs" if stem_source == "Separate via Kaggle (Demucs)" else ("mvsep" if stem_source == "Separate via MVSEP" else "import")),
-            "use_deepseek": self.struct_deepseek_check.isChecked(),
-            "use_lyrics": self.struct_seg_combo.currentText() == "Lyrics tags",
-            "humanize": humanize,
-            "humanize_preset": humanize_preset,
-            "band_context": band_context,
-            "instrument_context": instrument_context,
-            "production_context": production_context,
-            "vocal_context": vocal_context,
-            "extra_notes": extra_notes,
-            "stem_options": stem_options
-        }
-
-        # ---- Start batch worker ----
-        self.run_struct_btn.setEnabled(False)
-        self.struct_progress.setVisible(True)
-        self.struct_progress.setValue(0)
-        self.struct_status.setText(f"Starting structural pipeline on {len(tracks)} track(s)...")
-
-        self.batch_worker = StructuralPipelineBatchWorker(
-            tracks=tracks,
-            config=self.config,
-            options=options
-        )
-        self.batch_worker.progress.connect(self.on_struct_progress)
-        self.batch_worker.track_done.connect(self.on_struct_track_done)
-        self.batch_worker.all_done.connect(self.on_struct_batch_done)
-        self.batch_worker.error_occurred.connect(self.on_struct_error)
-        self.batch_worker.start()
-
-    def on_spatial_progress(self, pct, msg):
-        self.spatial_progress.setValue(pct)
-        self.spatial_status.setText(msg)
-
-    def on_spatial_step(self, step_name, data):
-        self.spatial_status.setText(f"Completed step: {step_name}")
-
-    def on_spatial_finished(self, track_id, result):
-        self.spatial_progress.setVisible(False)
-        self.run_spatial_btn.setEnabled(True)
-        self.spatial_status.setText("Pipeline completed successfully.")
-
-        for sample in self.dataset["samples"]:
-            if sample["id"] == track_id:
-                self.record_snapshot()
-                sample["caption"] = result["final_caption"]
-                sample["structural_segments"] = result["sections"]
-                sample["spatial_tokens"] = result["spatial_tokens"]
-                sample["stem_paths"] = result["stem_paths"]
-                sample["chunk_paths"] = result["chunk_paths"]
-                tags = result.get("tags") or {}
-                if tags:
-                    sample["tags"] = tags
-                    if tags.get("bpm"):
-                        sample["bpm"] = tags["bpm"]
-                    if tags.get("key"):
-                        sample["keyscale"] = tags["key"]
-                break
-        self.refresh_table()
-        self.on_table_selection_changed()
-
-        QMessageBox.information(self, "Spatial Pipeline Done",
-                                f"Final caption:\n\n{result['final_caption'][:500]}...")
-
-    def on_spatial_error(self, err):
-        self.spatial_progress.setVisible(False)
-        self.run_spatial_btn.setEnabled(True)
-        self.spatial_status.setText("Error: " + err)
-        QMessageBox.critical(self, "Spatial Pipeline Error", err)
 
     # -----------------------------------------------------------------------
     # Structural Pipeline Methods

@@ -37,6 +37,47 @@ def _window(y, sr):
     return y
 
 
+# Side/mid energy ratio below this is treated as mono. Measured (ffmpeg,
+# tests/test_stereo_detect.py): dual-mono -- a mono source copied to both
+# channels, as the DSP normalizer's `-ac 2` does -- is -inf as WAV, 128k MP3
+# and Ogg (the encoders code identical channels as zero side). A narrow
+# synthetic stereo mix measured -17 to -21 dB; hard-panned ~0 dB.
+# UNVERIFIED: a needle-drop of a mono record picks up small L/R differences
+# and may land between -30 and -20 dB; scripts/stereo_report.py prints the
+# number so such files are visible.
+MONO_SIDE_MID_DB = -30.0
+
+
+def detect_stereo(y):
+    """Classify a clip as ``"mono"`` or ``"stereo"`` from its channel data.
+
+    ``y`` is librosa's ``mono=False`` array: 1-D for single-channel files,
+    ``(channels, samples)`` otherwise. Uses the side/mid energy ratio of the
+    full mix -- no stem separation. Returns ``(label, side_mid_db)``;
+    ``side_mid_db`` is ``None`` for a single-channel file.
+    """
+    if y.ndim == 1 or y.shape[0] < 2:
+        return "mono", None
+    left, right = y[0].astype(np.float64), y[1].astype(np.float64)
+    mid = np.sum(((left + right) / 2.0) ** 2)
+    side = np.sum(((left - right) / 2.0) ** 2)
+    if mid <= 0.0:
+        return ("mono", None) if side <= 0.0 else ("stereo", None)
+    if side <= 0.0:
+        return "mono", float("-inf")
+    db = float(10.0 * np.log10(side / mid))
+    return ("mono" if db < MONO_SIDE_MID_DB else "stereo"), db
+
+
+def _stereo_window(y, sr):
+    """Time-bounded window that KEEPS the channels (unlike ``_window``)."""
+    n = int(sr * MAX_ANALYSIS_SEC)
+    if y.shape[-1] > n:
+        start = (y.shape[-1] - n) // 2
+        y = y[..., start : start + n]
+    return y
+
+
 def detect_tempo(y, sr):
     """Return an integer BPM estimate (0 if it cannot be determined)."""
     try:
@@ -169,7 +210,8 @@ def detect_instruments(y, sr, llm_instruments=None):
 def analyze_audio(audio_path, llm_instruments=None, use_clap=True):
     """Analyze an audio file and return a tags dict for captions/metadata.
 
-    Returns ``{"bpm", "key", "timesig", "instruments", "instrumental"}``.
+    Returns ``{"bpm", "key", "timesig", "instruments", "instrumental",
+    "stereo"}``; ``stereo`` is ``"mono"`` or ``"stereo"`` (see detect_stereo).
     ``llm_instruments`` is an optional authoritative instrument list (e.g. from
     a captioner); ``use_clap`` enables zero-shot CLAP tagging when available.
     """
@@ -179,9 +221,11 @@ def analyze_audio(audio_path, llm_instruments=None, use_clap=True):
         "timesig": "",
         "instruments": [],
         "instrumental": False,
+        "stereo": "",
     }
     try:
         y, sr = librosa.load(audio_path, sr=None, mono=False)
+        tags["stereo"], _ = detect_stereo(_stereo_window(y, sr))
         y_w = _window(y, sr)
         tags["bpm"] = detect_tempo(y_w, sr)
         tags["key"] = detect_key(y_w, sr)
@@ -219,6 +263,8 @@ def format_tags(tags):
         parts.append("Instruments: " + ", ".join(i for i in inst if i))
     if tags.get("instrumental"):
         parts.append("Instrumental")
+    if tags.get("stereo") == "mono":
+        parts.append("mono recording")
     return "; ".join(parts)
 
 

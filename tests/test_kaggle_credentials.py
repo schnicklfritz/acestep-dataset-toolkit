@@ -237,8 +237,7 @@ def test_the_caption_run_resolves_instead_of_calling_resolve_backend():
 
 def test_the_pipeline_prompts_share_one_helper():
     source = _manager_source()
-    # One per live Kaggle pipeline (spatial, structural). The count was 3 while a
-    # dead duplicate run_spatial_pipeline -- shadowed by the second definition,
-    # never executed -- still sat in the source.
-    assert source.count("if not self._ensure_kaggle_credentials():") == 2
+    # One per Kaggle pipeline button. The Spatial tab (and its misnamed
+    # run_spatial_pipeline) was removed; only the structural pipeline remains.
+    assert source.count("if not self._ensure_kaggle_credentials():") == 1
     assert "Enter Kaggle username" not in source, "an old inline prompt survived"
