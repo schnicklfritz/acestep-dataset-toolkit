@@ -164,7 +164,8 @@
 #        Python:     vulture . --exclude .venv,kernels   (dead code)
 #                    flake8 --select=F401 .              (unused imports)
 #        TypeScript: knip  /  ts-prune                    (unused/dead)
-#    - Pipe ONLY the flagged lines into `.changed_markers` under a
-#      `[BASELINE SWEEP]` section. The LLM then inspects just those
+#    - Record ONLY the flagged lines in `.agent_notes.md` under its
+#      `[BASELINE SWEEP]` section — NEVER in `.changed_markers`, which the
+#      generator overwrites on every run and is gitignored. The LLM then inspects just those
 #      candidates (judgment: is this really dead?) instead of the whole repo.
 #    - The free, deterministic tool does the scan; the model only reviews flags.
