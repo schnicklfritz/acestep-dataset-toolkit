@@ -174,8 +174,8 @@ DEFAULT_CONFIG = {
     "model_dir": "models",            # local dir for downloaded models
     "remember_hf_token": True,
     # ---- Pluggable LLM provider (aggregation, recommendations, assistant) ----
-    # deepseek (default, paid) | gemini (free) | groq (free) | openrouter (free) | local
-    "llm_provider": "deepseek",
+    # groq (free, default) | gemini (free) | openrouter (free) | deepseek (paid) | local
+    "llm_provider": "groq",
     "llm_model": "",                  # empty = provider default
     "llm_base_url": "",               # empty = provider default
     # Per-role overrides (empty = use the global provider/model above):

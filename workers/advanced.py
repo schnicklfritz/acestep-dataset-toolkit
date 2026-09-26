@@ -9,12 +9,12 @@ class AdvancedDatasetOrchestratorWorker(QThread):
     track_processing_complete = Signal(str, dict, str)
     error_occurred = Signal(str)
 
-    def __init__(self, track_id, file_path, target_genre, api_key):
+    def __init__(self, track_id, file_path, target_genre, config):
         super().__init__()
         self.track_id = track_id
         self.file_path = file_path
         self.target_genre = target_genre
-        self.api_key = api_key
+        self.config = config
         self._is_cancelled = False
 
     def run(self):
@@ -60,8 +60,8 @@ class AdvancedDatasetOrchestratorWorker(QThread):
                 })
                 self.progress.emit(50 + int(i*5), f"Sliced: {name}")
 
-            self.progress.emit(85, "Calling DeepSeek for aggregation...")
-            orchestrator = DeepSeekMusicOrchestrator(api_key=self.api_key)
+            self.progress.emit(85, "Calling the LLM for aggregation...")
+            orchestrator = DeepSeekMusicOrchestrator(config=self.config, role="aggregator")
             onset = librosa.onset.onset_strength(y=y_mono, sr=sr)
             bpm = int(librosa.feature.tempo(onset_envelope=onset, sr=sr)[0])
             final_caption = orchestrator.generate_master_dataset_prompt(

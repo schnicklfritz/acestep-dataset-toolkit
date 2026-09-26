@@ -149,13 +149,13 @@ def build_settings_tab(manager, parent):
 
     manager.llm_provider_combo = QComboBox()
     manager.llm_provider_combo.addItems([
-        "deepseek (paid, cheap — default)",
+        "groq (free tier — default)",
         "gemini (free tier)",
-        "groq (free tier)",
         "openrouter (free models)",
+        "deepseek (paid)",
         "local (custom endpoint)",
     ])
-    cur_prov = str(manager.config.get("llm_provider", "deepseek") or "deepseek").lower()
+    cur_prov = str(manager.config.get("llm_provider", "groq") or "groq").lower()
     for i in range(manager.llm_provider_combo.count()):
         if manager.llm_provider_combo.itemText(i).startswith(cur_prov):
             manager.llm_provider_combo.setCurrentIndex(i)
@@ -163,10 +163,10 @@ def build_settings_tab(manager, parent):
     manager.llm_provider_combo.currentIndexChanged.connect(manager._on_llm_provider_changed)
     llm_form.addRow("Provider:", manager.llm_provider_combo)
 
-    manager.llm_api_key = QLineEdit(manager.config.get("deepseek_key", ""))
+    manager.llm_api_key = QLineEdit("")  # filled for the active provider by _on_llm_provider_changed
     manager.llm_api_key.setEchoMode(QLineEdit.Password)
     manager.llm_api_key.setPlaceholderText("auto-routes to the selected provider/model")
-    manager.llm_api_key.setToolTip("One key field that routes to whichever provider is selected (DeepSeek / Gemini / Groq / OpenRouter). The app knows which API from the model chosen.")
+    manager.llm_api_key.setToolTip("One key field that routes to whichever provider is selected (Groq / Gemini / OpenRouter / DeepSeek). The app knows which API from the model chosen.")
     llm_form.addRow("Provider API Key:", manager.llm_api_key)
     manager.remember_llm_api = QCheckBox("Remember this key (encrypted)")
     manager.remember_llm_api.setToolTip("Save the active provider's key in the encrypted store. Uncheck for session-only.")
@@ -201,7 +201,7 @@ def build_settings_tab(manager, parent):
     rform.setContentsMargins(8, 14, 8, 8)
     manager.role_provider_combo = {}
     manager.role_model_combo = {}
-    _role_providers = ["default (global)", "deepseek", "gemini", "groq", "openrouter", "local"]
+    _role_providers = ["default (global)", "groq", "gemini", "openrouter", "deepseek", "local"]
     for role in ("aggregator", "captioner", "assistant"):
         row = QHBoxLayout()
         prov = QComboBox()
@@ -211,9 +211,8 @@ def build_settings_tab(manager, parent):
         prov.setToolTip(f"Provider used by the {role} (the master-caption aggregator, the LLM captioner, or the AI assistant).")
         mod = QComboBox()
         mod.setEditable(True)
-        mod.addItems(["", "deepseek-chat", "gemini-2.5-flash", "gemini-2.5-pro",
-                      "llama-3.3-70b-versatile",
-                      "meta-llama/llama-3.3-70b-instruct:free"])
+        from modules.llm_client import KNOWN_MODELS
+        mod.addItems([""] + [m for ms in KNOWN_MODELS.values() for m in ms])
         mod.setCurrentText(manager.config.get(f"llm_model_{role}", ""))
         mod.setToolTip(
             f"Model used by the {role}. Leave EMPTY to follow the provider's "

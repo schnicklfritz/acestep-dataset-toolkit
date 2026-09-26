@@ -3080,7 +3080,7 @@ class DatasetManager(QMainWindow):
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        group = QGroupBox("🧠 Advanced Structural Pipeline (DeepSeek + Librosa)")
+        group = QGroupBox("🧠 Advanced Structural Pipeline (LLM + Librosa)")
         inner = QVBoxLayout(group)
 
         self.advanced_pipeline_btn = QPushButton("🚀 Run Advanced Pipeline on Selected Track")
@@ -3090,7 +3090,7 @@ class DatasetManager(QMainWindow):
         info = QLabel(
             "Uses Librosa to segment the selected track into ~9 macro sections,\n"
             "exports each as WAV to a 'structural_slices' folder, and then\n"
-            "aggregates via DeepSeek to produce a master caption."
+            "aggregates via the configured LLM (Groq by default) into a master caption."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa; padding: 10px;")
@@ -3111,7 +3111,7 @@ class DatasetManager(QMainWindow):
 
         info = QLabel(
             "This pipeline separates stems (import or MVSEP), finds structural boundaries,\n"
-            "captions each section per stem, and aggregates via DeepSeek to produce a\n"
+            "captions each section per stem, and aggregates via the configured LLM into a\n"
             "master caption for the whole track."
         )
         info.setWordWrap(True)
@@ -3246,8 +3246,8 @@ class DatasetManager(QMainWindow):
 
         inner.addLayout(band_layout)
 
-        # DeepSeek toggle
-        self.struct_deepseek_check = QCheckBox("Use DeepSeek for aggregation")
+        # LLM aggregation toggle (attribute name kept for compatibility)
+        self.struct_deepseek_check = QCheckBox("Use the LLM for aggregation")
         self.struct_deepseek_check.setChecked(True)
         inner.addWidget(self.struct_deepseek_check)
 
@@ -3368,13 +3368,8 @@ class DatasetManager(QMainWindow):
                 else:
                     return
 
-        if self.struct_deepseek_check.isChecked() and not self.config.get("custom_key"):
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter your DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
-            else:
-                return
+        if self.struct_deepseek_check.isChecked() and not self._ensure_llm_key("aggregator"):
+            return
 
         # ONE shared prompt (it also carries the "remember on this device"
         # choice) instead of three copies that could drift apart.
@@ -3627,6 +3622,35 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Advanced Pipeline (from Advanced Tools tab)
     # -----------------------------------------------------------------------
+    def _ensure_llm_key(self, role):
+        """Make sure the LLM provider in effect for ``role`` has a key.
+
+        Asks for the ACTIVE provider's key (Groq by default, free) instead of
+        assuming DeepSeek. Returns False if the user cancels.
+        """
+        from modules.llm_client import provider_info, provider_key_present
+
+        if provider_key_present(self.config, role=role):
+            return True
+        name, info = provider_info(self.config, role=role)
+        if name == "local":
+            QMessageBox.warning(
+                self, "LLM endpoint missing",
+                "The 'local' LLM provider needs a Custom Endpoint URL in ⚙ Settings.",
+            )
+            return False
+        hint = f"\nFree key: {info['signup_url']}" if info.get("free") and info.get("signup_url") else ""
+        key, ok = QInputDialog.getText(
+            self, f"{info['label']} API key",
+            f"Enter your {info['label']} API key.{hint}\n"
+            "Change provider in the Assistant panel or ⚙ Settings.",
+            QLineEdit.Password,
+        )
+        if not (ok and key.strip()):
+            return False
+        self.config[info["key"]] = key.strip()
+        return True
+
     def trigger_advanced_ai_pipeline(self):
         selected = self.get_selected_sample()
         if not selected:
@@ -3637,16 +3661,9 @@ class DatasetManager(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Starting advanced structural segmentation and captioning...")
 
-        api_key = self.config.get("custom_key", "").strip()
-        if not api_key:
-            key, ok = QInputDialog.getText(self, "DeepSeek API Key", "Enter DeepSeek API key:", QLineEdit.Password)
-            if ok and key.strip():
-                self.config["custom_key"] = key.strip()
-                self.custom_key.setText(key.strip())
-                api_key = key.strip()
-            else:
-                self.progress_bar.setVisible(False)
-                return
+        if not self._ensure_llm_key("aggregator"):
+            self.progress_bar.setVisible(False)
+            return
 
         target_genre = self.custom_tag_input.text().strip() or "Alternative Rock Production"
 
@@ -3654,7 +3671,7 @@ class DatasetManager(QMainWindow):
             track_id=selected["id"],
             file_path=selected["audio_path"],
             target_genre=target_genre,
-            api_key=api_key,
+            config=self.config,
         )
         self.active_worker.progress.connect(self.on_worker_progress)
         self.active_worker.track_processing_complete.connect(self.on_advanced_pipeline_success)
@@ -3710,7 +3727,7 @@ class DatasetManager(QMainWindow):
         }
         # The unified Provider API Key routes to whichever provider is active.
         active = self.llm_provider_combo.currentText().split(" ")[0]
-        key_field, _ = LLM_KEY_FIELDS.get(active, ("deepseek_key", "remember_deepseek_key"))
+        key_field, _ = LLM_KEY_FIELDS.get(active, ("groq_key", "remember_groq_key"))
         if self.remember_llm_api.isChecked():
             remember.add(key_field)
         return remember
@@ -3726,20 +3743,14 @@ class DatasetManager(QMainWindow):
         """Auto-fill model + base URL + note when the LLM provider changes."""
         from modules.llm_client import PROVIDERS
 
+        from modules.llm_client import DEFAULT_PROVIDER, KNOWN_MODELS
+
         name = self.llm_provider_combo.currentText().split(" ")[0]
-        info = PROVIDERS.get(name, PROVIDERS["deepseek"])
+        info = PROVIDERS.get(name, PROVIDERS[DEFAULT_PROVIDER])
         self.llm_model_combo.clear()
-        # Empty first = "use the provider's default model". Listed names are
-        # real, currently-served models only.
-        self.llm_model_combo.addItems([
-            "",
-            info["model"],
-            "deepseek-chat",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "llama-3.3-70b-versatile",
-            "meta-llama/llama-3.3-70b-instruct:free",
-        ])
+        # Empty first = "use the provider's default model". Only this
+        # provider's verified models are offered.
+        self.llm_model_combo.addItems([""] + KNOWN_MODELS.get(name, []))
         # Show the stored value, or the provider default as a hint — but do NOT
         # write the hint back (that would pin one provider's model name and
         # break after switching provider; see save_cloud_config).
@@ -3749,7 +3760,7 @@ class DatasetManager(QMainWindow):
             (self.config.get("llm_base_url") or "").strip() or info["base_url"]
         )
         # Sync the unified Provider API Key field to the active provider.
-        key_field, rem_field = LLM_KEY_FIELDS.get(name, ("deepseek_key", "remember_deepseek_key"))
+        key_field, rem_field = LLM_KEY_FIELDS.get(name, ("groq_key", "remember_groq_key"))
         self.llm_api_key.setText(self.config.get(key_field, ""))
         self.llm_api_key.setPlaceholderText(f"API key for {name}")
         self.remember_llm_api.setChecked(bool(self.config.get(rem_field, True)))
@@ -3793,7 +3804,7 @@ class DatasetManager(QMainWindow):
         self.config["remember_groq_key"] = self.remember_groq.isChecked()
         # Unified Provider API Key -> the active provider's stored key.
         active = self.llm_provider_combo.currentText().split(" ")[0]
-        key_field, rem_field = LLM_KEY_FIELDS.get(active, ("deepseek_key", "remember_deepseek_key"))
+        key_field, rem_field = LLM_KEY_FIELDS.get(active, ("groq_key", "remember_groq_key"))
         self.config[key_field] = self.llm_api_key.text().strip()
         self.config[rem_field] = self.remember_llm_api.isChecked()
         # Per-role LLM overrides (aggregator / captioner / assistant).
