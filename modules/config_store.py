@@ -28,6 +28,26 @@ def load_config(defaults):
     return cfg
 
 
+def save_plain_keys(cfg, keys):
+    """Persist only ``keys`` (non-secret) into settings.json, leaving every
+    other saved value and the encrypted secret store untouched.
+
+    For UI preferences (theme, layout) that are saved on every change: a full
+    save_config() would also re-evaluate which secrets to keep.
+    """
+    keys = [k for k in keys if k not in SECRET_KEYS]
+    try:
+        saved = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
+    except Exception:  # noqa: BLE001 -- a corrupt file is replaced, not fatal
+        saved = {}
+    for k in keys:
+        saved[k] = cfg.get(k)
+    try:
+        SETTINGS_PATH.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def save_config(cfg, remember=None):
     """Persist cfg: plain keys to settings.json, secrets to the encrypted store.
 

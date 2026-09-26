@@ -192,6 +192,13 @@ DEFAULT_CONFIG = {
     "groq_key": "",                   # (secret)
     "remember_openrouter_key": True,
     "remember_groq_key": True,
+    # ---- Appearance (ui/themes.py) ----
+    "theme_name": "Studio Dark",       # a key of ui.themes.BUILTIN_THEMES
+    "theme_overrides": {},             # {theme_name: {role: "#rrggbb"}}
+    "ui_font_family": "",              # empty = system default
+    "ui_zoom": 1.0,
+    "ui_dock_state": "",               # base64 QMainWindow.saveState()
+    "ui_hidden_columns": None,         # None = ui.shell.DEFAULT_HIDDEN_COLUMNS
     # ---- AI assistant ----
     "assistant_remember": True,        # persist the conversation across sessions
     "assistant_context_size": 40,      # max messages kept in context

@@ -62,6 +62,8 @@ from modules.wheel_guard import (
 )
 from PySide6.QtGui import QDesktopServices
 
+from ui.themes import repolish
+
 # Provider -> (key config field, remember flag) — the unified "Provider API Key"
 # field routes to whichever provider/model is selected.
 LLM_KEY_FIELDS = {
@@ -117,14 +119,6 @@ class DatasetManager(QMainWindow):
         self.undo_stack = []
         self.redo_stack = []
 
-        self.custom_theme = {
-            "bg_color": "#1e1e1e",
-            "panel_bg": "#252526",
-            "text_color": "#d4d4d4",
-            "accent_color": "#0e639c",
-            "font_family": "Segoe UI",
-            "zoom_factor": 1.0
-        }
 
         self.dataset = {
             "metadata": {
@@ -261,13 +255,15 @@ class DatasetManager(QMainWindow):
         self.sync_meta_btn = None
         self.normalize_btn = None
         self.transcribe_btn = None
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
+        # The window is assembled at the end of init_ui by ui.shell.install_shell
+        # from the pieces collected here (the approved dock layout).
+        parts = {}
 
-        studio_tab = QWidget()
-        studio_layout = QVBoxLayout(studio_tab)
-        studio_layout.setContentsMargins(10, 8, 10, 8)
-        studio_layout.setSpacing(6)
+        def _wrap(layout):
+            w = QWidget()
+            layout.setContentsMargins(0, 0, 0, 0)
+            w.setLayout(layout)
+            return w
 
         settings_tab = QWidget()
         self.init_settings_tab(settings_tab)
@@ -321,27 +317,15 @@ class DatasetManager(QMainWindow):
             "Caption",
             [
                 ("🅰 ACE-Step (Kaggle)", ace_step_tab),
-                ("🎤 Other backends & MOSS", caption_tab),
+                ("🎤 Other backends && MOSS", caption_tab),
             ],
         )
 
-        self._add_tab(studio_tab, "🎛 Dataset Studio")
-        self._add_tab(caption_group_tab, "🎤 Caption")
-        self._add_tab(lyrics_tab, "🎵 Lyrics")
-        self._add_tab(pipelines_tab, "⚙️ Pipeline")
-        self._add_tab(organize_tab, "🏷️ Organize")
-        self._add_tab(settings_tab, "⚙ Settings")
-        self._add_tab(assistant_tab, "🤖 Assistant")
-        self.tag_tab_index = self.tabs.indexOf(tag_tab)
-        self.embed_tab_index = self.tabs.indexOf(embed_tab)
-        self.lyrics_tab_index = self.tabs.indexOf(lyrics_tab)
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-
-        # Set the Dataset Studio tab as the default visible tab
-        studio_index = self.tabs.indexOf(studio_tab)
-        self.studio_tab_index = studio_index
-        if studio_index != -1:
-            self.tabs.setCurrentIndex(studio_index)
+        shell_pages = {
+            "caption": caption_group_tab, "lyrics": lyrics_tab,
+            "structure": pipelines_tab, "organize": organize_tab,
+            "assistant": assistant_tab, "settings": settings_tab,
+        }
 
         # --- Header Bar ---
         # Compact primary actions; one-off utilities live behind the ⋯ menu so
@@ -414,10 +398,10 @@ class DatasetManager(QMainWindow):
 
         header_bar.addWidget(self.more_menu_btn)
 
-        studio_layout.addLayout(header_bar)
+        parts["header"] = _wrap(header_bar)
 
         # --- General Properties ---
-        gen_box = QGroupBox("General Properties & Global Settings")
+        gen_box = QGroupBox("Dataset")
         gen_layout = QHBoxLayout(gen_box)
         gen_layout.setContentsMargins(8, 4, 8, 4)
 
@@ -455,11 +439,13 @@ class DatasetManager(QMainWindow):
         gen_layout.addWidget(self.radio_all_inst)
         gen_layout.addWidget(self.radio_no_inst)
 
-        studio_layout.addWidget(gen_box)
+        parts["dataset_box"] = gen_box
 
         # "Set All Tracks" — the deliberate alternative to per-row editing.
         # Collapsed by default; nothing changes until Apply + confirm.
-        self.init_bulk_edit_panel(studio_layout)
+        bulk_holder = QVBoxLayout()
+        self.init_bulk_edit_panel(bulk_holder)
+        parts["bulk"] = _wrap(bulk_holder)
 
         # ============================================================================
         # Row 1: Dataset Calibration (Primary Controls)
@@ -468,7 +454,7 @@ class DatasetManager(QMainWindow):
         
         # 👑 THE FLAGSHIP ENGINE: Re-labeled to match your 1.5XL Caption & Lyrics spec
         self.import_json_manifest_btn = QPushButton("📥 Import ACE-Step 1.5XL Tags")
-        self.import_json_manifest_btn.setStyleSheet("font-weight: bold; background-color: #0e639c; color: white; padding: 5px 14px;")
+        self.import_json_manifest_btn.setProperty("role", "primary")
         self.import_json_manifest_btn.setToolTip("Instantly loads your schema-enforced 1.5XL caption and lyrics tags to fix placeholders.")
         self.import_json_manifest_btn.clicked.connect(self.import_acestep_15xl_tags)
         audit_strip.addWidget(self.import_json_manifest_btn)
@@ -478,11 +464,11 @@ class DatasetManager(QMainWindow):
         self.sync_meta_btn.clicked.connect(self.force_sync_manifest_to_metadata)
         audit_strip.addWidget(self.sync_meta_btn)
 
-        self.normalize_btn = QPushButton("🎚️ Fix & DSP Normalize")
+        self.normalize_btn = QPushButton("🎚️ Fix && DSP Normalize")
         self.normalize_btn.clicked.connect(self.start_dsp_normalize)
         audit_strip.addWidget(self.normalize_btn)
         audit_strip.addStretch() 
-        studio_layout.addLayout(audit_strip)
+        parts["audit_strip"] = audit_strip
         # ============================================================================
         # Step 2: Linguistic & Transcription Pipeline (Row 2)
         # ============================================================================
@@ -523,7 +509,7 @@ class DatasetManager(QMainWindow):
         lyrics_strip.addWidget(self.lyrics_prompt_edit)
 
         lyrics_strip.addStretch()
-        studio_layout.addLayout(lyrics_strip)
+        parts["lyrics_strip"] = lyrics_strip
 
         # ============================================================================
         # Step 3: Advanced Remote Cluster & Repo Controls (Row 3)
@@ -543,7 +529,7 @@ class DatasetManager(QMainWindow):
         advanced_strip.addWidget(self.musicbrainz_btn)
 
         advanced_strip.addStretch()
-        studio_layout.addLayout(advanced_strip)
+        parts["advanced_strip"] = advanced_strip
 
         # --- Tools row (find/replace, bulk rename, lyrics, A/B, riff, stem A/B) ---
         tools_strip = QHBoxLayout()
@@ -567,9 +553,8 @@ class DatasetManager(QMainWindow):
         for b in (fr_btn, rename_btn, lyr_btn, ab_btn, riff_btn, stemab_btn):
             tools_strip.addWidget(b)
         tools_strip.addStretch()
-        studio_layout.addLayout(tools_strip)
+        parts["tools_strip"] = tools_strip
 
-        audit_strip.addSpacing(15)
 
         self.all_view_btn = QPushButton("All Tracks")
         self.all_view_btn.setCheckable(True)
@@ -584,9 +569,11 @@ class DatasetManager(QMainWindow):
         view_group.addButton(self.all_view_btn)
         view_group.addButton(self.exceptions_view_btn)
 
-        audit_strip.addWidget(QLabel("View:"))
-        audit_strip.addWidget(self.all_view_btn)
-        audit_strip.addWidget(self.exceptions_view_btn)
+        view_row = QHBoxLayout()
+        view_row.addWidget(self.all_view_btn)
+        view_row.addWidget(self.exceptions_view_btn)
+        view_row.addStretch()
+        parts["view_row"] = _wrap(view_row)
 
         # --- Preview player + waveform ---
         player_bar = QHBoxLayout()
@@ -604,11 +591,11 @@ class DatasetManager(QMainWindow):
         player_bar.addWidget(self.stop_btn)
         player_bar.addWidget(self.seek_slider, 1)
         player_bar.addWidget(self.time_label)
-        studio_layout.addLayout(player_bar)
+        parts["player"] = _wrap(player_bar)
 
         self.waveform = WaveformWidget()
         self.waveform.set_audio(None)
-        studio_layout.addWidget(self.waveform)
+        parts["waveform"] = self.waveform
 
         try:
             self.media_player = QMediaPlayer(self)
@@ -635,16 +622,15 @@ class DatasetManager(QMainWindow):
         clear_filters = QPushButton("✕ Clear")
         clear_filters.clicked.connect(self.clear_filters)
         self.filter_count_label = QLabel("")
-        self.filter_count_label.setStyleSheet("color: #aaa;")
+        self.filter_count_label.setProperty("muted", True)
         filter_bar.addWidget(self.filter_search, 1)
         filter_bar.addWidget(self.filter_inst_combo)
         filter_bar.addWidget(self.filter_captioned_check)
         filter_bar.addWidget(clear_filters)
         filter_bar.addWidget(self.filter_count_label)
-        studio_layout.addLayout(filter_bar)
+        parts["filter"] = _wrap(filter_bar)
 
-        # --- Table + Inspector ---
-        splitter = QSplitter(Qt.Horizontal)
+        # --- Table + Inspector (placed side by side by ui.shell) ---
 
         # Column schema (index -> field): 0 Filename (read-only),
         # 1 Tag, 2 Genre, 3 Language, 4 Key, 5 BPM, 6 Time signature,
@@ -662,7 +648,7 @@ class DatasetManager(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
         self.table.itemChanged.connect(self.on_metadata_cell_edited)
-        splitter.addWidget(self.table)
+        parts["table"] = self.table
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -672,7 +658,7 @@ class DatasetManager(QMainWindow):
 
         self.sample_health_alert = QLabel("Select a track to edit its metadata and caption.")
         self.sample_health_alert.setWordWrap(True)
-        self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #555; border-radius: 2px;")
+        self.sample_health_alert.setProperty("health", "neutral")
         insp_layout.addWidget(self.sample_health_alert)
 
         unlock_bar = QHBoxLayout()
@@ -733,19 +719,13 @@ class DatasetManager(QMainWindow):
 
         insp_layout.addLayout(form)
         scroll.setWidget(inspector)
-        splitter.addWidget(scroll)
-        splitter.setSizes([680, 520])
+        parts["inspector"] = scroll
 
-        studio_layout.addWidget(splitter, 1)
-
-        bottom_bar = QHBoxLayout()
         self.status_label = QLabel("Ready")
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        bottom_bar.addWidget(self.status_label)
-        bottom_bar.addStretch()
-        bottom_bar.addWidget(self.progress_bar)
-        studio_layout.addLayout(bottom_bar)
+
+        self._install_shell(parts, shell_pages)
 
     # -----------------------------------------------------------------------
     # Settings Tab
@@ -2451,6 +2431,12 @@ class DatasetManager(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
 
+        from ui.assistant_provider import build_provider_row
+
+        prov_row, prov_state = build_provider_row(self)
+        layout.addLayout(prov_row)
+        layout.addWidget(prov_state)
+
         self.assistant_history = QTextBrowser()
         self.assistant_history.setHtml(
             "<b>🤖 AI Assistant</b><br>Ask about the app or your dataset. The "
@@ -2510,7 +2496,7 @@ class DatasetManager(QMainWindow):
         layout.addLayout(opts_row)
 
         self.assistant_status = QLabel("Ready.")
-        self.assistant_status.setStyleSheet("color: #aaa;")
+        self.assistant_status.setProperty("muted", True)
         layout.addWidget(self.assistant_status)
 
         # Restore the persistent linear conversation.
@@ -2751,10 +2737,41 @@ class DatasetManager(QMainWindow):
             "Select tracks on the left to add/remove tags."
         )
         self.tag_manager_status.setWordWrap(True)
-        self.tag_manager_status.setStyleSheet("color: #aaa;")
+        self.tag_manager_status.setProperty("muted", True)
         layout.addWidget(self.tag_manager_status)
 
         self.refresh_tag_manager()
+
+    def _install_shell(self, parts, pages):
+        """Assemble the dock layout (see ui/shell.py)."""
+        from ui.shell import flow_group, install_shell
+
+        lyrics_page = QWidget()
+        lv = QVBoxLayout(lyrics_page)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.addWidget(flow_group("Transcribe", parts["lyrics_strip"]))
+        lv.addWidget(pages["lyrics"], 1)
+
+        tags_page = QWidget()
+        tv = QVBoxLayout(tags_page)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.addWidget(flow_group("Import && fix", parts["audit_strip"]))
+        tv.addWidget(flow_group("Look up", parts["advanced_strip"]))
+        tv.addWidget(flow_group("Edit tools", parts["tools_strip"]))
+        tv.addWidget(pages["organize"], 1)
+        self._shell_extra_pages = [lyrics_page, tags_page]
+
+        tool_pages = [
+            ("Caption", pages["caption"]),
+            ("Lyrics", lyrics_page),
+            ("Structure", pages["structure"]),
+            ("Tags && checks", tags_page),
+        ]
+        install_shell(self, parts, tool_pages, pages["assistant"], pages["settings"])
+        # _on_tab_changed compares against these; they now index the Tools dock.
+        self.lyrics_tab_index = 1
+        self.tag_tab_index = 3
+        self.embed_tab_index = 3
 
     def _on_tab_changed(self, index):
         if index == self.tag_tab_index and hasattr(self, "tag_stats_table"):
@@ -2907,7 +2924,7 @@ class DatasetManager(QMainWindow):
         self.embed_compute_btn = QPushButton("🧮 Compute Embeddings")
         self.embed_compute_btn.clicked.connect(self.compute_embeddings)
         self.embed_backend_label = QLabel("")
-        self.embed_backend_label.setStyleSheet("color: #aaa;")
+        self.embed_backend_label.setProperty("muted", True)
         controls.addWidget(self.embed_compute_btn)
         controls.addWidget(self.embed_backend_label, 1)
         layout.addLayout(controls)
@@ -2925,7 +2942,7 @@ class DatasetManager(QMainWindow):
             "Similar songs cluster together — outliers and near-duplicates stand out."
         )
         self.embed_status.setWordWrap(True)
-        self.embed_status.setStyleSheet("color: #aaa;")
+        self.embed_status.setProperty("muted", True)
         layout.addWidget(self.embed_status)
 
     def compute_embeddings(self):
@@ -2974,7 +2991,6 @@ class DatasetManager(QMainWindow):
                 row = self._table_sample_indices.index(index)
             except ValueError:
                 return
-        self.tabs.setCurrentIndex(self.studio_tab_index)
         self.table.setCurrentCell(row, 0)
         self.on_table_selection_changed()
 
@@ -3022,7 +3038,7 @@ class DatasetManager(QMainWindow):
         lay.addLayout(dest_row)
 
         self.exp_status = QLabel(f"{len(samples)} tracks ready to export.")
-        self.exp_status.setStyleSheet("color: #aaa;")
+        self.exp_status.setProperty("muted", True)
         lay.addWidget(self.exp_status)
 
         btn_row = QHBoxLayout()
@@ -3093,7 +3109,7 @@ class DatasetManager(QMainWindow):
             "aggregates via the configured LLM (Groq by default) into a master caption."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #aaa; padding: 10px;")
+        info.setProperty("muted", True)
         inner.addWidget(info)
 
         layout.addWidget(group)
@@ -3115,7 +3131,7 @@ class DatasetManager(QMainWindow):
             "master caption for the whole track."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #aaa; padding: 10px;")
+        info.setProperty("muted", True)
         inner.addWidget(info)
 
         # ---- Scope selection ----
@@ -3207,7 +3223,7 @@ class DatasetManager(QMainWindow):
             "you must experiment with other models that may or may not be on the list."
         )
         disclaimer.setWordWrap(True)
-        disclaimer.setStyleSheet("color: #ffcc80; font-size: 10px; padding: 4px;")
+        disclaimer.setProperty("tone", "warning"); disclaimer.setProperty("small", True)
         sep_layout2.addWidget(disclaimer)
 
 
@@ -3221,7 +3237,7 @@ class DatasetManager(QMainWindow):
         sep_layout2.addLayout(model_layout)
 
         note = QLabel("You can also manually type additional MVSEP model names above.")
-        note.setStyleSheet("color: #aaa; font-size: 9px;")
+        note.setProperty("muted", True); note.setProperty("small", True)
         sep_layout2.addWidget(note)
 
         inner.addWidget(sep_group)
@@ -3253,7 +3269,7 @@ class DatasetManager(QMainWindow):
 
         # Run button
         self.run_struct_btn = QPushButton("🚀 Run Structural Pipeline")
-        self.run_struct_btn.setStyleSheet("font-weight: bold; background-color: #0e639c; padding: 10px;")
+        self.run_struct_btn.setProperty("role", "primary")
         self.run_struct_btn.clicked.connect(self.run_structural_pipeline)
         inner.addWidget(self.run_struct_btn)
 
@@ -3694,8 +3710,18 @@ class DatasetManager(QMainWindow):
     # Original Methods (keep as is)
     # -----------------------------------------------------------------------
     def apply_custom_theme(self):
-        from ui_theme import compile_and_apply_theme
-        compile_and_apply_theme(self)
+        """Apply the configured theme app-wide (see ui/themes.py)."""
+        from PySide6.QtWidgets import QApplication
+
+        from ui.themes import apply_theme
+
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, self.config)
+        if hasattr(self, "theme_swatches"):
+            from ui.appearance_panel import refresh_swatches
+
+            refresh_swatches(self)
 
     def save_all_settings(self):
         """Persist every settings group (cloud keys, LLM provider, pipeline
@@ -3993,28 +4019,6 @@ class DatasetManager(QMainWindow):
         url = self.leaderboard_combo.currentData()
         if url:
             QDesktopServices.openUrl(QUrl(url))
-
-    def on_font_changed(self, font):
-        self.custom_theme["font_family"] = font.family()
-        self.apply_custom_theme()
-
-    def on_zoom_changed(self, val):
-        self.custom_theme["zoom_factor"] = val / 100.0
-        self.zoom_label.setText(f"{val}%")
-        self.apply_custom_theme()
-
-    def on_theme_preset_changed(self, preset):
-        if preset == "OLED Pure Black":
-            self.custom_theme.update({"bg_color": "#000000", "panel_bg": "#121212", "text_color": "#f0f0f0", "accent_color": "#007acc"})
-        elif preset == "Gentoo Purple Slate":
-            self.custom_theme.update({"bg_color": "#1a162b", "panel_bg": "#25203d", "text_color": "#e0def4", "accent_color": "#9ccfd8"})
-        elif preset == "Solarized Dark":
-            self.custom_theme.update({"bg_color": "#002b36", "panel_bg": "#073642", "text_color": "#93a1a1", "accent_color": "#268bd2"})
-        elif preset == "High Contrast Light":
-            self.custom_theme.update({"bg_color": "#f8f9fa", "panel_bg": "#ffffff", "text_color": "#111111", "accent_color": "#0056b3"})
-        else:
-            self.custom_theme.update({"bg_color": "#1e1e1e", "panel_bg": "#252526", "text_color": "#d4d4d4", "accent_color": "#0e639c"})
-        self.apply_custom_theme()
 
     def open_online_bpm_check(self):
         s = self.get_selected_sample()
@@ -4358,10 +4362,10 @@ class DatasetManager(QMainWindow):
         if s:
             if not s.get("caption"):
                 self.sample_health_alert.setText("No caption yet — add a detailed description below.")
-                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #FB8C00; border-radius: 2px;")
+                self.sample_health_alert.setProperty("health", "warn"); repolish(self.sample_health_alert)
             else:
                 self.sample_health_alert.setText("Track loaded — edit Tag / Genre / Key / BPM / Time / Duration in the table or via the ✏️ button.")
-                self.sample_health_alert.setStyleSheet("padding: 6px; background-color: #222; border-left: 4px solid #4CAF50; border-radius: 2px;")
+                self.sample_health_alert.setProperty("health", "ok"); repolish(self.sample_health_alert)
 
             self.caption_text.blockSignals(True)
             self.lyrics_text.blockSignals(True)
@@ -4681,10 +4685,10 @@ class DatasetManager(QMainWindow):
     def toggle_bypass(self):
         self.bypass_warnings = self.bypass_btn.isChecked()
         if self.bypass_warnings:
-            self.bypass_btn.setStyleSheet("background-color: #E65100; font-weight: bold;")
+            self.bypass_btn.setProperty("role", "danger"); repolish(self.bypass_btn)
             self.status_label.setText("Warning bypass ENABLED: Export unlocked regardless of quality penalties.")
         else:
-            self.bypass_btn.setStyleSheet("")
+            self.bypass_btn.setProperty("role", ""); repolish(self.bypass_btn)
             self.status_label.setText("Warning bypass DISABLED.")
 
     # -----------------------------------------------------------------------
@@ -4982,6 +4986,12 @@ class DatasetManager(QMainWindow):
             if reply == QMessageBox.Yes and not self.save_dataset():
                 event.ignore()
                 return
+        try:
+            from ui.shell import save_layout
+
+            save_layout(self)
+        except Exception as e:  # noqa: BLE001 -- never block closing over layout
+            print(f"could not save panel layout: {e}")
         event.accept()
 
 
@@ -6044,7 +6054,7 @@ class DatasetManager(QMainWindow):
         lay = QVBoxLayout(dialog)
 
         hint = QLabel("💡 Hover any field for help. In patterns, {n} is the track counter.")
-        hint.setStyleSheet("color: #9db2c8; font-style: italic;")
+        hint.setProperty("muted", True)
         lay.addWidget(hint)
 
         scope_combo = QComboBox()
@@ -6551,7 +6561,7 @@ class DatasetManager(QMainWindow):
         lay.addWidget(self.hf_repo_edit)
         lay.addWidget(self.hf_private)
         note = QLabel("Uses the HF token from ⚙ Settings → Model Manager (or HF_TOKEN).")
-        note.setStyleSheet("color: #aaa;")
+        note.setProperty("muted", True)
         note.setWordWrap(True)
         lay.addWidget(note)
         row = QHBoxLayout()

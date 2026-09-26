@@ -10,11 +10,9 @@ save_all_settings, _on_llm_provider_changed, _populate_model_picker, etc.)
 read those same attributes by name. This extraction changes *where* the
 widget-building code lives, not the object model it builds.
 """
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QScrollArea, QFrame, QWidget,
-    QGroupBox, QLabel, QLineEdit, QCheckBox, QFontComboBox,
+    QGroupBox, QLabel, QLineEdit, QCheckBox,
     QPushButton,
 )
 # Scroll-wheel-guarded value widgets (see modules/wheel_guard.py): the wheel
@@ -23,7 +21,6 @@ from PySide6.QtWidgets import (
 from modules.wheel_guard import (
     GuardedComboBox as QComboBox,
     GuardedDoubleSpinBox as QDoubleSpinBox,
-    GuardedSlider as QSlider,
     GuardedSpinBox as QSpinBox,
 )
 
@@ -43,43 +40,16 @@ def build_settings_tab(manager, parent):
 
     # Title clearance: keep the group-box titles from being overlapped by
     # the first form row (labels/inputs on the left).
-    scroll.setStyleSheet("QGroupBox { padding-top: 0.9em; }")
 
     save_all_btn = QPushButton("💾 Save All Settings")
-    save_all_btn.setStyleSheet("font-weight: bold; padding: 8px;")
+    save_all_btn.setProperty("role", "primary")
     save_all_btn.clicked.connect(manager.save_all_settings)
     layout.addWidget(save_all_btn)
 
-    theme_grp = QGroupBox("🎨 Visual Appearance & UI Themes")
-    form = QFormLayout(theme_grp)
-    form.setContentsMargins(8, 18, 8, 8)
+    from ui.appearance_panel import build_appearance_group
+    layout.addWidget(build_appearance_group(manager))
 
-    manager.font_picker = QFontComboBox()
-    manager.font_picker.setToolTip("App font.")
-    manager.font_picker.setCurrentFont(QFont(manager.custom_theme["font_family"]))
-    manager.font_picker.currentFontChanged.connect(manager.on_font_changed)
-    form.addRow("Installed System Font:", manager.font_picker)
-
-    zoom_row = QHBoxLayout()
-    manager.zoom_slider = QSlider(Qt.Horizontal)
-    manager.zoom_slider.setToolTip("UI zoom level.")
-    manager.zoom_slider.setRange(75, 175)
-    manager.zoom_slider.setValue(100)
-    manager.zoom_label = QLabel("100%")
-    manager.zoom_slider.valueChanged.connect(manager.on_zoom_changed)
-    zoom_row.addWidget(manager.zoom_slider)
-    zoom_row.addWidget(manager.zoom_label)
-    form.addRow("UI Zoom Factor:", zoom_row)
-
-    manager.theme_preset_combo = QComboBox()
-    manager.theme_preset_combo.setToolTip("Color theme preset.")
-    manager.theme_preset_combo.addItems(["Dark Modern (Default)", "OLED Pure Black", "Gentoo Purple Slate", "Solarized Dark", "High Contrast Light"])
-    manager.theme_preset_combo.currentTextChanged.connect(manager.on_theme_preset_changed)
-    form.addRow("Theme Preset:", manager.theme_preset_combo)
-
-    layout.addWidget(theme_grp)
-
-    cloud_grp = QGroupBox("⚙ Cloud & Execution Endpoints")
+    cloud_grp = QGroupBox("⚙ Cloud && Execution Endpoints")
     c_form = QFormLayout(cloud_grp)
     c_form.setContentsMargins(8, 18, 8, 8)
 
@@ -120,7 +90,7 @@ def build_settings_tab(manager, parent):
         "never in settings.json. Uncheck 'Remember' to keep a key for the current session only."
     )
     sec_note.setWordWrap(True)
-    sec_note.setStyleSheet("color: #aaa; font-size: 9px; padding: 2px;")
+    sec_note.setProperty("muted", True); sec_note.setProperty("small", True)
     c_form.addRow(sec_note)
 
     # NOTE: caption backend / prompt / limits live in the 🎤 Caption tab.
@@ -228,13 +198,13 @@ def build_settings_tab(manager, parent):
 
     manager.llm_note = QLabel("")
     manager.llm_note.setWordWrap(True)
-    manager.llm_note.setStyleSheet("color: #aaa; font-size: 9px;")
+    manager.llm_note.setProperty("muted", True); manager.llm_note.setProperty("small", True)
     llm_form.addRow(manager.llm_note)
     manager._on_llm_provider_changed()
 
     layout.addWidget(llm_grp)
 
-    pipe_grp = QGroupBox("🎛 Pipeline & Model Defaults")
+    pipe_grp = QGroupBox("🎛 Pipeline && Model Defaults")
     p_form = QFormLayout(pipe_grp)
     p_form.setContentsMargins(8, 18, 8, 8)
 
@@ -374,7 +344,7 @@ def build_settings_tab(manager, parent):
 
     manager.model_status = QLabel("Select a model to see its status.")
     manager.model_status.setWordWrap(True)
-    manager.model_status.setStyleSheet("color: #aaa; font-size: 9px;")
+    manager.model_status.setProperty("muted", True); manager.model_status.setProperty("small", True)
     mm_form.addRow(manager.model_status)
 
     dl_row = QHBoxLayout()

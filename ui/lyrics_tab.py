@@ -80,10 +80,7 @@ def build_lyrics_tab(manager, parent):
     # ------------------------------------------------------------------
     warn = QLabel(APOSTROPHE_WARNING)
     warn.setWordWrap(True)
-    warn.setStyleSheet(
-        "background-color: #3a2f10; border-left: 4px solid #d0a000; "
-        "padding: 8px; border-radius: 3px;"
-    )
+    warn.setProperty("health", "warn")
     layout.addWidget(warn)
 
     scope_row = QHBoxLayout()
@@ -131,7 +128,7 @@ def build_lyrics_tab(manager, parent):
         "Master rules are always applied. Profiles are stored locally in "
         "<code>lyrics_profiles/</code> (gitignored)."
     )
-    manager.lyrics_profile_status.setStyleSheet("color: #999;")
+    manager.lyrics_profile_status.setProperty("muted", True)
     manager.lyrics_profile_status.setWordWrap(True)
     layout.addWidget(manager.lyrics_profile_status)
 
@@ -198,7 +195,7 @@ def build_lyrics_tab(manager, parent):
     p_layout.addLayout(cols)
 
     manager.lyrics_report_label = QLabel("No preview yet.")
-    manager.lyrics_report_label.setStyleSheet("color: #999;")
+    manager.lyrics_report_label.setProperty("muted", True)
     manager.lyrics_report_label.setWordWrap(True)
     p_layout.addWidget(manager.lyrics_report_label)
 
@@ -209,9 +206,7 @@ def build_lyrics_tab(manager, parent):
     manager.lyrics_diff = QTextEdit()
     manager.lyrics_diff.setReadOnly(True)
     manager.lyrics_diff.setMinimumHeight(120)
-    manager.lyrics_diff.setStyleSheet(
-        "font-family: monospace; background: #1b1b1b; color: #ddd;"
-    )
+    manager.lyrics_diff.setStyleSheet("font-family: monospace;")
     p_layout.addWidget(manager.lyrics_diff)
 
     preview_row = QHBoxLayout()
@@ -238,7 +233,7 @@ def build_lyrics_tab(manager, parent):
         "Add any word a singer needs mapped; the table is saved to settings. "
         "Matching is whole-word and case-insensitive, preserving capitalization."
     )
-    hint.setStyleSheet("color: #999;")
+    hint.setProperty("muted", True)
     hint.setWordWrap(True)
     t_layout.addWidget(hint)
 
@@ -282,7 +277,7 @@ def build_lyrics_tab(manager, parent):
         "see what belongs to what. Tidy this whole block with the options above, "
         "or edit by hand and press <b>Write Back to Tracks</b>."
     )
-    all_hint.setStyleSheet("color: #999;")
+    all_hint.setProperty("muted", True)
     all_hint.setWordWrap(True)
     all_layout.addWidget(all_hint)
 

@@ -306,7 +306,7 @@ def build_caption_tab(manager, parent):
         "Applies to the whole dataset. Select a track and use "
         "“Override for This Track” for a per-track setting."
     )
-    note.setStyleSheet("color: #999;")
+    note.setProperty("muted", True)
     note.setWordWrap(True)
     blend_layout.addWidget(note)
 
@@ -369,7 +369,7 @@ def build_caption_tab(manager, parent):
         "you format them with the Structural Tag Creator. "
         "Requires Kaggle credentials in ⚙ Settings."
     )
-    moss_note.setStyleSheet("color: #999;")
+    moss_note.setProperty("muted", True)
     moss_note.setWordWrap(True)
     m_layout.addWidget(moss_note)
 
@@ -429,7 +429,7 @@ def build_caption_tab(manager, parent):
     m_layout.addLayout(m_run)
 
     manager.moss_status = QLabel("Not run yet.")
-    manager.moss_status.setStyleSheet("color: #999;")
+    manager.moss_status.setProperty("muted", True)
     manager.moss_status.setWordWrap(True)
     m_layout.addWidget(manager.moss_status)
     layout.addWidget(moss_grp)

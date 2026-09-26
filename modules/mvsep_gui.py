@@ -197,9 +197,7 @@ class MVSEPDialog(QDialog):
         button_layout.addWidget(self.save_button)
 
         self.run_button = QPushButton("Test Separation")
-        self.run_button.setStyleSheet(
-            "font-weight: bold; background-color: #0e639c; padding: 8px;"
-        )
+        self.run_button.setProperty("role", "primary")
         self.run_button.clicked.connect(self.start_separation)
         button_layout.addWidget(self.run_button)
 

@@ -27,7 +27,6 @@ The three settings that make the run reproducible are here and nowhere else:
   * ``caption_staging_dir``     — the local folder that IS the uploaded dataset;
   * ``caption_output_dir``      — the local folder the captions come back to.
 """
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -95,7 +94,7 @@ def build_ace_step_tab(manager, parent):
         "<b>Review</b> the diff and choose what to keep. Folders, dataset, prompt "
         "and limits live in ⚙ Settings at the bottom."
     )
-    hint.setStyleSheet("color: #999;")
+    hint.setProperty("muted", True)
     hint.setWordWrap(True)
     layout.addWidget(hint)
 
@@ -103,27 +102,22 @@ def build_ace_step_tab(manager, parent):
     # THE STEP STRIP — one row, left to right, in the order the steps happen.
     # The widgets are ADDED to it further down, once they all exist, so the order
     # on the strip is the WORKFLOW order and not the creation order of this file.
-    # It scrolls sideways instead of wrapping: the point is that the sequence is
-    # visible as ONE line at any window width.
+    # It WRAPS, left to right, so the whole sequence stays visible in the
+    # narrow Tools panel (it used to scroll sideways, which hid most of it).
     # ------------------------------------------------------------------
-    manager.ace_strip = QWidget()
-    strip = QHBoxLayout(manager.ace_strip)
-    strip.setContentsMargins(0, 0, 0, 0)
-    strip.setSpacing(6)
+    from ui.shell import FlowLayout
 
-    strip_scroll = QScrollArea()
-    strip_scroll.setWidgetResizable(True)
-    strip_scroll.setFrameShape(QScrollArea.NoFrame)
-    strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-    strip_scroll.setWidget(manager.ace_strip)
-    strip_scroll.setMaximumHeight(64)
-    layout.addWidget(strip_scroll)
+    from ui.shell import height_for_width_policy
+
+    manager.ace_strip = QWidget()
+    manager.ace_strip.setSizePolicy(height_for_width_policy())
+    strip = FlowLayout(manager.ace_strip)
+    layout.addWidget(manager.ace_strip)
 
     # THE one status line: what the run is doing right now. It used to be four
     # labels in four places (credentials, staging count, tick count, run).
     manager.ace_status_label = QLabel("Not run yet.")
-    manager.ace_status_label.setStyleSheet("color: #999;")
+    manager.ace_status_label.setProperty("muted", True)
     manager.ace_status_label.setWordWrap(True)
     layout.addWidget(manager.ace_status_label)
 
@@ -366,7 +360,7 @@ def build_ace_step_tab(manager, parent):
         "run uploads the result as a new version of the dataset, so its identity "
         "survives. Removing a song here never touches the dataset on disk."
     )
-    s_hint.setStyleSheet("color: #999;")
+    s_hint.setProperty("muted", True)
     s_hint.setWordWrap(True)
     s_layout.addWidget(s_hint)
 
@@ -411,7 +405,7 @@ def build_ace_step_tab(manager, parent):
     s_layout.addLayout(s_row)
 
     manager.staging_count_label = QLabel("Nothing staged yet.")
-    manager.staging_count_label.setStyleSheet("color: #999;")
+    manager.staging_count_label.setProperty("muted", True)
     s_layout.addWidget(manager.staging_count_label)
     layout.addWidget(staging_grp)
 
@@ -433,7 +427,7 @@ def build_ace_step_tab(manager, parent):
         "reloads and re-ordering."
     )
     manager.ace_tick_status = QLabel("")
-    manager.ace_tick_status.setStyleSheet("color: #999;")
+    manager.ace_tick_status.setProperty("muted", True)
     manager.ace_tick_status.setWordWrap(True)
 
     # A review POLICY rather than a step, so it belongs in Settings.
@@ -512,7 +506,7 @@ def build_ace_step_tab(manager, parent):
         strip.addWidget(_widget)
     # The tick status is the only stretchable item: it absorbs the slack and
     # wraps, so the action buttons keep their natural width and nothing clips.
-    strip.addWidget(manager.ace_tick_status, 1)
+    strip.addWidget(manager.ace_tick_status)
 
     layout.addWidget(settings_grp)
     layout.addStretch()

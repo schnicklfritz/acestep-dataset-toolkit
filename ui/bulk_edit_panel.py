@@ -65,7 +65,7 @@ def build_bulk_edit_panel(manager, parent):
     outer.setSpacing(6)
 
     manager.bulk_pending_label = QLabel("No fields ticked.")
-    manager.bulk_pending_label.setStyleSheet("color: #999;")
+    manager.bulk_pending_label.setProperty("muted", True)
     outer.addWidget(manager.bulk_pending_label)
 
     # ---- Text fields -------------------------------------------------
