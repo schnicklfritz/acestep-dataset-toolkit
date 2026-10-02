@@ -1,5 +1,8 @@
-"""AI Assistant: DeepSeek-powered live help for the app.
 
+import os
+os.environ["GOOGLE_GENERATIVE_AI_API_KEY"] = AIzaSyCI-E5X-GG5u0n0c9eJMbD5Evo5VNLx6Yo
+
+"""AI Assistant: DeepSeek-powered live help for the app.
 The assistant answers questions about using the app using an embedded help
 document, and can reason about the user's current dataset (summary provided at
 request time). It uses the same DeepSeek key as the captioner aggregator.
@@ -182,6 +185,86 @@ ASSISTANT_TOOLS = [
             "required": ["song"]}}},
 ]
 
+# ---------------------------------------------------------------------------
+# Action tools — the ones that make the assistant *do* the task
+# ---------------------------------------------------------------------------
+# Read-only tools answer a question. These change the dataset (or stage work on
+# disk), which is where the risk lives, so every description states exactly what
+# it touches and what it will refuse:
+#
+#   * ``tracks`` is a list of filenames OR the numbers ``list_tracks`` printed.
+#     A name is unambiguous, an index is a guess, so filenames are preferred.
+#   * Every write goes through modules/assistant_actions.py, which holds the
+#     field allowlist — a model cannot repoint ``audio_path``, rewrite an ``id``
+#     or flip ``labeled`` to claim a human reviewed it.
+#   * ffmpeg work is reported as a result line, never as a silent rewrite of the
+#     training audio (originals are backed up first).
+ACTION_TOOLS = [
+    {"type": "function", "function": {
+        "name": "set_track_metadata",
+        "description": "Set ONE metadata field on one or more tracks. Writable fields: caption, genre, custom_tag, language, keyscale, timesignature, bpm, duration, is_instrumental, lyrics, formatted_lyrics. Reference tracks by filename (preferred) or by the number shown in list_tracks. Use for: 'mark every track instrumental', 'set the language to en', 'call this genre doom'.",
+        "parameters": {"type": "object", "properties": {
+            "tracks": {"type": "array", "items": {"type": "string"},
+                       "description": "filenames or list_tracks numbers"},
+            "field": {"type": "string", "description": "one of the writable fields above"},
+            "value": {"type": "string", "description": "the new value; booleans accept 'true'/'false'"}},
+            "required": ["tracks", "field", "value"]}}},
+    {"type": "function", "function": {
+        "name": "write_caption",
+        "description": "Write a full ACE-Step caption onto tracks and report every schema violation it contains (front-loaded 5-12 keywords, a vocal descriptor, 2-3 flow sentences, no BPM/key/time-signature in the prose). Use when drafting or rewriting a caption, and fix and rewrite when violations come back.",
+        "parameters": {"type": "object", "properties": {
+            "tracks": {"type": "array", "items": {"type": "string"}},
+            "caption": {"type": "string", "description": "the caption text"}},
+            "required": ["tracks", "caption"]}}},
+    {"type": "function", "function": {
+        "name": "import_lyrics",
+        "description": "Put a full lyric block onto tracks, writing formatted_lyrics, lyrics and raw_lyrics together so the export field cannot drift. Clears an instrumental flag rather than leaving the track contradictory. Use when you are given lyrics to attach to a track.",
+        "parameters": {"type": "object", "properties": {
+            "tracks": {"type": "array", "items": {"type": "string"}},
+            "lyrics": {"type": "string", "description": "the lyric block, including [Section] markers"}},
+            "required": ["tracks", "lyrics"]}}},
+    {"type": "function", "function": {
+        "name": "find_gaps",
+        "description": "Audit the dataset for missing or omitted features: absent metadata, contradictions (instrumental with lyrics, lyrics without [Section] markers), caption schema violations, duplicate filenames, audio not on disk. Returns a numbered per-track report. Run this BEFORE planning work and again after it.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+
+    {"type": "function", "function": {
+        "name": "create_virtual_dataset",
+        "description": "Draft concept-only tracks (no audio) so a dataset can be planned and its gaps found before anything is recorded or downloaded. Only allowlisted metadata is honoured; each track is flagged virtual and skipped by file-based steps and by export until real audio is attached.",
+        "parameters": {"type": "object", "properties": {
+            "tracks": {"type": "array", "items": {"type": "object", "properties": {
+                "filename": {"type": "string"},
+                "genre": {"type": "string"},
+                "caption": {"type": "string"},
+                "language": {"type": "string"},
+                "bpm": {"type": "integer"},
+                "keyscale": {"type": "string"},
+                "is_instrumental": {"type": "boolean"}}}},
+            "name": {"type": "string", "description": "optional dataset name"}},
+            "required": ["tracks"]}}},
+    {"type": "function", "function": {
+        "name": "normalize_audio",
+        "description": "Start EBU R128 loudness normalization (ffmpeg loudnorm) in the background. Normalized copies go to <target_dir>/normalized_audio and originals are copied to <target_dir>/originals_backup first, so the training audio is never overwritten. Returns the job it started.",
+        "parameters": {"type": "object", "properties": {
+            "tracks": {"type": "array", "items": {"type": "string"}},
+            "target_dir": {"type": "string", "description": "output folder for normalized audio + backups"},
+            "target_lufs": {"type": "number", "description": "target loudness, default -14.0"},
+            "target_sr": {"type": "integer", "description": "sample rate, default 44100"}},
+            "required": ["tracks", "target_dir"]}}},
+    {"type": "function", "function": {
+        "name": "stage_temp_mp3",
+        "description": "Plan the ffmpeg command that converts tracks to a small scratch MP3 (stereo, 44.1 kHz, lossless source untouched) — used to preview a uniform upload before transcription or a Kaggle run. Returns the commands instead of running them, so they can be reviewed first.",
+        "parameters": {"type": "object", "properties": {
+            "tracks": {"type": "array", "items": {"type": "string"}},
+            "target_dir": {"type": "string", "description": "where the scratch MP3s would go"},
+            "bitrate": {"type": "string", "description": "e.g. 192k, default 192k"}},
+            "required": ["tracks", "target_dir"]}}},
+
+]
+
+ASSISTANT_TOOLS = ASSISTANT_TOOLS + ACTION_TOOLS
+
+
 
 class AssistantWorker(QThread):
     answer_ready = Signal(str)
@@ -215,7 +298,32 @@ class AssistantWorker(QThread):
             )
             if self.tools:
                 kwargs["tools"] = self.tools
+
+            # ROBUST SANITIZER: Handles both dicts and Pydantic/OpenAI objects
+            if "messages" in kwargs and isinstance(kwargs["messages"], list):
+                sanitized_list = []
+                for msg in kwargs["messages"]:
+                    # Convert OpenAI model objects to dict if necessary
+                    if hasattr(msg, "model_dump"):
+                        m_dict = msg.model_dump(exclude_unset=True)
+                    elif hasattr(msg, "to_dict"):
+                        m_dict = msg.to_dict()
+                    elif isinstance(msg, dict):
+                        m_dict = dict(msg)
+                    else:
+                        m_dict = {"role": getattr(msg, "role", "user"), "content": str(msg)}
+
+                    # Strip all reasoning/thinking metadata fields that Groq rejects
+                    m_dict.pop("reasoning_content", None)
+                    m_dict.pop("reasoning", None)
+                    m_dict.pop("thinking_blocks", None)
+
+                    sanitized_list.append(m_dict)
+
+                kwargs["messages"] = sanitized_list
+
             response = client.chat.completions.create(**kwargs)
+
             msg = response.choices[0].message
             if getattr(msg, "tool_calls", None):
                 call = msg.tool_calls[0]

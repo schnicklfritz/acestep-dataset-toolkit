@@ -83,6 +83,60 @@ def test_no_tool_page_is_wider_than_its_panel(manager, qapp):
                         assert a.widget().minimumSizeHint().width() <= a.viewport().width(), (i, j)
 
 
+def test_assistant_dock_is_stationary(manager):
+    """The Assistant is pinned to the right column and cannot be floated.
+
+    Floating is how it used to get dragged off the screen; the feature flag is
+    cleared and the allowed areas are the right column only.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDockWidget
+
+    flag = QDockWidget.DockWidgetFeature.DockWidgetFloatable
+    assert not (manager.assistant_dock.features() & flag)
+    assert manager.assistant_dock.allowedAreas() == Qt.RightDockWidgetArea
+
+
+def test_assistant_dock_collapses_and_restores(manager):
+    """The − / ▾ title-bar button tucks the panel away without moving it.
+
+    Collapsing caps the dock to its title bar; restoring lifts the cap. The dock
+    itself stays put and stays visible, so it can never be lost.
+    """
+    dock = manager.assistant_dock
+    toggle = dock._collapse_button
+    assert toggle is not None
+
+    toggle.click()
+    assert dock.maximumHeight() < 100          # capped to the bar
+    assert dock.isVisible()                    # tucked away, not closed
+    assert not dock.isFloating()               # never moved
+
+    toggle.click()
+    assert dock.maximumHeight() > 100000       # cap lifted again
+
+
+def test_restore_never_leaves_both_docks_hidden(manager, monkeypatch):
+    """A state that hides BOTH right-column docks is repaired, not honoured.
+
+    The whole column vanishing leaves nothing to click; the guard shows both
+    again. Hiding only ONE dock is a legitimate preference and is left alone
+    (``test_layout_round_trip`` covers that).
+    """
+    import base64
+
+    from ui.shell import restore_layout
+
+    manager.tools_dock.hide()
+    manager.assistant_dock.hide()
+    # Pretend a state was saved AND restored while both were hidden.
+    manager.config["ui_dock_state"] = base64.b64encode(b"state").decode("ascii")
+    monkeypatch.setattr(manager, "restoreState", lambda *a, **k: True)
+    assert restore_layout(manager) is True
+    assert manager.tools_dock.isVisible()
+    assert manager.assistant_dock.isVisible()
+
+
 def test_assistant_panel_defaults_to_the_free_provider(manager):
     assert manager.assistant_provider_combo.currentData() == "groq"
     assert "needs a key" in manager.assistant_provider_state.text()

@@ -220,3 +220,159 @@ class TestNormalizeLyricsReport:
     def test_default_contraction_table_is_populated(self):
         for key in ("she'll", "he'll", "i'll", "can't", "don't"):
             assert key in DEFAULT_CONTRACTIONS
+
+
+class TestQuoteStripping:
+    """Every double quote goes; apostrophes are a different character."""
+
+    @pytest.mark.parametrize("src,want", [
+        ('"hello', "hello"),
+        ('She said "stop" now', "She said stop now"),
+        ("\u201cHi\u201d", "Hi"),
+        ("\u00abHi\u00bb", "Hi"),
+        ("no quotes here", "no quotes here"),
+    ])
+    def test_quotes_are_removed(self, src, want):
+        from modules.lyrics_normalizer import strip_quotes
+        assert strip_quotes(src) == want
+
+    def test_apostrophes_are_left_to_the_other_rule(self):
+        from modules.lyrics_normalizer import strip_quotes
+        assert strip_quotes("don't") == "don't"
+
+    def test_it_runs_before_capitalisation(self):
+        """The whole reason this pass is first: a line opening with a quote
+        starts with punctuation, so ``capitalize_first_word`` skips it. Strip
+        later and ``"hello`` would stay lowercase."""
+        out, _ = normalize_lyrics('"hello there', do_strip_punctuation=False)
+        assert out == "Hello there"
+
+    def test_it_can_be_switched_off(self):
+        out, _ = normalize_lyrics('"hello', do_strip_quotes=False)
+        assert '"' in out
+
+    def test_the_report_counts_the_characters(self):
+        _, rep = normalize_lyrics('"a" and "b"', do_strip_punctuation=False)
+        assert rep["quotes"] == 4
+
+
+class TestTagModifierTrimming:
+    """``[Chorus - Raspy Vocals]`` -> ``[Chorus]``; the tag itself survives."""
+
+    @pytest.mark.parametrize("src,want", [
+        ("[Chorus]", "[Chorus]"),
+        ("[Chorus - Raspy Vocals]", "[Chorus]"),
+        ("[Verse 1 - raspy vocal, low energy]", "[Verse 1]"),
+        ("[Chorus - loud - big]", "[Chorus]"),
+        ("[Guitar Solo - intense]", "[Guitar Solo]"),
+        # A JOINED hyphen is not a separator: "Pre-Chorus" is one tag.
+        ("[Pre-Chorus]", "[Pre-Chorus]"),
+    ])
+    def test_trimming(self, src, want):
+        from modules.lyrics_normalizer import trim_tag_modifiers
+        assert trim_tag_modifiers(src) == want
+
+    @pytest.mark.parametrize("src", [
+        "[EN - Verse]",                     # language, not section + modifier
+        "[JA - Verse - whispered, sparse]",
+        "[EN - Chorus - anthemic]",
+    ])
+    def test_a_language_prefix_is_left_verbatim(self, src):
+        """docs/descriptor_reference.md puts the language FIRST in the bracket.
+
+        Trimming there would delete the language declaration, so the ``" -"``
+        straight after a two-letter code is not a modifier separator.
+        """
+        from modules.lyrics_normalizer import trim_tag_modifiers
+        assert trim_tag_modifiers(src) == src
+
+    def test_tags_on_one_line_are_all_trimmed(self):
+        from modules.lyrics_normalizer import trim_tag_modifiers
+        assert (trim_tag_modifiers("[Chorus - loud] [Verse - soft]")
+                == "[Chorus] [Verse]")
+
+    def test_lyric_text_around_a_tag_is_kept(self):
+        from modules.lyrics_normalizer import trim_tag_modifiers
+        assert (trim_tag_modifiers("sing [Chorus - loud] now")
+                == "sing [Chorus] now")
+
+    def test_it_can_be_switched_off(self):
+        out, _ = normalize_lyrics("[Chorus - loud]", do_trim_tag_modifiers=False)
+        assert "[Chorus - loud]" in out
+
+    def test_the_report_counts_trimmed_tags(self):
+        _, rep = normalize_lyrics("[Chorus - loud]\n[Verse - soft]")
+        assert rep["tags_trimmed"] == 2
+
+
+class TestStrayTagDropping:
+    """Consecutive tag-only lines: keep the first, drop the rest."""
+
+    def test_the_worked_example_from_the_request(self):
+        from modules.lyrics_normalizer import drop_stray_tags
+        assert (drop_stray_tags("[Verse 1]\n[Raspy Vocal] [Mid-Tempo Groove]")
+                == "[Verse 1]")
+
+    def test_a_following_lyric_line_is_kept(self):
+        from modules.lyrics_normalizer import drop_stray_tags
+        out = drop_stray_tags(
+            "[Verse 1]\n[Raspy Vocal] [Mid-Tempo Groove]\nI walked alone")
+        assert out == "[Verse 1]\nI walked alone"
+
+    def test_a_lone_tag_is_never_dropped(self):
+        from modules.lyrics_normalizer import drop_stray_tags
+        assert drop_stray_tags("[Chorus]\nverse here") == "[Chorus]\nverse here"
+
+    def test_a_blank_line_ends_the_run(self):
+        """The legal two-tag shape from the annotation guide must survive: a tag
+        per section, sections separated by a blank line."""
+        from modules.lyrics_normalizer import drop_stray_tags
+        text = "[Chorus]\n\nverse\n\n[Bridge]\nverse2"
+        assert drop_stray_tags(text) == text
+
+    def test_a_tag_after_lyric_text_is_kept(self):
+        from modules.lyrics_normalizer import drop_stray_tags
+        text = "[Chorus]\nverse line\n[Bridge]\nverse2"
+        assert drop_stray_tags(text) == text
+
+    def test_a_run_of_three_keeps_only_the_first(self):
+        from modules.lyrics_normalizer import drop_stray_tags
+        assert drop_stray_tags("[Intro]\n[Verse]\n[Chorus]\ntext") == "[Intro]\ntext"
+
+    def test_it_can_be_switched_off(self):
+        out, _ = normalize_lyrics("[Verse 1]\n[Raspy Vocal]",
+                                  do_drop_stray_tags=False)
+        assert "[Raspy Vocal]" in out
+
+    def test_the_report_counts_dropped_lines(self):
+        _, rep = normalize_lyrics("[Verse 1]\n[Raspy Vocal]\n[Loud]\ntext")
+        assert rep["tags_dropped"] == 2
+
+
+class TestTheThreeRulesTogether:
+    def test_a_whole_block_is_tidied_in_one_pass(self):
+        src = ('[Intro - sparse piano]\n'
+               '[Chorus - Raspy Vocals]\n'
+               '"hello there\n'
+               '[Verse 1]\n'
+               '[Raspy Vocal] [Mid-Tempo Groove]\n'
+               'I said "go"')
+        out, rep = normalize_lyrics(src)
+        assert out == ("[Intro]\nHello there\n[Verse 1]\nI said go")
+        assert rep["quotes"] == 3
+        assert rep["tags_dropped"] == 2
+
+    def test_a_marker_inside_a_quote_is_still_protected(self):
+        """Marker protection runs first, so no tag/quote rule can reach into a
+        separator line and break the all-lyrics write-back."""
+        text = '---- a.mp3 ----\n"quoted"\n---- b.mp3 ----\nmore'
+        out, _ = normalize_lyrics(text)
+        assert out.startswith("---- a.mp3 ----")
+        assert "---- b.mp3 ----" in out
+
+    def test_the_result_is_stable_on_a_second_pass(self):
+        src = '[Chorus - loud]\n"hi\n[Verse 1]\n[Raspy Vocal]'
+        once, _ = normalize_lyrics(src)
+        twice, _ = normalize_lyrics(once)
+        assert once == twice
+

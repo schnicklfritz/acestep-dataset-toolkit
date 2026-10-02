@@ -41,6 +41,21 @@ def split_dataset(samples, val_ratio=0.2, seed=42, stratify=True):
     return train, val
 
 
+def for_export(samples):
+    """The samples an export may write: everything except virtual placeholders.
+
+    A virtual track (``virtual: True``) is a concept-only placeholder with no
+    ``audio_path``. It is real inside the app — the gap audit and the captioner
+    use it — but it is not training data, so it must never appear in a manifest,
+    a CSV row, a JSONL line, a sidecar, or a train/val folder.
+
+    This is the ONE place that decision is made. ``to_export_sample`` cannot make
+    it: it strips the ``virtual`` key but still emits a row, with ``file_name``
+    falling back to a ``virtual_01_*.wav`` that does not exist on disk.
+    """
+    return [s for s in samples if not s.get("virtual")]
+
+
 _CSV_FIELDS = ["id", "filename", "audio_path", "genre", "bpm", "keyscale",
                "duration", "is_instrumental", "custom_tag", "caption"]
 

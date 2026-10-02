@@ -315,6 +315,17 @@ def install_shell(manager, parts, tool_pages, assistant_page, settings_page):
     manager.assistant_dock.setWidget(assistant_page)
     manager._tab_pages.append(assistant_page)
     manager.addDockWidget(Qt.RightDockWidgetArea, manager.assistant_dock)
+    # Stationary: no dragging it out to float (which is how it got lost off the
+    # edge of the screen), and it may only live in the right-hand column. It can
+    # still be tucked away — see install_collapsible_titlebar — but only to its
+    # title bar, so the dock itself never disappears from the column.
+    # PySide6 6.x dropped ``setFloatable`` (obsolete since Qt 6.2), so the flag
+    # is cleared on the feature set directly.
+    features = manager.assistant_dock.features()
+    features &= ~QDockWidget.DockWidgetFeature.DockWidgetFloatable
+    manager.assistant_dock.setFeatures(features)
+    manager.assistant_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+    install_collapsible_titlebar(manager, manager.assistant_dock, "Assistant")
     manager.splitDockWidget(manager.tools_dock, manager.assistant_dock, Qt.Vertical)
     _default_sizes(manager)
 
@@ -360,21 +371,30 @@ def install_shell(manager, parts, tool_pages, assistant_page, settings_page):
 
 # Table columns hidden by default in the narrow track list; every column is
 # still one right-click on the header away, and all fields are in the editor.
-DEFAULT_HIDDEN_COLUMNS = ["Language", "Time", "Duration"]
+# Re-exported from ui.track_table, which owns the column policy: the list used
+# to be defined here AND re-set ``Stretch`` on column 0 behind
+# ``init_ui``'s ``ResizeToContents`` loop, so the two disagreed silently.
+from ui.track_table import (  # noqa: E402,F401  (re-exported for callers/tests)
+    DEFAULT_HIDDEN_COLUMNS,
+    apply_hidden_columns,
+)
 
 
 def install_column_menu(manager, table):
-    from PySide6.QtWidgets import QHeaderView, QMenu
+    """Add the show/hide-column menu to ``table``'s header.
+
+    Widths, resize modes and default visibility belong to
+    ``ui.track_table.install_table_policy`` (called from ``init_ui``); this only
+    layers the header menu on top, so there is exactly one place that decides
+    what a column looks like.
+    """
+    from PySide6.QtWidgets import QMenu
 
     header = table.horizontalHeader()
-    header.setSectionResizeMode(0, QHeaderView.Stretch)
-    header.setMinimumSectionSize(36)
+    # Re-apply from config (not a hard-coded Stretch): a saved visibility
+    # choice must win even if init_ui already set defaults.
+    apply_hidden_columns(manager, table)
     names = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
-    hidden = manager.config.get("ui_hidden_columns")
-    if hidden is None or not isinstance(hidden, list):
-        hidden = list(DEFAULT_HIDDEN_COLUMNS)
-    for i, n in enumerate(names):
-        table.setColumnHidden(i, n in hidden and i != 0)
 
     def menu(pos):
         m = QMenu(table)
@@ -389,7 +409,9 @@ def install_column_menu(manager, table):
 
     header.setContextMenuPolicy(Qt.CustomContextMenu)
     header.customContextMenuRequested.connect(menu)
-    header.setToolTip("Right-click to show or hide columns.")
+    header.setToolTip(
+        "Right-click to show or hide columns. Drag a column edge to resize it."
+    )
 
 
 def _toggle_column(manager, table, names, col, on):
@@ -398,6 +420,62 @@ def _toggle_column(manager, table, names, col, on):
     table.setColumnHidden(col, not on)
     manager.config["ui_hidden_columns"] = [n for i, n in enumerate(names) if table.isColumnHidden(i)]
     save_plain_keys(manager.config, ["ui_hidden_columns"])
+
+
+def install_collapsible_titlebar(manager, dock, title):
+    """Replace ``dock``'s title bar with one that has a − / ▾ collapse button.
+
+    A stock QDockWidget title bar offers only float and close — neither is
+    "tuck this panel out of the way for a minute", and closing it is how the
+    whole right-hand column ends up with nothing to click. This title bar keeps
+    the panel where it is (the dock is ``setFloatable(False)`` with a
+    right-column-only area) and collapses it to just the bar: it remembers the
+    height, caps it to the bar's height, and restores it on the next click. The
+    panel is minimized, never moved and never closed.
+    """
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton
+
+    # Qt's ``QWIDGETSIZE_MAX`` macro; PySide6 does not re-export it, and it is
+    # what ``setMaximumHeight`` needs to mean "no ceiling".
+    unconstrained = 16777215
+
+    bar = QWidget(dock)
+    row = QHBoxLayout(bar)
+    row.setContentsMargins(6, 2, 4, 2)
+    row.setSpacing(4)
+    label = QLabel(title)
+    label.setProperty("muted", True)
+    row.addWidget(label)
+    row.addStretch()
+    toggle = QToolButton(bar)
+    toggle.setAutoRaise(True)
+    row.addWidget(toggle)
+
+    state = {"collapsed": False, "height": 0}
+
+    def on_toggle():
+        if state["collapsed"]:
+            dock.setMaximumHeight(unconstrained)
+            toggle.setText("−")
+            toggle.setToolTip("Hide the panel (it stays in this column).")
+            if state["height"]:
+                manager.resizeDocks([dock], [state["height"]], Qt.Vertical)
+        else:
+            state["height"] = max(dock.height(), bar.sizeHint().height())
+            dock.setMaximumHeight(bar.sizeHint().height())
+            toggle.setText("▾")
+            toggle.setToolTip("Show the panel.")
+        state["collapsed"] = not state["collapsed"]
+
+    toggle.clicked.connect(on_toggle)
+    toggle.setText("−")
+    toggle.setToolTip("Hide the panel (it stays in this column).")
+    dock.setTitleBarWidget(bar)
+    # Retained on the dock: Qt does not take ownership of a title-bar widget's
+    # children, and a garbage-collected bar would blank the title.
+    dock._collapse_bar = bar
+    dock._collapse_button = toggle
+    return toggle
 
 
 def _default_sizes(manager):
@@ -430,9 +508,31 @@ def restore_layout(manager):
     if not raw:
         return False
     try:
-        return bool(manager.restoreState(base64.b64decode(raw), DOCK_STATE_VERSION))
+        restored = bool(manager.restoreState(base64.b64decode(raw), DOCK_STATE_VERSION))
     except Exception:  # noqa: BLE001 -- a bad saved state falls back to the default
         return False
+    if restored:
+        _repair_hidden_docks(manager)
+    return restored
+
+
+def _repair_hidden_docks(manager):
+    """Never leave BOTH right-column docks hidden after a restore.
+
+    A saved state can hide a dock on purpose — hiding only the Assistant is a
+    legitimate, tested preference and is left alone. But if a state (or a
+    half-collapsed column) leaves BOTH Tools and Assistant hidden, the entire
+    right-hand column is gone and there is nothing left to click: the only way
+    back is the Panels menu or Reset layout, which a user who never hid anything
+    does not know to look for. This is the one case worth repairing instead of
+    honouring, so both are shown and given their default sizes.
+    """
+    docks = (manager.tools_dock, manager.assistant_dock)
+    if any(dock.isVisible() for dock in docks):
+        return
+    for dock in docks:
+        dock.show()
+    _default_sizes(manager)
 
 
 def reset_layout(manager):

@@ -7,7 +7,7 @@ SETTINGS_PATH = BASE_DIR / "settings.json"
 # Keys whose values are API credentials — stored in the encrypted store
 # (OS keyring / secrets.enc), never in settings.json.
 SECRET_KEYS = {"kaggle_key", "custom_key", "mvsep_api_key", "gemini_api_key", "hf_token",
-               "openrouter_key", "groq_key", "deepseek_key"}
+               "openrouter_key", "groq_key", "deepseek_key", "openai_key"}
 
 DEFAULT_CONFIG = {
     "kaggle_user": "",
@@ -174,7 +174,8 @@ DEFAULT_CONFIG = {
     "model_dir": "models",            # local dir for downloaded models
     "remember_hf_token": True,
     # ---- Pluggable LLM provider (aggregation, recommendations, assistant) ----
-    # groq (free, default) | gemini (free) | openrouter (free) | deepseek (paid) | local
+    # groq (free, default) | gemini (free) | openai (paid) | openrouter (free)
+    # | deepseek (paid) | local
     "llm_provider": "groq",
     "llm_model": "",                  # empty = provider default
     "llm_base_url": "",               # empty = provider default
@@ -188,6 +189,8 @@ DEFAULT_CONFIG = {
     "llm_model_assistant": "",
     "deepseek_key": "",               # (secret) official DeepSeek API key
     "remember_deepseek_key": True,
+    "openai_key": "",                 # (secret) official OpenAI API key
+    "remember_openai_key": True,
     "openrouter_key": "",             # (secret)
     "groq_key": "",                   # (secret)
     "remember_openrouter_key": True,
@@ -196,12 +199,24 @@ DEFAULT_CONFIG = {
     "theme_name": "Studio Dark",       # a key of ui.themes.BUILTIN_THEMES
     "theme_overrides": {},             # {theme_name: {role: "#rrggbb"}}
     "ui_font_family": "",              # empty = system default
+    "ui_font_size": 0,                 # base text size in px; 0 = Auto (13)
+    "lyrics_font_size": 0,             # lyrics-only override in px; 0 = same as the app
     "ui_zoom": 1.0,
     "ui_dock_state": "",               # base64 QMainWindow.saveState()
-    "ui_hidden_columns": None,         # None = ui.shell.DEFAULT_HIDDEN_COLUMNS
+    "ui_hidden_columns": None,         # None = ui.track_table.DEFAULT_HIDDEN_COLUMNS
+    # {header name: px}, saved on close. Keyed by NAME, not index: a column
+    # added or reordered later must not misapply a saved width.
+    "ui_column_widths": None,          # None = ui.track_table.DEFAULT_WIDTHS
     # ---- AI assistant ----
     "assistant_remember": True,        # persist the conversation across sessions
     "assistant_context_size": 40,      # max messages kept in context
     "assistant_linear_thinking": True, # step-by-step reasoning
+    # ---- MCP servers offered to the assistant ----
+    # stdio servers this app connects to; each server's tools are exposed as
+    # "<server>__<tool>" next to the built-in ones. JSON array, hand-editable:
+    #   [{"name": "dataset", "command": "python",
+    #     "args": ["mcp_server.py", "--dataset", "dataset.json"]}]
+    # Requires the optional package: pip install "mcp[cli]"
+    "mcp_servers": [],
 }
 

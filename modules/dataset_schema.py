@@ -54,6 +54,13 @@ SAMPLE_DEFAULTS = {
     "language": "en",
     "is_instrumental": False,
     "custom_tag": "",
+    # True = a concept-only placeholder drafted by the assistant (no audio on
+    # disk yet). It takes part in the gap audit and can be captioned, but every
+    # file-based step skips it, and ``workers/export.py`` filters it out before
+    # any exporter runs — so it never reaches training data in ANY format.
+    # (``to_export_sample`` alone is not enough: it strips this key but still
+    # emits a row, which is why the exclusion lives at the export boundary.)
+    "virtual": False,
     "labeled": False,               # metadata has been reviewed/verified
     # ACE-Step data-source switch (BOOLEAN, per track):
     #   False -> the loader may auto-label this sample with the captioner LLM
@@ -131,6 +138,11 @@ def to_export_sample(sample):
 
     # prompt_override must be an explicit boolean for the loader.
     out["prompt_override"] = bool(sample.get("prompt_override"))
+    # ...and so must instrumental. It is the ONLY carrier of "no vocals" once
+    # ``language`` may legitimately be blank (blank == instrumental, see
+    # LANG_INSTRUMENTAL), so it ships on every sample with an explicit default
+    # rather than only when the internal key happened to exist.
+    out["instrumental"] = bool(sample.get("is_instrumental"))
     return out
 
 
@@ -248,3 +260,47 @@ LANGS = (
     "vi", "id", "instrumental",
 )
 TIME_SIGNATURES = ("4/4", "3/4", "6/8", "2/4", "5/4", "7/8", "12/8", "4")
+
+# ``LANGS`` entry that is NOT a language: "this track has no vocals at all".
+#
+# WHY IT IS AN OPTION ON ``language`` RATHER THAN A FIELD OF ITS OWN
+# ---------------------------------------------------------------
+# The two facts are the same fact. A track with no vocals has no language to
+# declare, and a track that declares a language does have vocals — so a second
+# boolean field is a second chance to disagree with the first. ``language``
+# therefore carries the instrumental state: blank means instrumental, and the
+# selector offers the word so nobody has to know that convention.
+#
+# WHAT IT DOES *NOT* DO
+# ---------------------
+# It is never written to ``language``. The word is a UI sentinel, not an ISO
+# code, and ACE-Step's loader is only documented with real codes (docs/aceinfo.txt),
+# so a pseudo-code would reach training data as an unknown value. Choosing it
+# clears ``language`` and raises ``is_instrumental``, which the exporter writes
+# as ``instrumental: true``.
+LANG_INSTRUMENTAL = "instrumental"
+
+# The one way the app turns a Language choice into dataset state. Every editor
+# that offers the language list (the table cell, the bulk panel) routes through
+# here, so they cannot disagree about what "instrumental" means.
+def apply_language_choice(sample, lang):
+    """Write a Language choice onto ``sample``; returns the resulting
+    instrumental flag.
+
+    ``"instrumental"`` -> ``language=""`` and ``is_instrumental=True``.
+    Any other value  -> that value, and ``is_instrumental=False`` (declaring a
+    language is a statement that the track has vocals).
+
+    Both directions are written because both are the *user's explicit choice*.
+    Deliberately NOT applied by ``normalize_dataset``: that would silently
+    rewrite existing datasets, e.g. one holding ``language="en"`` next to
+    ``is_instrumental=true``. Re-saving only normalizes what was edited.
+    """
+    lang = (lang or "").strip()
+    if lang == LANG_INSTRUMENTAL:
+        sample["language"] = ""
+        sample["is_instrumental"] = True
+        return True
+    sample["language"] = lang
+    sample["is_instrumental"] = False
+    return False

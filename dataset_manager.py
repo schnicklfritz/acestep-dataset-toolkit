@@ -17,11 +17,24 @@ from workers.embeddings import EmbeddingWorker
 from workers.export import ExportWorker
 from workers.tag_creator import TagCreatorWorker
 from workers.musicbrainz import MusicBrainzWorker
-from modules.lyrics_tools import split_long_lines
 from modules.dataset_schema import (
     derive_instrumental_mode,
     new_sample,
     normalize_dataset,
+)
+from modules.dataset_schema import apply_language_choice
+# The track table's column set/widths live in ONE module (see its docstring:
+# three copies of the index table is how the Instr checkbox and the Actions
+# buttons ended up on the same column).
+from ui.track_table import (
+    HEADERS as TRACK_TABLE_HEADERS,
+    LANG_ROLE,
+    choice_from_sample,
+    column_index,
+    install_table_policy,
+    language_display,
+    language_tooltip,
+    save_column_widths,
 )
 
 # Modern worker implementations (split into workers/ modules).
@@ -39,7 +52,7 @@ from widgets import WaveformWidget, ScatterPlotWidget
 from workers.advanced import AdvancedDatasetOrchestratorWorker
 from workers.dsp_normalizer import DspNormalizerWorker
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QLabel, QLineEdit, QTextEdit, QFileDialog,
@@ -60,7 +73,7 @@ from modules.wheel_guard import (
     GuardedSlider as QSlider,
     GuardedSpinBox as QSpinBox,
 )
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 
 from ui.themes import repolish
 
@@ -68,6 +81,7 @@ from ui.themes import repolish
 # field routes to whichever provider/model is selected.
 LLM_KEY_FIELDS = {
     "deepseek": ("deepseek_key", "remember_deepseek_key"),
+    "openai": ("openai_key", "remember_openai_key"),
     "gemini": ("gemini_api_key", "remember_gemini_key"),
     "openrouter": ("openrouter_key", "remember_openrouter_key"),
     "groq": ("groq_key", "remember_groq_key"),
@@ -139,6 +153,11 @@ class DatasetManager(QMainWindow):
         # device" policy — when unchecked it is kept for the session only.
         self.config = load_config(DEFAULT_CONFIG)
         self.original_backups = {}
+        # Tracks already copied to <dataset>/_Backup/songs/ this session. One
+        # backup per song, taken before the FIRST change lands, so a session of
+        # edits cannot overwrite the backup on every keystroke and leave you
+        # holding the state you just replaced (see ``_backup_song_once``).
+        self._songs_backed_up = set()
         self.active_worker = None
         self.filter_exceptions_only = False
         self.bypass_warnings = False
@@ -201,20 +220,121 @@ class DatasetManager(QMainWindow):
 
         dialog.exec()
 
+    @staticmethod
+    def _unique_backup_path(path):
+        """A free ``<path>.bak-<YYYYmmdd-HHMMSS>`` path, adding -1, -2 … on clash.
+
+        The stamp has second resolution, so two saves inside the same second
+        used to collide on one name and the older backup was destroyed by
+        ``shutil.copy2``. Appending a counter keeps BOTH, which is the whole
+        point of a backup: the caller is about to change the file, so a
+        silently-overwritten backup is the same as no backup at all.
+        """
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        base = f"{path}.bak-{stamp}"
+        candidate, n = base, 1
+        while os.path.exists(candidate):
+            candidate = f"{base}-{n}"
+            n += 1
+        return candidate
+
     def _backup_file(self, path):
         """Back up any existing file before it is changed or replaced.
 
         Returns the backup path, or ``None`` if there was nothing to back up.
-        The backup keeps the original untouched (``<name>.bak-<timestamp>``).
+        The backup keeps the original untouched (``<name>.bak-<timestamp>``),
+        and an existing backup is never overwritten (see
+        ``_unique_backup_path``).
         """
         if not path or not os.path.exists(path):
             return None
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup = f"{path}.bak-{stamp}"
+        backup = self._unique_backup_path(path)
         try:
             shutil.copy2(path, backup)
             return backup
         except OSError:
+            return None
+
+    def _deleted_backup_dir(self):
+        """Where a deleted track's file AND metadata are preserved.
+
+        One directory for both halves: a track is audio plus the JSON row that
+        describes it, and a delete that keeps only the audio leaves the caption
+        and lyrics unrecoverable — the exact loss this helper exists to stop.
+        Prefers the dataset's own folder so backups travel with the dataset,
+        and falls back to the CWD when no dataset is open yet.
+        """
+        anchor = getattr(self, "current_dataset_path", None)
+        if anchor:
+            return Path(anchor).parent / "_Backup" / "deleted"
+        return Path("project_backups") / "deleted"
+
+    def _backup_sample_json(self, sample, fname=""):
+        """Write one track's JSON to the deleted-backup dir before it is dropped.
+
+        This is the metadata half of a delete. ``_remove_sample_at`` copies the
+        audio but only pops the list entry, so without this the caption,
+        formatted lyrics and every other field are gone at the next save — the
+        silent data loss reported after an hour of caption/lyrics work.
+        """
+        try:
+            backup_dir = self._deleted_backup_dir()
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", fname or sample.get("id", "track"))
+            dest = self._unique_backup_path(str(backup_dir / f"{safe}.json"))
+            with open(dest, "w", encoding="utf-8") as f:
+                json.dump(sample, f, indent=2)
+            return dest
+        except (OSError, TypeError) as e:
+            QMessageBox.warning(
+                self, "Backup Warning",
+                f"Could not back up the deleted track's metadata: {e}",
+            )
+            return None
+
+    def _songs_backup_dir(self):
+        """Where a per-song snapshot is kept: ``<dataset>/_Backup/songs/``.
+
+        Sits beside ``_Backup/deleted`` (``_deleted_backup_dir``) so both halves
+        of the safety net live in one place and travel with the dataset. Falls
+        back to the CWD when no dataset is open yet.
+        """
+        anchor = getattr(self, "current_dataset_path", None)
+        if anchor:
+            return Path(anchor).parent / "_Backup" / "songs"
+        return Path("project_backups") / "songs"
+
+    def _backup_song_once(self, sample):
+        """Back up one track's whole sample row, once per session, before edit.
+
+        ``dataset.json`` is the only place a track's lyrics and caption live, so
+        a save that overwrites it is a save that can lose an hour of work. This
+        copies the track's complete row to ``_Backup/songs/<safe>.json`` the
+        first time the session is about to change it, and never again for that
+        song — a per-keystroke backup would destroy exactly the earlier state it
+        is meant to preserve (the same trap ``_unique_backup_path`` exists for).
+
+        Returns the path written, or ``None`` when the backup was skipped.
+        """
+        if sample is None or not isinstance(sample, dict):
+            return None
+        key = sample.get("filename") or sample.get("id") or ""
+        if not key or key in self._songs_backed_up:
+            return None
+        self._songs_backed_up.add(key)  # claim first: never retry in a loop
+        try:
+            backup_dir = self._songs_backup_dir()
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", key)
+            dest = backup_dir / f"{safe}.json"
+            with open(dest, "w", encoding="utf-8") as f:
+                json.dump(sample, f, indent=2, ensure_ascii=False)
+            return dest
+        except (OSError, TypeError, ValueError) as e:
+            # A backup failure must not block the edit the user asked for; the
+            # undo snapshot still covers it. Warn so it is not silent.
+            self._songs_backed_up.discard(key)
+            self.status_label.setText(f"Backup warning: could not save the pre-edit copy ({e}).")
             return None
 
     def undo(self):
@@ -569,10 +689,26 @@ class DatasetManager(QMainWindow):
         view_group.addButton(self.all_view_btn)
         view_group.addButton(self.exceptions_view_btn)
 
+        # Deleting now has a discoverable control here, NOT only the right-click
+        # menu: the menu is the only way it was reachable after the per-row
+        # Actions column was dropped, and a capability that exists solely behind
+        # a context menu is one most users never find. The button addresses the
+        # SELECTED rows (the menu addresses the row under the cursor, which is
+        # the opposite need) — see delete_selected_tracks for why those are not
+        # the same row once a filter is active.
+        self.delete_track_btn = QPushButton("🗑 Delete Track")
+        self.delete_track_btn.setToolTip(
+            "Remove the selected track(s) from the dataset (Del). The audio file "
+            "is backed up to project_backups/deleted/ first, and the removal is "
+            "undoable."
+        )
+        self.delete_track_btn.clicked.connect(self.delete_selected_tracks)
+
         view_row = QHBoxLayout()
         view_row.addWidget(self.all_view_btn)
         view_row.addWidget(self.exceptions_view_btn)
         view_row.addStretch()
+        view_row.addWidget(self.delete_track_btn)
         parts["view_row"] = _wrap(view_row)
 
         # --- Preview player + waveform ---
@@ -632,22 +768,43 @@ class DatasetManager(QMainWindow):
 
         # --- Table + Inspector (placed side by side by ui.shell) ---
 
-        # Column schema (index -> field): 0 Filename (read-only),
-        # 1 Tag, 2 Genre, 3 Language, 4 Key, 5 BPM, 6 Time signature,
-        # 7 Duration, 8 Actions. All metadata columns are editable inline;
-        # new tracks are NOT locked by default so you can type values straight in.
-        self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(
-            ["Filename", "Tag", "Genre", "Language", "Key", "BPM", "Time", "Duration", "Actions"]
-        )
+        # Column schema lives in ONE place: ui/track_table.py. It owns the
+        # header list, the default widths and the resize mode, and
+        # ``_MANUAL_FIELDS`` below maps those same names to sample fields.
+        # Duplicating the ORDER as indices here is what let the Actions button
+        # widget land on the Instr checkbox's column (the buttons painted over
+        # the box, so it could not be ticked).
+        #
+        # ``Language`` carries the instrumental state as well (blank == no
+        # vocals), so there is no separate Instr column — see the module
+        # docstring in modules/dataset_schema.py. All metadata columns are
+        # editable inline; new tracks are NOT locked by default so you can type
+        # values straight in.
+        self.table = QTableWidget(0, len(TRACK_TABLE_HEADERS))
+        self.table.setHorizontalHeaderLabels(list(TRACK_TABLE_HEADERS))
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 8):
-            self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        install_table_policy(self, self.table)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
         self.table.itemChanged.connect(self.on_metadata_cell_edited)
+        # Deleting a track used to have a button in every row's Actions column.
+        # The column is gone (inline editing + this menu replace it), and a
+        # right-click keeps the capability without spending width on it.
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_track_context_menu)
+        # Delete/Backspace on the focused table triggers the same discoverable
+        # delete as the 🗑 button. A shortcut (not a keyPressEvent override) so
+        # it fires only while the table has focus and never steals the key from
+        # a cell editor or a dialog. WidgetShortcut, so it does not leak into the
+        # rest of the window.
+        delete_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self.table)
+        delete_shortcut.setContext(Qt.WidgetShortcut)
+        delete_shortcut.activated.connect(self.delete_selected_tracks)
+        # Backspace is the macOS "delete" key; bind it too so the gesture is the
+        # same on every platform.
+        backspace_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self.table)
+        backspace_shortcut.setContext(Qt.WidgetShortcut)
+        backspace_shortcut.activated.connect(self.delete_selected_tracks)
         parts["table"] = self.table
 
         scroll = QScrollArea()
@@ -670,24 +827,156 @@ class DatasetManager(QMainWindow):
         unlock_bar.addStretch()
         insp_layout.addLayout(unlock_bar)
 
-        insp_layout.addWidget(QLabel("<b>Track Caption:</b>"))
+        self._caption_label = QLabel("<b>Track Caption:</b>")
+        insp_layout.addWidget(self._caption_label)
         self.caption_text = QTextEdit()
         self.caption_text.setPlaceholderText("Detailed acoustic description...")
         self.caption_text.textChanged.connect(self.on_caption_edited)
         insp_layout.addWidget(self.caption_text)
 
-        insp_layout.addWidget(QLabel("<b>Formatted Lyrics / Vocal Markers:</b>"))
-        self.lyrics_text = QTextEdit()
+        # ---- Lyrics field: live, debounced auto-save -------------------------
+        # There used to be a "Commit Lyrics" button here: the field was locked
+        # until "Edit mode" was ticked, and the write only happened on the
+        # explicit Commit. That gate has been removed — it made one extra click
+        # out of every edit and left unsaved text on screen if it was forgotten.
+        # The field now behaves like a text editor should: type, and it saves.
+        # What replaces the button's safety is not a smaller button but four
+        # guarantees, all of them stronger than "you pressed Commit":
+        #   * the write is debounced (400 ms after you stop typing), so a session
+        #     of keystrokes is one edit, not one per character;
+        #   * it snapshots BEFORE the write, so Ctrl+Z (or the Undo button) puts
+        #     the previous lyrics back;
+        #   * each song is backed up to <dataset>/_Backup/songs/ once, before the
+        #     first change, so the original survives even a crash;
+        #   * it refuses to write when the field no longer matches the selection,
+        #     which is the one way an auto-save could hit the wrong track.
+        lyrics_head = QHBoxLayout()
+        lyrics_head.addWidget(QLabel("<b>Formatted Lyrics / Vocal Markers:</b>"))
+        # Text-size steppers, one notch per click. They replace the old
+        # "🔠 Capitalize mode" checkbox 1:1 — that switch is gone because
+        # double-click now always marks a word shouted (see ui/lyrics_studio),
+        # so the space it occupied is free for the control users actually asked
+        # for here: making the lyrics readable at a glance. They are a coarse
+        # adjustment of the SAME ``lyrics_font_size`` key the Settings row and the
+        # numeric "Size:" spinbox own; ``ui.appearance_panel.sync_font_size_controls``
+        # keeps every copy showing one number, so there is still one source of
+        # truth. The header is never hidden by "⤢ Expand" (the Expand checkbox
+        # itself lives here), so both the value and the steppers stay reachable in
+        # the mode where the text is biggest.
+        from ui.themes import LYRICS_FONT_SIZE_MAX
+
+        self.lyrics_text_smaller_btn = QPushButton("A−")
+        self.lyrics_text_smaller_btn.setToolTip("Make the lyrics text smaller.")
+        self.lyrics_text_smaller_btn.setFixedWidth(30)
+        self.lyrics_text_smaller_btn.clicked.connect(
+            lambda: self.on_lyrics_font_step(-1))
+        self.lyrics_text_larger_btn = QPushButton("A+")
+        self.lyrics_text_larger_btn.setToolTip(
+            "Make the lyrics text larger — up to "
+            f"{LYRICS_FONT_SIZE_MAX} px, then the text wraps in this box. "
+            "\"⤢ Expand\" gives it more height to wrap into."
+        )
+        self.lyrics_text_larger_btn.setFixedWidth(30)
+        self.lyrics_text_larger_btn.clicked.connect(
+            lambda: self.on_lyrics_font_step(1))
+        self.lyrics_expand_check = QCheckBox("⤢ Expand")
+        self.lyrics_expand_check.setToolTip(
+            "Grow the field to most of the inspector and hide the fields below it."
+        )
+        from ui.themes import FONT_REGION_LYRICS, FONT_REGION_PROPERTY
+        lyrics_head.addStretch()
+        lyrics_head.addWidget(QLabel("Size:"))
+        lyrics_head.addWidget(self.lyrics_text_smaller_btn)
+        lyrics_head.addWidget(self.lyrics_text_larger_btn)
+        lyrics_head.addWidget(self.lyrics_expand_check)
+        insp_layout.addLayout(lyrics_head)
+
+        from ui.lyrics_studio import LyricTextEdit
+
+        self.lyrics_text = LyricTextEdit()
+        # Puts the field under build_stylesheet()'s lyrics-size rule, so it can
+        # grow independently of the rest of the app. Not QWidget.setFont(): the
+        # app stylesheet overrides a per-widget font on every theme re-apply
+        # (measured — see ui/themes.FONT_REGION_PROPERTY).
+        self.lyrics_text.setProperty(FONT_REGION_PROPERTY, FONT_REGION_LYRICS)
         self.lyrics_text.setPlaceholderText("[Intro]\n[Verse 1]\nLyrics...\n[Chorus]...")
+        # Always editable, and the write is debounced rather than gated behind a
+        # Commit button (see the header comment above). ``textChanged`` only
+        # restarts the timer; ``_flush_lyrics_edit`` does the actual write after
+        # the user stops typing.
+        self.lyrics_text.setReadOnly(False)
         self.lyrics_text.textChanged.connect(self.on_lyrics_edited)
         insp_layout.addWidget(self.lyrics_text)
+
+        # Everything under the lyrics field, so "Expand" can hide it. The
+        # widgets stay parented and alive — they are only hidden — which keeps
+        # the existing references valid.
+        self._lyrics_lower_widgets = []
+        # Which track the field is showing, so an auto-save cannot write the text
+        # of one track onto another after the selection moves.
+        self._lyrics_selected_filename = None
+        # True only while ``_load_lyrics_into_field`` is refilling the box. The
+        # load suppresses the signal too, but a repaint can still flush a queued
+        # timer; this flag makes the debounced write a no-op during a load no
+        # matter how it was reached.
+        self._suppress_lyrics_save = False
+        # The debounced auto-save. Single-shot and restarted on every keystroke,
+        # so it fires once, 400 ms after typing stops. 400 ms is deliberately
+        # longer than the 220 ms used for the Lyrics Studio preview
+        # (ui/lyrics_studio.py): that one only repaints, this one snapshots the
+        # undo stack and writes the dataset, so it should not fire mid-burst.
+        self._lyrics_save_timer = QTimer(self)
+        self._lyrics_save_timer.setSingleShot(True)
+        self._lyrics_save_timer.setInterval(400)
+        self._lyrics_save_timer.timeout.connect(self._flush_lyrics_edit)
+
+        lyrics_actions = QHBoxLayout()
+        # The Commit button is gone; so is the old "Revert" that discarded an
+        # uncommitted buffer, because a live-save field has no buffer to discard.
+        # What is left is a reload — put the dataset's saved copy back in the
+        # field, which is the one gesture the auto-save cannot express (Ctrl+Z
+        # steps back one edit, not all of them).
+        self.lyrics_save_status = QLabel("")
+        self.lyrics_save_status.setProperty("muted", True)
+        self.lyrics_save_status.setToolTip(
+            "Lyrics save automatically, 400 ms after you stop typing. Every save "
+            "is undoable (Ctrl+Z) and the pre-edit copy of each song is kept in "
+            "<dataset>/_Backup/songs/."
+        )
+        self.lyrics_discard_btn = QPushButton("↺ Revert to saved")
+        self.lyrics_discard_btn.setToolTip(
+            "Reload this track's saved lyrics from the dataset, discarding the "
+            "text in the field."
+        )
+        self.lyrics_discard_btn.clicked.connect(self.on_lyrics_revert)
+        lyrics_actions.addWidget(self.lyrics_save_status)
+        lyrics_actions.addStretch()
+        lyrics_actions.addWidget(self.lyrics_discard_btn)
+        # Placed after the stretch so it is the rightmost control on this row.
+        # "Expand" hides ``_lyrics_lower_widgets`` and this row is not in that
+        # list, so the size control stays available while the field is tall.
+        from ui.appearance_panel import build_font_size_spin
+        from ui.themes import LYRICS_FONT_SIZE_MAX
+
+        self.lyrics_font_spin_inline = build_font_size_spin(
+            "Text size for the lyrics fields. Auto matches the rest of the app; "
+            "raise it to make this box easier to read at a distance.",
+            self.config.get("lyrics_font_size"),
+            maximum=LYRICS_FONT_SIZE_MAX,
+        )
+        self.lyrics_font_spin_inline.setFixedWidth(84)
+        self.lyrics_font_spin_inline.valueChanged.connect(self.on_lyrics_font_size_changed)
+        lyrics_actions.addWidget(QLabel("Size:"))
+        lyrics_actions.addWidget(self.lyrics_font_spin_inline)
+        insp_layout.addLayout(lyrics_actions)
 
         form = QFormLayout()
 
         # Genre / Key / BPM / Time / Duration are entered in the table next to
-        # the filename (auto-locked after scanning; unlock with the 🔓 button
-        # in the row's Actions column). The inspector only hosts the remaining
-        # per-track fields to keep a single place for metadata entry.
+        # the filename: inline editing is always available now (no lock to
+        # unlock, no ✏️ button — the old Actions column that held both is gone).
+        # The inspector only hosts the remaining per-track field to keep a
+        # single place for it.
 
         tag_row = QHBoxLayout()
         self.track_tag_input = QLineEdit()
@@ -696,6 +985,10 @@ class DatasetManager(QMainWindow):
         form.addRow("Track Trigger Tag:", tag_row)
 
         self.inst_check = QCheckBox("Instrumental Track (No Vocals)")
+        self.inst_check.setToolTip(
+            "Ticking this clears the track's Language: a track with no vocals has "
+            "no language to declare, and the export writes instrumental: true."
+        )
         self.inst_check.stateChanged.connect(self.on_inst_edited)
         form.addRow(self.inst_check)
 
@@ -718,6 +1011,15 @@ class DatasetManager(QMainWindow):
         form.addRow(ab_row)
 
         insp_layout.addLayout(form)
+        # Registered last so Expand hides the whole lower half in one pass:
+        # everything below the lyrics field, in layout order.
+        self._lyrics_lower_widgets.append(form)
+        self._lyrics_lower_widgets.append(self.sample_health_alert)
+        self._lyrics_lower_widgets.append(unlock_bar)
+        self._lyrics_lower_widgets.append(self.caption_text)
+        self._lyrics_lower_widgets.append(self._caption_label)
+        self.lock_action_combo.activated.connect(self.handle_lock_dropdown)
+        self.lyrics_expand_check.toggled.connect(self.on_lyrics_expand_toggled)
         scroll.setWidget(inspector)
         parts["inspector"] = scroll
 
@@ -775,6 +1077,7 @@ class DatasetManager(QMainWindow):
         self.lyrics_preview_btn.clicked.connect(self.preview_lyrics_tidy)
         self.lyrics_apply_btn.clicked.connect(self.apply_lyrics_tidy)
         self.lyrics_manual_edit_btn.clicked.connect(self.open_lyrics_editor)
+        self.lyrics_capitalizer_btn.clicked.connect(self.open_lyric_capitalizer)
         self.lyrics_add_row_btn.clicked.connect(self._lyrics_add_contract_row)
         self.lyrics_del_row_btn.clicked.connect(self._lyrics_remove_contract_row)
         self.lyrics_reset_btn.clicked.connect(self._lyrics_reset_contracts)
@@ -2548,6 +2851,67 @@ class DatasetManager(QMainWindow):
         self.assistant_input.setEnabled(not busy)
         self.assistant_status.setText("Thinking…" if busy else "Ready.")
 
+    def _assistant_tools(self):
+        """The tool list for one assistant turn: app tools plus MCP tools.
+
+        MCP discovery spawns server processes, so it runs once per session (and
+        again when the user asks to reload) rather than on every message. A
+        server that will not start is reported once in the transcript and left
+        out — not retried, and not allowed to prevent the app's own tools from
+        being offered.
+        """
+        if getattr(self, "_mcp_specs", None) is None:
+            from modules.mcp_client import gather_specs, parse_mcp_servers
+
+            servers = parse_mcp_servers(self.config.get("mcp_servers"))
+            self._mcp_specs, self._mcp_problems = gather_specs(servers)
+            if self._mcp_problems:
+                self.assistant_history.append(
+                    "<i>⚙ MCP: "
+                    + html.escape("; ".join(str(p) for p in self._mcp_problems))
+                    + "</i>"
+                )
+        return list(ASSISTANT_TOOLS) + list(self._mcp_specs or [])
+
+    def reload_mcp_tools(self):
+        """Re-discover MCP tools after the server list in ⚙ Settings changed."""
+        self._mcp_specs = None
+        self._mcp_problems = []
+        tools = self._assistant_tools()
+        return tools, getattr(self, "_mcp_problems", [])
+
+    def save_and_reload_mcp(self):
+        """Bridge alias so settings tab UI button works."""
+        if hasattr(self, "reload_mcp_tools"):
+            return self.reload_mcp_tools()
+
+    def _call_mcp_tool(self, server_name, tool_name, args):
+        """Invoke a namespaced tool on a configured MCP server.
+
+        Runs on the GUI thread like every other tool here (see
+        ``_rockstar_lookup_tool``, which does the same for a network lookup), so
+        the timeout is deliberately short: a stuck server must not hold the
+        window hostage any longer than an unresponsive website would.
+        """
+        from modules.mcp_client import McpUnavailable, call_tool, parse_mcp_servers
+
+        server = next(
+            (s for s in parse_mcp_servers(self.config.get("mcp_servers"))
+             if s["name"] == server_name),
+            None,
+        )
+        if server is None:
+            return (
+                f"MCP server '{server_name}' is not configured. Add it in ⚙ "
+                "Settings (MCP servers), then reload tools."
+            )
+        try:
+            return call_tool(server, tool_name, args or {}, timeout=15.0)
+        except McpUnavailable:
+            return 'MCP tools unavailable: pip install "mcp[cli]".'
+        except Exception as e:  # noqa: BLE001 — one bad server must not kill the turn
+            return f"MCP tool '{server_name}__{tool_name}' failed: {e}"
+
     def _start_assistant(self):
         from modules.llm_client import get_client
 
@@ -2569,7 +2933,8 @@ class DatasetManager(QMainWindow):
             {"role": "system", "content": sys_prompt}
         ] + list(self._assistant_messages)
         self.assistant_worker = AssistantWorker(
-            "", messages, tools=ASSISTANT_TOOLS, parent=self, config=self.config,
+            "", messages, tools=self._assistant_tools(), parent=self,
+            config=self.config,
         )
         self.assistant_worker.answer_ready.connect(self.on_assistant_answer)
         self.assistant_worker.tool_requested.connect(self.on_assistant_tool)
@@ -2653,9 +3018,202 @@ class DatasetManager(QMainWindow):
                 )
             if name == "rockstar_lookup":
                 return self._rockstar_lookup_tool(args)
+            # --- Action tools: things the assistant does, not just reports ---
+            if name in ("set_track_metadata", "write_caption", "import_lyrics",
+                        "find_gaps", "create_virtual_dataset",
+                        "normalize_audio", "stage_temp_mp3"):
+                return self._run_assistant_action(name, args)
+            # Anything still namespaced here came from a configured MCP server
+            # (modules/mcp_client.py). Native tools never contain "__".
+            from modules.mcp_client import split_tool_name
+
+            server, tool = split_tool_name(name)
+            if server:
+                return self._call_mcp_tool(server, tool, args)
             return f"Unknown tool: {name}"
         except Exception as e:  # noqa: BLE001
             return f"Tool error: {e}"
+
+    def _run_assistant_action(self, name, args):
+        """Execute an assistant action tool.
+
+        Two invariants live here, because neither can be enforced once the model
+        has made its choice:
+
+          * **Snapshot only after validation passes.** Pushing a snapshot before
+            refusing an action would put a no-op entry on the undo stack and
+            teach the user to distrust undo.
+          * **Refresh after every write.** The grid would otherwise still show
+            the pre-tool values while the model talks about the new ones.
+        """
+        from modules import assistant_actions as acts
+
+        if name == "find_gaps":
+            return acts.find_gaps(self.dataset)
+
+        if name == "stage_temp_mp3":
+            return self._stage_temp_mp3_plan(args)
+
+        if name == "normalize_audio":
+            return self._start_assistant_normalize(args)
+
+        if name not in ("set_track_metadata", "write_caption", "import_lyrics",
+                        "create_virtual_dataset"):
+            return f"Unknown tool: {name}"
+
+        if name == "create_virtual_dataset":
+            specs = args.get("tracks") or []
+            if not isinstance(specs, list) or not specs:
+                return "Refused: no tracks specified."
+            self.record_snapshot()
+            out = acts.create_virtual_dataset(
+                self.dataset, specs, (args.get("name") or "").strip()
+            )
+        else:
+            if name == "set_track_metadata":
+                field = args.get("field")
+                text = args.get("value")
+            elif name == "write_caption":
+                field, text = "caption", args.get("caption")
+            else:  # import_lyrics — a dedicated path, not a single-field write
+                field, text = "lyrics", args.get("lyrics")
+            if name == "set_track_metadata" and field not in acts.WRITABLE_FIELDS:
+                return f"Refused: '{field}' is not a field the assistant may write."
+            if name != "set_track_metadata" and not str(text or "").strip():
+                return f"Refused: '{field}' was empty."
+            indices, _unresolved = acts.resolve_indices(
+                self.dataset, args.get("tracks")
+            )
+            if not indices:
+                return f"No tracks matched {args.get('tracks')!r}."
+            self.record_snapshot()
+            if name == "import_lyrics":
+                # Three fields at once, plus clearing an instrumental flag —
+                # a single-field write would leave the track contradictory.
+                out = acts.import_lyrics(self.dataset, args.get("tracks"), text)
+            else:
+                out = acts.set_field_many(
+                    self.dataset, args.get("tracks"), field, text
+                )
+                if name == "write_caption":
+                    out = self._caption_review(out, text)
+
+        self.refresh_table()
+        self.on_table_selection_changed()
+        return out
+
+    def _caption_review(self, written, caption):
+        """Tell the model what is wrong with the caption it just wrote.
+
+        Writing and validating in the same call is deliberate: it turns a
+        silently-invalid caption into an immediate, self-correcting round trip
+        instead of something the user only finds during export.
+        """
+        try:
+            from modules.caption_quality import check_caption
+
+            issues = list(check_caption(caption))
+        except Exception as e:  # noqa: BLE001 — review must never break the write
+            return f"{written}\n(caption review unavailable: {e})"
+        if not issues:
+            return f"{written}\nSchema: conforms to the ACE-Step caption rules."
+        return written + "\nSchema issues:\n" + "\n".join(f"- {i}" for i in issues)
+
+    def _resolve_action_tracks(self, args):
+        """Shared lookup for the two ffmpeg-facing tools."""
+        from modules import assistant_actions as acts
+
+        indices, unresolved = acts.resolve_indices(self.dataset, args.get("tracks"))
+        if not indices:
+            return [], [], f"No tracks matched {args.get('tracks')!r}."
+        samples = self.dataset.get("samples", [])
+        return [samples[i] for i in indices], unresolved, None
+
+    def _stage_temp_mp3_plan(self, args):
+        """Return the ffmpeg commands for a scratch-MP3 staging pass.
+
+        Planning instead of running: ffmpeg on a whole track would block the
+        GUI thread from inside a tool call. The commands are exact, so they can
+        be reviewed, replayed, or handed to a worker later.
+        """
+        from modules import assistant_actions as acts
+
+        target_dir = (args.get("target_dir") or "").strip()
+        if not target_dir:
+            return "Refused: target_dir is required."
+        bitrate = (args.get("bitrate") or "192k").strip()
+        samples, unresolved, err = self._resolve_action_tracks(args)
+        if err:
+            return err
+
+        lines = ["Staging plan (not executed):"]
+        for s in samples:
+            src = s.get("audio_path") or (s.get("filename") or "")
+            stem = Path(src).stem or "track"
+            dst = os.path.join(target_dir, f"{stem}.mp3")
+            lines.append("  " + " ".join(
+                acts.build_temp_mp3_command(src, dst, bitrate)
+            ))
+        lines.append(
+            "Scratch MP3s are for upload/staging only — training audio stays "
+            "lossless. Nothing was executed."
+        )
+        if unresolved:
+            lines.append(f"(not found: {', '.join(str(u) for u in unresolved)})")
+        return "\n".join(lines)
+
+    def _start_assistant_normalize(self, args):
+        """Kick off the same DspNormalizerWorker the 🎚 DSP Normalize button uses.
+
+        Deliberately dialog-free: the button's file-picker and confirmation
+        flow cannot run inside a tool call (the model has no way to answer a
+        modal), and blocking the GUI on ffmpeg would freeze it for the length of
+        a track. The assistant supplies the target directory explicitly.
+        """
+        target_dir = (args.get("target_dir") or "").strip()
+        if not target_dir:
+            return "Refused: target_dir is required."
+        samples, unresolved, err = self._resolve_action_tracks(args)
+        if err:
+            return err
+
+        usable = [s for s in samples
+                  if (s.get("audio_path") or "") and os.path.exists(s["audio_path"])]
+        if not usable:
+            return "No selected track has audio on disk to normalize."
+
+        lufs = float(args.get("target_lufs")
+                     or self.config.get("dsp_target_lufs", -14.0))
+        sr = int(args.get("target_sr") or self.config.get("dsp_target_sr", 44100))
+
+        os.makedirs(target_dir, exist_ok=True)
+        self.normalization_dataset_backup = json.loads(json.dumps(self.dataset))
+        self.record_snapshot()
+        if hasattr(self, "normalize_btn"):
+            self.normalize_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+
+        self.active_worker = DspNormalizerWorker(
+            usable, target_dir=target_dir, target_sr=sr, target_lufs=lufs,
+        )
+        self.active_worker.progress.connect(self.on_worker_progress)
+        self.active_worker.file_normalized.connect(self.on_file_normalized)
+        self.active_worker.all_done.connect(self.on_normalize_done)
+        self.active_worker.error_occurred.connect(self.on_worker_error)
+        self.active_worker.start()
+
+        lines = [
+            f"Started EBU R128 normalization of {len(usable)} track(s) at "
+            f"{lufs} LUFS / {sr} Hz.",
+            f"Output: {os.path.join(target_dir, 'normalized_audio')} — originals "
+            f"copied first to {os.path.join(target_dir, 'originals_backup')}.",
+            "Originals are never overwritten. Watch the progress bar; this job "
+            "is still running when this message returns.",
+        ]
+        if unresolved:
+            lines.append(f"(not found: {', '.join(str(u) for u in unresolved)})")
+        return "\n".join(lines)
 
     def _rockstar_lookup_tool(self, args):
         from modules.rockstar_lookup import lookup_rockstar_track, format_lookup
@@ -2758,6 +3316,13 @@ class DatasetManager(QMainWindow):
         tv.addWidget(flow_group("Import && fix", parts["audit_strip"]))
         tv.addWidget(flow_group("Look up", parts["advanced_strip"]))
         tv.addWidget(flow_group("Edit tools", parts["tools_strip"]))
+        # The three structure-tag tidy rules live here, not on the Lyrics tab:
+        # they are tag rules, and this is the tab that already owns the tag
+        # machinery. Built here (not in init_ui) because it needs status_label,
+        # which init_ui creates immediately before calling this method.
+        from ui.tidy_panel import build_tidy_panel
+
+        tv.addWidget(build_tidy_panel(self, tags_page))
         tv.addWidget(pages["organize"], 1)
         self._shell_extra_pages = [lyrics_page, tags_page]
 
@@ -2768,18 +3333,27 @@ class DatasetManager(QMainWindow):
             ("Tags && checks", tags_page),
         ]
         install_shell(self, parts, tool_pages, pages["assistant"], pages["settings"])
-        # _on_tab_changed compares against these; they now index the Tools dock.
-        self.lyrics_tab_index = 1
-        self.tag_tab_index = 3
-        self.embed_tab_index = 3
+        # Named, not numbered. These used to be hardcoded indices compared in
+        # _on_tab_changed, so inserting or reordering a page silently pointed the
+        # hook at the wrong tab — no exception, just the wrong panel refreshing.
+        self._tool_page_index = {
+            name.replace("&&", "&"): i
+            for i, (name, _page) in enumerate(tool_pages)
+        }
+        # The old code also set an ``embed_tab_index`` here that nothing ever
+        # read; removed rather than left as a trap for the next page insert.
+
+    def _tool_page(self, name):
+        """Index of a Tools-dock page by its visible name, or -1 if absent."""
+        return getattr(self, "_tool_page_index", {}).get(name, -1)
 
     def _on_tab_changed(self, index):
-        if index == self.tag_tab_index and hasattr(self, "tag_stats_table"):
+        if index == self._tool_page("Tags & checks") and hasattr(self, "tag_stats_table"):
             self.refresh_tag_manager()
         # Auto-populate the Lyrics tab so it shows the selected track on arrival
         # instead of requiring a Preview click. Uses a remembered row, so the
         # selection survives the tab switch.
-        if hasattr(self, "lyrics_tab_index") and index == self.lyrics_tab_index:
+        if index == self._tool_page("Lyrics"):
             self.preview_lyrics_tidy(silent=True)
             self.load_all_lyrics(silent=True)
 
@@ -3709,15 +4283,35 @@ class DatasetManager(QMainWindow):
     # -----------------------------------------------------------------------
     # Original Methods (keep as is)
     # -----------------------------------------------------------------------
-    def apply_custom_theme(self):
-        """Apply the configured theme app-wide (see ui/themes.py)."""
+    def apply_custom_theme(self, scoped=False):
+        """Apply the configured theme (see ui/themes.py).
+
+        ``scoped=False`` (the startup call) sets the stylesheet on the
+        QApplication so the FIRST paint styles the whole process. Every live
+        change — an Appearance or zoom slider step, a font size — passes
+        ``scoped=True`` and sets it on this window instead: the same look, but
+        Qt re-polishes one window rather than all ~1755 widgets, which is the
+        difference between a smooth control and a multi-second freeze per step.
+        Dialogs and the Lyrics Studio are Qt children of this window, so they
+        inherit the scoped sheet; only the application palette is set app-wide,
+        to keep tooltips readable.
+        """
         from PySide6.QtWidgets import QApplication
 
-        from ui.themes import apply_theme
+        from ui.themes import apply_theme, apply_theme_to
 
         app = QApplication.instance()
         if app is not None:
-            apply_theme(app, self.config)
+            if scoped:
+                apply_theme_to(self, self.config, app)
+            else:
+                apply_theme(app, self.config)
+        # The lyrics field's actions row has its own size spinner bound to the
+        # same key as the Settings row; a change from either must land on both.
+        if hasattr(self, "font_size_spin") or hasattr(self, "lyrics_font_spin_inline"):
+            from ui.appearance_panel import sync_font_size_controls
+
+            sync_font_size_controls(self)
         if hasattr(self, "theme_swatches"):
             from ui.appearance_panel import refresh_swatches
 
@@ -3748,6 +4342,7 @@ class DatasetManager(QMainWindow):
                 ("hf_token", self.remember_hf.isChecked()),
                 ("openrouter_key", self.remember_openrouter.isChecked()),
                 ("groq_key", self.remember_groq.isChecked()),
+                ("openai_key", self.remember_openai.isChecked()),
             ]
             if checked
         }
@@ -3828,6 +4423,8 @@ class DatasetManager(QMainWindow):
         self.config["remember_openrouter_key"] = self.remember_openrouter.isChecked()
         self.config["groq_key"] = self.groq_key.text().strip()
         self.config["remember_groq_key"] = self.remember_groq.isChecked()
+        self.config["openai_key"] = self.openai_key.text().strip()
+        self.config["remember_openai_key"] = self.remember_openai.isChecked()
         # Unified Provider API Key -> the active provider's stored key.
         active = self.llm_provider_combo.currentText().split(" ")[0]
         key_field, rem_field = LLM_KEY_FIELDS.get(active, ("groq_key", "remember_groq_key"))
@@ -4070,38 +4667,40 @@ class DatasetManager(QMainWindow):
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 return item
 
-            # 0 Filename (read-only)
-            self.table.setItem(row, 0, _cell(s.get("filename", ""), False))
-            # 1 Tag, 2 Genre, 3 Language, 4 Key — free text, always editable
-            self.table.setItem(row, 1, _cell(s.get("custom_tag", "")))
-            self.table.setItem(row, 2, _cell(s.get("genre", "")))
-            self.table.setItem(row, 3, _cell(s.get("language", "")))
-            self.table.setItem(row, 4, _cell(s.get("keyscale", "")))
-            # 5 BPM
-            bpm = s.get("bpm", 0)
-            self.table.setItem(row, 5, _cell(str(bpm) if bpm else ""))
-            # 6 Time signature
-            self.table.setItem(row, 6, _cell(s.get("timesignature", "")))
-            # 7 Duration (seconds)
-            dur = s.get("duration", 0)
-            self.table.setItem(row, 7, _cell(f"{dur}s" if dur else ""))
+            # Cells are addressed by HEADER NAME, never by a hard-coded index:
+            # a second copy of the column order is what let the Actions button
+            # widget land on the Instr checkbox's column. A name that no column
+            # carries writes nothing instead of landing in the wrong cell.
+            def _put(header, item):
+                col = column_index(self.table, header)
+                if col < 0:
+                    return
+                self.table.setItem(row, col, item)
 
-            # 8 Actions: edit-metadata dialog + delete.
-            actions = QWidget()
-            actions_layout = QHBoxLayout(actions)
-            actions_layout.setContentsMargins(2, 0, 2, 0)
-            actions_layout.setSpacing(4)
-            edit_btn = QPushButton("✏️")
-            edit_btn.setToolTip("Edit this track's tag / genre / language / key / BPM / time / duration")
-            edit_btn.setMaximumWidth(36)
-            edit_btn.clicked.connect(lambda _=False, i=idx: self.open_metadata_editor(i))
-            del_btn = QPushButton("🗑")
-            del_btn.setToolTip("Remove this track from the dataset")
-            del_btn.setMaximumWidth(36)
-            del_btn.clicked.connect(lambda _=False, i=idx: self.confirm_delete_sample(i))
-            actions_layout.addWidget(edit_btn)
-            actions_layout.addWidget(del_btn)
-            self.table.setCellWidget(row, 8, actions)
+            # Filename (read-only): renaming would have to move the file.
+            _put("Filename", _cell(s.get("filename", ""), False))
+            _put("Tag", _cell(s.get("custom_tag", "")))
+            # Genre is elided at the default width, so the full value goes in
+            # the tooltip — otherwise a long style ("Hard Rock / Boogie Rock")
+            # is unreadable without dragging the column wider.
+            genre_item = _cell(s.get("genre", ""))
+            genre_item.setToolTip(genre_item.text())
+            _put("Genre", genre_item)
+            # Language carries the instrumental state as well, so there is no
+            # separate Instr column. The DisplayRole must stay short (the column
+            # is ISO-code wide) while the canonical choice lives in LANG_ROLE;
+            # language_display() decides how each one is shown.
+            choice = choice_from_sample(s)
+            lang_item = _cell(language_display(choice))
+            lang_item.setData(LANG_ROLE, choice)
+            lang_item.setToolTip(language_tooltip(choice))
+            _put("Language", lang_item)
+            _put("Key", _cell(s.get("keyscale", "")))
+            bpm = s.get("bpm", 0)
+            _put("BPM", _cell(str(bpm) if bpm else ""))
+            _put("Time", _cell(s.get("timesignature", "")))
+            dur = s.get("duration", 0)
+            _put("Duration", _cell(f"{dur}s" if dur else ""))
 
         self._loading_table = False
         self.exceptions_view_btn.setText(f"⚠ Missing Captions ({exceptions_count})")
@@ -4159,6 +4758,38 @@ class DatasetManager(QMainWindow):
             return self.dataset["samples"][self._table_sample_indices[row]]
         return None
 
+    def show_track_context_menu(self, pos):
+        """Right-click menu for the track table.
+
+        This is where the per-row Actions column went. Deleting is the only
+        action the column held that inline editing does not already cover
+        (editing a cell is a double-click, and the inspector edits everything),
+        so it lives here instead of costing ~72px of every row's width on every
+        screen — width the Filename column now gets.
+
+        The menu addresses the row ACTUALLY under the cursor, not the selected
+        row: right-clicking must never act on a different track than the one
+        clicked (a wrong-target delete is not recoverable by Ctrl+Z).
+        """
+        row = self.table.rowAt(pos.y())
+        if row < 0 or row >= len(self._table_sample_indices):
+            return
+        idx = self._table_sample_indices[row]
+        samples = self.dataset.get("samples", [])
+        if not (0 <= idx < len(samples)):
+            return
+        s = samples[idx]
+
+        menu = QMenu(self.table)
+        menu.addAction("Edit metadata…", lambda: self.open_metadata_editor(idx))
+        menu.addSeparator()
+        delete_action = menu.addAction(
+            f"Delete track… ({s.get('filename', '?')})",
+            lambda: self.confirm_delete_sample(idx),
+        )
+        delete_action.setToolTip("Removes the track; the audio file is backed up first.")
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
     def toggle_track_lock(self, idx):
         """Lock / unlock a single track's metadata (🔒/🔓 button in Actions)."""
         samples = self.dataset.get("samples", [])
@@ -4177,55 +4808,156 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(f"Metadata for '{samples[idx].get('filename', '')}' {state}.")
 
     def confirm_delete_sample(self, idx):
-        """Ask before removing a track; always back up the file when removed."""
-        samples = self.dataset.get("samples", [])
-        if not (0 <= idx < len(samples)):
+        """Ask before removing a track; always back up the file when removed.
+
+        Kept as the context menu's entry point (it addresses ONE row — the one
+        under the cursor). It delegates to ``_confirm_delete_indices`` so the
+        right-click path and the 🗑 button / Del key share one implementation and
+        cannot diverge in backup, snapshot, or confirmation behaviour.
+        """
+        self._confirm_delete_indices([idx])
+
+    def delete_selected_tracks(self):
+        """Remove every SELECTED row (the 🗑 button and the Delete key).
+
+        Deliberately different from the right-click menu, which acts on the row
+        under the cursor. Here the user has selected rows, so those are what they
+        mean — and the rows come from the VIEW, not from the dataset:
+
+        * the table can be filtered or in Exceptions mode, so row N is NOT sample
+          N — ``_table_sample_indices[row]`` is the only correct translation, and
+          using the row number as a sample index would delete the wrong tracks;
+        * with multi-select every selected index is resolved FIRST and the pops
+          then happen in descending order, because removing sample 3 shifts
+          sample 7 down to 6 and the next pop would otherwise hit its neighbour.
+        """
+        rows = sorted({r.row() for r in self.table.selectionModel().selectedRows()})
+        indices = [self._table_sample_indices[r]
+                   for r in rows if 0 <= r < len(self._table_sample_indices)]
+        if not indices:
+            self.status_label.setText(
+                "Select one or more tracks in the table to delete.")
             return
-        s = samples[idx]
-        fname = s.get("filename", "?")
+        self._confirm_delete_indices(indices)
+
+    def _confirm_delete_indices(self, indices):
+        """Confirm once, snapshot once, then remove ``indices`` (any order).
+
+        One confirmation and one snapshot for the whole batch: per-track prompts
+        would ask N times for a single user action, and N snapshots would make
+        Ctrl+Z undo one track at a time with no way to say "undo that delete".
+        """
+        samples = self.dataset.get("samples", [])
+        # De-duplicate and sort DESCENDING up front so the pop loop below is
+        # index-stable no matter how the caller ordered the list.
+        targets = sorted({i for i in indices if 0 <= i < len(samples)}, reverse=True)
+        if not targets:
+            return
+        names = [samples[i].get("filename", "?") for i in targets]
+        if len(names) == 1:
+            body = f"Are you sure you want to remove '{names[0]}' from the dataset?"
+        else:
+            listing = "\n".join(f"  • {n}" for n in names[:20])
+            more = "" if len(names) <= 20 else f"\n  …and {len(names) - 20} more"
+            body = (f"Are you sure you want to remove {len(names)} tracks from "
+                    f"the dataset?\n\n{listing}{more}")
         resp = QMessageBox.question(
             self,
-            "Delete Track",
-            f"Are you sure you want to remove '{fname}' from the dataset?\n\n"
-            "The audio file will be backed up to project_backups/deleted/ "
-            "(non-destructive).",
+            "Delete Track" if len(names) == 1 else "Delete Tracks",
+            f"{body}\n\nThe audio file(s) AND each track's metadata (caption, "
+            "lyrics, tags) will be backed up to a deleted/ folder "
+            "(non-destructive), and this can be undone with Ctrl+Z.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if resp != QMessageBox.Yes:
             return
+        # Snapshot BEFORE any mutation, so Ctrl+Z restores the whole batch.
         self.record_snapshot()
-        sid = s.get("id", "")
-        path = s.get("audio_path", "")
-        if path and os.path.exists(path):
-            backup_dir = Path("project_backups") / "deleted"
-            try:
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                dest = backup_dir / os.path.basename(path)
-                if dest.exists():
-                    dest = backup_dir / f"{Path(path).stem}_{time.strftime('%Y%m%d-%H%M%S')}{Path(path).suffix}"
-                shutil.copy2(path, str(dest))
-                self.status_label.setText(f"Backed up '{fname}' to {dest}.")
-            except OSError as e:
-                QMessageBox.warning(self, "Backup Warning", f"Could not back up file: {e}")
-        samples.pop(idx)
-        self.original_backups.pop(sid, None)
+        for idx in targets:
+            self._remove_sample_at(idx)
         self.refresh_table()
         self.on_table_selection_changed()
-        self.status_label.setText(f"Removed '{fname}' from the dataset.")
+        if len(names) == 1:
+            self.status_label.setText(f"Removed '{names[0]}' from the dataset.")
+        else:
+            self.status_label.setText(f"Removed {len(names)} tracks from the dataset.")
 
-    # Column index -> ("field", parser) for inline manual edits in the table.
-    # Matches the header set in init_ui: 0 Filename, 1 Tag, 2 Genre, 3 Language,
-    # 4 Key, 5 BPM, 6 Time signature, 7 Duration, 8 Actions.
-    _MANUAL_COLS = {
-        1: ("custom_tag", str),
-        2: ("genre", str),
-        3: ("language", str),
-        4: ("keyscale", str),
-        5: ("bpm", int),
-        6: ("timesignature", str),
-        7: ("duration", int),
-    }
+    def _remove_sample_at(self, idx):
+        """Back the file up, then drop sample ``idx``. Snapshot/refresh are the
+        caller's job — this is the shared primitive under single and batch
+        delete."""
+        samples = self.dataset.get("samples", [])
+        if not (0 <= idx < len(samples)):
+            return
+        s = samples[idx]
+        fname = s.get("filename", "?")
+        path = s.get("audio_path", "")
+        backup_dir = self._deleted_backup_dir()
+        backed_up = []
+        if path and os.path.exists(path):
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                # Keep the original basename so the deleted audio is found where
+                # users expect it; only a name that is already taken gets a
+                # timestamp, and a double collision gets a counter, so a second
+                # delete in the same second cannot silently overwrite the first.
+                dest = backup_dir / os.path.basename(path)
+                if dest.exists():
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    dest = backup_dir / f"{Path(path).stem}_{stamp}{Path(path).suffix}"
+                    n = 1
+                    while dest.exists():
+                        dest = backup_dir / f"{Path(path).stem}_{stamp}-{n}{Path(path).suffix}"
+                        n += 1
+                shutil.copy2(path, str(dest))
+                backed_up.append(dest)
+            except OSError as e:
+                QMessageBox.warning(self, "Backup Warning", f"Could not back up file: {e}")
+        # The metadata is the half that has no second copy anywhere: once the
+        # sample leaves the list, the next save drops its caption and lyrics.
+        # Audio on disk can be re-found; a hand-written caption cannot.
+        meta_dest = self._backup_sample_json(s, fname)
+        if meta_dest:
+            backed_up.append(meta_dest)
+        if backed_up:
+            where = os.path.dirname(str(backed_up[0]))
+            self.status_label.setText(
+                f"Backed up '{fname}' (audio + metadata) to {where}."
+            )
+        sid = s.get("id", "")
+        samples.pop(idx)
+        self.original_backups.pop(sid, None)
+
+    # Header name -> ("field", parser) for inline manual edits in the table.
+    # Keyed by HEADER NAME, not by column index: an index-keyed map is a second
+    # copy of the column order, and the two copies going out of step is exactly
+    # how the Actions button came to be painted over the Instr checkbox.
+    # There is no Instr row (Language carries the instrumental state, blank ==
+    # no vocals) and no Actions row (editing is inline, deleting is on the
+    # right-click menu) — so no entry here can drift out of use.
+    _MANUAL_FIELDS = (
+        ("Tag", "custom_tag", str),
+        ("Genre", "genre", str),
+        ("Language", "language", str),
+        ("Key", "keyscale", str),
+        ("BPM", "bpm", int),
+        ("Time", "timesignature", str),
+        ("Duration", "duration", int),
+    )
+
+    def _manual_field(self, col):
+        """(header, field, parser) for table column ``col``, or None.
+
+        The Filename column is intentionally absent: renaming a file from a
+        cell would have to move the file on disk.
+        """
+        header = self.table.horizontalHeaderItem(col)
+        name = header.text() if header is not None else ""
+        for entry in self._MANUAL_FIELDS:
+            if entry[0] == name:
+                return entry
+        return None
 
     def _parse_manual_value(self, field, text):
         """Parse raw cell text for a manual metadata field. Returns value or None."""
@@ -4270,12 +5002,40 @@ class DatasetManager(QMainWindow):
         if not (0 <= idx < len(samples)):
             return
         col = item.column()
-        if col not in self._MANUAL_COLS:
+        manual = self._manual_field(col)
+        if manual is None:
             return
-        field = self._MANUAL_COLS[col][0]
+        field = manual[1]
         s = samples[idx]
-        text = (item.text() or "").strip()
 
+        # Language is a list, not free text, and its "instrumental" entry means
+        # "this track has no vocals" — so choosing it clears ``language`` and
+        # sets ``is_instrumental``. Both directions go through the schema
+        # helper so the table and the bulk panel cannot disagree.
+        if field == "language":
+            choice = item.data(LANG_ROLE)
+            if choice is None:
+                choice = item.text()
+            instrumental = apply_language_choice(s, choice)
+            # Re-render this row's cell from the sample: apply_language_choice
+            # is authoritative, and the item text must not keep displaying a
+            # value the sample no longer holds.
+            self.table.blockSignals(True)
+            item.setText(language_display(choice_from_sample(s)))
+            item.setData(LANG_ROLE, choice_from_sample(s))
+            item.setToolTip(language_tooltip(choice_from_sample(s)))
+            self.table.blockSignals(False)
+            if self.get_selected_sample() is s and hasattr(self, "inst_check"):
+                self.inst_check.blockSignals(True)
+                self.inst_check.setChecked(instrumental)
+                self.inst_check.blockSignals(False)
+            self.status_label.setText(
+                f"{s.get('filename', '')} set to "
+                f"{'instrumental (no language)' if instrumental else s.get('language', '')}."
+            )
+            return
+
+        text = (item.text() or "").strip()
         # Keep the display normalized: revert the cell on parse failure.
         parsed = self._parse_manual_value(field, text)
         if parsed is None:
@@ -4284,7 +5044,7 @@ class DatasetManager(QMainWindow):
             self.table.blockSignals(False)
             return
         s[field] = parsed
-        self.status_label.setText(f"Updated {s.get('filename', '')} ({self._MANUAL_COLS[col][0]}).")
+        self.status_label.setText(f"Updated {s.get('filename', '')} ({field}).")
 
     def open_metadata_editor(self, idx):
         """A clear dialog to input Tag / Genre / Key / BPM / Time / Duration manually."""
@@ -4364,7 +5124,10 @@ class DatasetManager(QMainWindow):
                 self.sample_health_alert.setText("No caption yet — add a detailed description below.")
                 self.sample_health_alert.setProperty("health", "warn"); repolish(self.sample_health_alert)
             else:
-                self.sample_health_alert.setText("Track loaded — edit Tag / Genre / Key / BPM / Time / Duration in the table or via the ✏️ button.")
+                self.sample_health_alert.setText(
+                    "Track loaded — edit Tag / Genre / Language / Key / BPM / Time / "
+                    "Duration in the table (right-click a row for more)."
+                )
                 self.sample_health_alert.setProperty("health", "ok"); repolish(self.sample_health_alert)
 
             self.caption_text.blockSignals(True)
@@ -4373,7 +5136,10 @@ class DatasetManager(QMainWindow):
             self.inst_check.blockSignals(True)
 
             self.caption_text.setPlainText(s.get("caption", ""))
-            self.lyrics_text.setPlainText(s.get("formatted_lyrics", s.get("lyrics", "")))
+            # Uses the shared loader so ``_lyrics_selected_filename`` follows the
+            # selection — the debounced auto-save compares against it to avoid
+            # writing one track's lyrics onto another.
+            self._load_lyrics_into_field()
             self.track_tag_input.setText(s.get("custom_tag", ""))
             self.inst_check.setChecked(bool(s.get("is_instrumental", False)))
 
@@ -4607,10 +5373,177 @@ class DatasetManager(QMainWindow):
         self.on_table_selection_changed()
 
     def on_lyrics_edited(self):
+        """Restart the auto-save clock. Does NOT write the dataset.
+
+        Writing on every keystroke would snapshot the undo stack (and back up
+        the song) once per character, which is the bug the old Commit button was
+        added to fix. Instead each change just re-arms the single-shot timer;
+        400 ms after the typing stops, ``_flush_lyrics_edit`` writes once.
+
+        The signals are still suppressed while the field is being refilled by
+        ``_load_lyrics_into_field``, so loading a track never counts as an edit.
+        """
+        if self._lyrics_save_timer.isActive():
+            self._lyrics_save_timer.stop()
+        self._lyrics_save_timer.start()
+        self.lyrics_save_status.setText("Unsaved changes…")
+
+    def _flush_lyrics_edit(self):
+        """Write the field to its track. The debounced half of ``on_lyrics_edited``.
+
+        Four guards, in order, all of them cheap and all of them load-bearing:
+
+        1. **No dataset write while a selection change is in flight.** The table
+           re-selecting a track refills this field; a timer that survived that
+           would write the OLD track's text onto the NEW one.
+        2. **The field must still belong to the selected track.** Recorded at
+           load time in ``_lyrics_selected_filename``. If they disagree, drop the
+           pending write rather than pick a winner — the user's text is still on
+           screen, and re-selecting the original track re-arms and saves it.
+        3. **Nothing to do if the text is unchanged.** Selecting a track and
+           clicking away must not create a snapshot, a backup, or a dirty flag.
+        4. **Snapshot before the write**, so Ctrl+Z restores the old lyrics, and
+           back the song up once, before the first change of the session.
+        """
+        if self._suppress_lyrics_save:
+            return
+        sample = self.get_selected_sample()
+        if not sample:
+            self.lyrics_save_status.setText("No track selected — not saved.")
+            return
+        current = sample.get("filename")
+        if (self._lyrics_selected_filename is not None
+                and current != self._lyrics_selected_filename):
+            # The selection moved on. Refuse, exactly as Commit used to.
+            self.lyrics_save_status.setText(
+                f"Not saved — this is '{self._lyrics_selected_filename}', but "
+                f"'{current}' is selected."
+            )
+            return
+        text = self.lyrics_text.toPlainText()
+        previous = sample.get("formatted_lyrics") or ""
+        if text == previous:
+            self.lyrics_save_status.setText("Saved")
+            return
+        self._backup_song_once(sample)
+        self.record_snapshot()
+        sample["formatted_lyrics"] = text
+        sample["lyrics"] = text
+        # Preserve what was there BEFORE this edit, once. ``raw_lyrics`` is the
+        # pre-tidy text the Lyrics tab tidies from, so filling it with the old
+        # value (not the new one) is what keeps a tidy pass re-runnable and the
+        # original recoverable after an auto-save has already overwritten it.
+        if not sample.get("raw_lyrics") and previous:
+            sample["raw_lyrics"] = previous
+        self._write_lyrics_sidecar_for(sample)
+        self.lyrics_save_status.setText("Saved ✓")
+
+    def _write_lyrics_sidecar_for(self, sample):
+        """Write ``<stem>_lyrics.txt`` beside the track's audio, if it has one."""
+        from ui.tidy_panel import _write_lyrics_sidecar
+
+        return _write_lyrics_sidecar(self, sample)
+
+    def on_lyrics_font_size_changed(self, value):
+        """Apply the lyrics size chosen by the field's own Size control.
+
+        The label on that control is "Size:"; it writes the SAME config key the
+        Settings "Lyrics size" row owns, so there is one setting and no second
+        source of truth. Re-applying the theme is what moves the text — the size
+        reaches the field through the stylesheet, not through setFont.
+        """
+        from ui.appearance_panel import set_appearance
+
+        set_appearance(self, "lyrics_font_size", value)
+
+    def on_lyrics_font_step(self, delta):
+        """Nudge the lyrics size one notch (the A−/A+ buttons on the header).
+
+        They step the SAME ``lyrics_font_size`` key the numeric "Size:" readout
+        and the Settings "Lyrics size" row own — the value is written through
+        ``set_appearance``, which re-applies the theme and re-syncs every copy,
+        so the buttons cannot disagree with the spinner beside them. Two details
+        that would otherwise make the buttons feel broken:
+
+        * The starting point is the size the field is ACTUALLY using, not the raw
+          stored value. While the setting is Auto the stored value is 0, so
+          stepping from it would try to set 1 px; Auto means "inherit the app
+          size", so the first press starts from that inherited size (13 -> 14).
+        * The clamp uses the lyrics ceiling, ``LYRICS_FONT_SIZE_MAX``, so the
+          buttons reach the whole range the spinner offers instead of stopping
+          at the app-wide 32.
+        """
+        from ui.appearance_panel import set_appearance
+        from ui.themes import FONT_SIZE_MIN, LYRICS_FONT_SIZE_MAX, resolve_font_sizes
+
+        base, lyrics = resolve_font_sizes(self.config)
+        current = lyrics or base
+        value = max(FONT_SIZE_MIN, min(LYRICS_FONT_SIZE_MAX, current + delta))
+        set_appearance(self, "lyrics_font_size", value)
+
+    def on_lyrics_expand_toggled(self, checked):
+        """Grow the field to most of the inspector and hide what is below it.
+
+        No second window: the field already lives inside a scroll area, so
+        giving it height and hiding its neighbours is all "expanding" needs.
+        """
+        self.lyrics_text.setMinimumHeight(520 if checked else 170)
+        for w in self._lyrics_lower_widgets:
+            self._set_layout_item_visible(w, not checked)
+
+    @staticmethod
+    def _set_layout_item_visible(item, visible):
+        """Hide/show a widget, a layout, or a plain layout object.
+
+        ``QLayout`` has no ``setVisible``, so a nested layout is hidden by
+        hiding the widgets it owns.
+        """
+        if hasattr(item, "setVisible"):
+            item.setVisible(visible)
+        elif hasattr(item, "count"):
+            for i in range(item.count()):
+                sub = item.itemAt(i)
+                if sub is None:
+                    continue
+                inner = sub.widget() or sub.layout()
+                if inner is not None:
+                    DatasetManager._set_layout_item_visible(inner, visible)
+
+    def _load_lyrics_into_field(self):
+        """Refill the field from the selected track, with signals suppressed.
+
+        The save timer is stopped and a suppression flag set for the duration:
+        without them, the ``setPlainText`` below would arm the debounced write
+        and 400 ms later "save" the text we are loading — harmless-looking, but
+        it would snapshot the undo stack on every mere selection change.
+        """
+        if self._lyrics_save_timer.isActive():
+            self._lyrics_save_timer.stop()
         s = self.get_selected_sample()
+        text = ""
         if s:
-            s["formatted_lyrics"] = self.lyrics_text.toPlainText()
-            s["lyrics"] = s["formatted_lyrics"]
+            text = s.get("formatted_lyrics", s.get("lyrics", "")) or ""
+            self._lyrics_selected_filename = s.get("filename")
+        else:
+            self._lyrics_selected_filename = None
+        self._suppress_lyrics_save = True
+        try:
+            self.lyrics_text.blockSignals(True)
+            self.lyrics_text.setPlainText(text)
+            self.lyrics_text.blockSignals(False)
+        finally:
+            self._suppress_lyrics_save = False
+        self.lyrics_save_status.setText("Saved" if text else "")
+
+    def on_lyrics_revert(self):
+        """Discard the field's text and reload the track's saved lyrics.
+
+        Everything is already committed by the time this runs — the auto-save
+        writes 400 ms after each pause — so this only refreshes the field, it
+        does not undo anything. To undo a save, use Ctrl+Z.
+        """
+        self._load_lyrics_into_field()
+        self.status_label.setText("Lyrics reloaded from the selected track.")
 
     def on_track_tag_edited(self, text):
         s = self.get_selected_sample()
@@ -4618,9 +5551,52 @@ class DatasetManager(QMainWindow):
             s["custom_tag"] = text
 
     def on_inst_edited(self):
+        # The checkbox means "no vocals", which the dataset expresses as BOTH
+        # flags: ``is_instrumental`` and, by convention, an empty ``language``
+        # (see modules/dataset_schema.LANG_INSTRUMENTAL). Clearing the language
+        # here keeps the two editors from disagreeing, and the Language cell is
+        # re-rendered in place so it cannot keep showing the old code.
+        #
+        # Deliberately in place, not via refresh_table(): a rebuild would reset
+        # the current row and re-load the audio preview under the user.
         s = self.get_selected_sample()
-        if s:
-            s["is_instrumental"] = self.inst_check.isChecked()
+        if not s:
+            return
+        if self.inst_check.isChecked():
+            s["is_instrumental"] = True
+            s["language"] = ""
+        else:
+            s["is_instrumental"] = False
+        self._refresh_language_cell(s)
+        self.status_label.setText(
+            f"{s.get('filename', '')} marked "
+            f"{'instrumental (no language)' if s.get('is_instrumental') else 'vocal'}."
+        )
+
+    def _refresh_language_cell(self, sample):
+        """Re-render the Language cell holding ``sample`` from the sample itself."""
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._table_sample_indices):
+            return
+        if self._table_sample_indices[row] >= len(self.dataset.get("samples", [])):
+            return
+        if self.dataset["samples"][self._table_sample_indices[row]] is not sample:
+            return
+        col = column_index(self.table, "Language")
+        # -1 (no such column) must be caught here: QTableWidget.item(row, -1)
+        # addresses the LAST column, so an unguarded -1 would rewrite the wrong
+        # cell — the same class of bug as the index collision this replaced.
+        if col < 0:
+            return
+        item = self.table.item(row, col)
+        if item is None:
+            return
+        choice = choice_from_sample(sample)
+        self.table.blockSignals(True)
+        item.setText(language_display(choice))
+        item.setData(LANG_ROLE, choice)
+        item.setToolTip(language_tooltip(choice))
+        self.table.blockSignals(False)
 
     def on_general_prop_changed(self):
         meta = self.dataset.setdefault("metadata", {})
@@ -4955,14 +5931,36 @@ class DatasetManager(QMainWindow):
             meta["instrumental_mode"] = derive_instrumental_mode(
                 meta["all_instrumental"], self.dataset["samples"]
             )
-            backup = self._backup_file(path)  # never replace an existing file silently
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.dataset, f, indent=2)
+            # Take the pre-save copy through ``_backup_file`` so a same-second
+            # pair cannot collide and lose the older backup. If it cannot be
+            # taken, do NOT write: a save that destroys the only copy of the
+            # previous state is the failure this whole path exists to prevent.
+            if os.path.exists(path) and self._backup_file(path) is None:
+                QMessageBox.critical(
+                    self, "Save Aborted",
+                    "Could not back up the existing dataset file, so nothing was "
+                    "written. Fix the backup location and save again.",
+                )
+                return False
+            # Write to a sibling temp file and rename it over the target. The
+            # rename is atomic, so a crash or a second instance mid-write leaves
+            # either the complete old file or the complete new one, never a
+            # truncated dataset. ``json.dump`` can still raise (a non-serializable
+            # value) — then the temp is removed and the ORIGINAL is left untouched,
+            # instead of the old code having already truncated it to zero bytes.
+            tmp = f"{path}.tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self.dataset, f, indent=2)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
             self.current_dataset_path = path
-            msg = f"Saved dataset to {Path(path).name}"
-            if backup:
-                msg += " (previous file backed up)"
-            self.status_label.setText(msg)
+            self.status_label.setText(f"Saved dataset to {Path(path).name}")
             return True
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
@@ -4992,6 +5990,12 @@ class DatasetManager(QMainWindow):
             save_layout(self)
         except Exception as e:  # noqa: BLE001 -- never block closing over layout
             print(f"could not save panel layout: {e}")
+        # Column widths last, and separately guarded: a failure here must not
+        # lose the panel layout, and vice versa.
+        try:
+            save_column_widths(self)
+        except Exception as e:  # noqa: BLE001 -- never block closing over widths
+            print(f"could not save column widths: {e}")
         event.accept()
 
 
@@ -6299,44 +7303,41 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(f"Successfully processed batch script! Renamed {count} files on disk.")
 
     def open_lyrics_editor(self):
+        """Open the Lyrics Studio for the selected track.
+
+        This used to be a bare text box with a Split button; it later grew into
+        the "Review & Fix" dialog. It is now the Lyrics Studio — ONE window that
+        also absorbed the Lyric Capitalizer, so the double-click UPPERCASE
+        gesture, the live diff against the track, the tidy rules and the
+        file/LRC tools all live in one place instead of two windows you had to
+        close and reopen to move between.
+
+        The name is kept: it is what the Lyrics tab and the toolbar's Edit-tools
+        strip call, and renaming it would only churn call sites.
+        """
         sample = self.get_selected_sample()
         if not sample:
             QMessageBox.warning(self, "No Track Selected", "Select a track first.")
             return
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Lyrics Editor — {sample.get('filename', '')}")
-        dialog.resize(560, 520)
-        lay = QVBoxLayout(dialog)
-        lay.addWidget(QLabel("<b>Lyrics (time-script):</b>"))
-        edit = QTextEdit()
-        edit.setPlainText(sample.get("formatted_lyrics") or sample.get("lyrics") or "")
-        lay.addWidget(edit, 1)
-        row = QHBoxLayout()
-        split_btn = QPushButton("Split Long Lines (≤10 syll)")
-        split_btn.clicked.connect(lambda: edit.setPlainText(
-            split_long_lines(edit.toPlainText())))
-        export_btn = QPushButton("Export .lrc…")
-        export_btn.clicked.connect(lambda: self._export_lyrics(sample, edit.toPlainText()))
-        save_btn = QPushButton("Save to Track")
-        save_btn.clicked.connect(lambda: self._save_lyrics_editor(sample, edit.toPlainText(), dialog))
-        cancel_btn = QPushButton("Close")
-        cancel_btn.clicked.connect(dialog.reject)
-        row.addWidget(split_btn)
-        row.addWidget(export_btn)
-        row.addStretch()
-        row.addWidget(save_btn)
-        row.addWidget(cancel_btn)
-        lay.addLayout(row)
-        dialog.exec()
+        from ui.lyrics_studio import open_lyrics_studio
 
-    def _save_lyrics_editor(self, sample, text, dialog):
-        self.record_snapshot()
-        sample["lyrics"] = text.strip()
-        sample["formatted_lyrics"] = text.strip()
-        dialog.accept()
-        self.refresh_table()
+        open_lyrics_studio(self)
+        # The window may have written lyrics; keep the editor's field in step.
         self.on_table_selection_changed()
-        self.status_label.setText("Lyrics updated.")
+        self.refresh_table()
+
+    def open_lyric_capitalizer(self):
+        """Open the Lyrics Studio for the selected track.
+
+        A separate entry point because the Lyrics tab's 🔠 button and the
+        Edit-tools strip both call it by this name; it opens the same window as
+        ``open_lyrics_editor``. A track is not required: the window is also a
+        scratchpad for pasting lyrics before there is anything to attach them to,
+        and the write-back buttons disable themselves in that case.
+        """
+        from ui.lyrics_studio import open_lyrics_studio
+
+        open_lyrics_studio(self)
 
     def _export_lyrics(self, sample, text):
         from modules.lyrics_tools import export_lrc

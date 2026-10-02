@@ -33,12 +33,12 @@ PROVIDERS = {
     },
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-3.8-flash",
         "key": "gemini_api_key",
         "free": True,
         "label": "Gemini (free tier)",
         "signup_url": "https://aistudio.google.com/apikey",
-        "note": "Free key from aistudio.google.com/apikey. Flash-Lite has the larger free quota. Free-tier content is used by Google to improve its products.",
+        "note": "Free key from aistudio.google.com/apikey. Default is gemini-3.8-flash; 3.8-pro is available in the Model picker. Free-tier content is used by Google to improve its products.",
     },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
@@ -48,6 +48,15 @@ PROVIDERS = {
         "label": "OpenRouter (free models)",
         "signup_url": "https://openrouter.ai/keys",
         "note": "Free ':free' models: 50 requests/day (1,000 after a one-time $10 credit). Key from openrouter.ai/keys.",
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "key": "openai_key",
+        "free": False,
+        "label": "OpenAI (paid)",
+        "signup_url": "https://platform.openai.com/api-keys",
+        "note": "Official OpenAI API. Needs a paid key from platform.openai.com/api-keys. Supports tool calling, so the Assistant can act on the dataset.",
     },
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
@@ -73,9 +82,13 @@ DEFAULT_PROVIDER = "groq"
 
 # Model names offered in the pickers. Only models verified as served on
 # 2026-09-25; an empty entry means "the provider's default".
+# ``openai`` and ``local`` are intentionally broad: both sit behind an
+# OpenAI-compatible endpoint whose catalogue the user controls, and the model
+# combo is editable, so a name absent here can still be typed in.
 KNOWN_MODELS = {
     "groq": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile"],
-    "gemini": ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash"],
+    "gemini": ["gemini-3.8-flash", "gemini-3.8-pro", "gemini-3.5-flash-lite", "gemini-2.5-flash"],
+    "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
     "openrouter": ["nvidia/nemotron-3-super-120b-a12b:free", "qwen/qwen3.8-27b:free", "google/gemma-4-31b-it:free"],
     "deepseek": ["deepseek-chat"],
     "local": [],

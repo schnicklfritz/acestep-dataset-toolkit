@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from modules.dataset_schema import LANGS, TAG_POSITIONS, TIME_SIGNATURES
+from modules.dataset_schema import LANG_INSTRUMENTAL, TAG_POSITIONS, TIME_SIGNATURES
+from ui.track_table import LANGUAGE_CHOICES
 
 # Sentinel meaning "leave this field alone" for the combo-based fields.
 LEAVE = "— leave unchanged —"
@@ -106,7 +107,9 @@ def build_bulk_edit_panel(manager, parent):
     # ---- Combo fields ------------------------------------------------
     row = QHBoxLayout()
     manager.bulk_include["language"] = QCheckBox()
-    manager.bulk_language_combo = _combo([LEAVE] + list(LANGS), editable=True)
+    manager.bulk_language_combo = _combo(
+        [LEAVE] + [c for c in LANGUAGE_CHOICES if c], editable=True
+    )
     manager.bulk_language_combo.setToolTip(
         "Language for every track (ISO code). A controlled list avoids typos "
         "like 'englsh'; you can still type a code that is not listed."
@@ -229,7 +232,16 @@ def read_bulk_edits(manager):
         # Boolean data-source switch (ACE-Step `prompt_override`).
         out["prompt_override"] = manager.bulk_prompt_override_check.isChecked()
     if inc["language"].isChecked():
-        out["language"] = manager.bulk_language_combo.currentText().strip()
+        # A Language choice drives BOTH fields, so "instrumental" clears the
+        # code and raises the flag (see apply_language_choice). Writing both
+        # here keeps the generic per-field write loop below unchanged.
+        lang = manager.bulk_language_combo.currentText().strip()
+        if lang == LANG_INSTRUMENTAL:
+            out["language"] = ""
+            out["is_instrumental"] = True
+        else:
+            out["language"] = lang
+            out["is_instrumental"] = False
     if inc["timesignature"].isChecked():
         out["timesignature"] = manager.bulk_time_combo.currentText().strip()
     if inc["duration"].isChecked():

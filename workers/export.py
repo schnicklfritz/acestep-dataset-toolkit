@@ -23,6 +23,18 @@ class ExportWorker(QThread):
             Path(dest).mkdir(parents=True, exist_ok=True)
             done = []
 
+            # THE contract point for "virtual never leaves as data".
+            #
+            # A virtual track is a concept-only placeholder (``virtual: True``,
+            # no ``audio_path``). It is legitimate inside the app — the gap audit
+            # and the captioner both use it — but it is NOT training data, and
+            # every consumer below is fed from this single list. Filtering here
+            # covers all five formats at once; filtering inside ``export_json``
+            # alone would still leak through CSV, JSONL, sidecars and the
+            # train/val folders. The rule itself lives in
+            # ``modules.exporters.for_export`` so it can be tested on its own.
+            samples = exporters.for_export(samples)
+
             if self.options.get("json"):
                 exporters.export_json(samples, Path(dest) / "dataset.json")
                 done.append("JSON")

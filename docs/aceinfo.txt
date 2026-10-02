@@ -1,0 +1,339 @@
+ACE-Step 1.5 XL — Dataset Creation Guide for LoKR (SFT)
+
+    Scope: This guide covers dataset annotation and preprocessing only, for training LoKR adapters on ACE-Step 1.5 XL using the SFT model variant. LoKR hyperparameter configuration and adapter training are covered separately in the LoKR Creation Guide.
+
+    Model variant note: Where advice differs between SFT, Base, and Turbo, it is called out explicitly. Because you are using SFT, the guide defaults to SFT unless otherwise noted.
+
+1. Why SFT Is the Correct Choice for LoKR Dataset Training
+
+SFT differs from Turbo and Base in ways that directly affect dataset annotation:
+Property	SFT	Turbo	Base
+CFG support	✅ Yes — tunable prompt adherence	❌ No	✅ Yes
+Inference steps	50 (standard)	8 (fixed)	32–100 (suggested)
+Alignment logic	Preserved	Cut (distillation removes LM alignment)	Preserved
+Best for	High-fidelity fine-tuning, LoKR	Fast generation	Special tasks (lego/complete/extract)
+
+The Turbo model's distillation process removes the language model alignment logic, which is why Turbo-trained outputs suffer from "吞字" (word swallowing / character dropping). SFT preserves this alignment logic, making it the correct base for LoKR adapters that need to learn precise vocal delivery and lyric-to-audio correspondence.
+
+Practical implication: Do not use Turbo-specific caption tags or lyric formatting when preparing SFT datasets. Turbo-oriented tags may actively harm SFT training because they were designed for a model that lacks alignment logic.
+2. Dataset File Structure
+
+Each training sample requires three files sharing the same basename, placed in the same directory:
+text
+
+dataset/
+├── song1.mp3              # Audio (.mp3, .wav, .flac, .ogg, .opus)
+├── song1.lyrics.txt       # Lyrics (or .txt fallback)
+├── song1.caption.txt      # Caption
+├── song1.json             # Optional: bpm, keyscale, timesignature, language
+├── song2.mp3
+├── song2.lyrics.txt
+├── song2.caption.txt
+└── ...
+
+File lookup priority during scanning:
+
+    {filename}.lyrics.txt (recommended)
+
+    {filename}.txt (backward compatibility)
+
+    {filename}.caption.txt for captions
+
+The auto-load convention mirrors common image-caption training practices and was merged in PR #438.
+JSON Metadata Format
+json
+
+{
+  "caption": "A high-energy J-pop track with synthesizer leads and fast tempo",
+  "bpm": 190,
+  "keyscale": "D major",
+  "timesignature": "4",
+  "language": "ja"
+}
+
+All fields are optional. If JSON is absent, the system falls back to .caption.txt and .lyrics.txt.
+
+SFT note: Unlike Turbo, SFT benefits from accurate bpm, keyscale, and timesignature metadata because CFG guidance uses these as conditioning signals. Do not skip metadata fields for SFT datasets.
+3. Caption Creation for LoKR/SFT Training
+3.1 The Core Confusion: Generation Captions vs Training Captions
+
+The examples shown in ACE-Step 1.5 XL generation interfaces are prompting captions — short, creative, natural-language descriptions designed to elicit a generation from the model. LoKR training captions are fundamentally different. They are descriptive annotations that teach the adapter what the audio actually contains.
+	Generation Caption	LoKR Training Caption
+Purpose	Prompt the model to create	Describe what exists in the audio
+Length	Short, evocative	Detailed, structured, consistent
+Content	Desired outcome	Observed reality
+Consistency	Can vary freely	Must be consistent across the dataset
+Creative language	Encouraged	Discouraged — use concrete descriptors
+
+Critical rule: Never use a single generic "Default Caption" for every item in the dataset. A dataset-wide fallback caption teaches the model a vague average style and produces a LoKR that cannot distinguish between samples.
+3.2 Recommended Training Caption Formula (SFT)
+text
+
+[Genre], [Subgenre/Mood], [2-4 Specific Instruments], [Vocal Style], [Production & Mix], [Era/Aesthetic]. [2-3 sentences describing the actual arrangement and energy flow observed in this specific recording].
+
+Example (training caption for a specific recording):
+
+    classic honky-tonk country, lonesome mood, non-pedal steel guitar, double-stop fiddle, acoustic guitar, upright bass, sincere male hillbilly vocal, monaural 1950s production. The track opens with a sparse acoustic guitar intro, then the steel guitar enters with a piercing high-pitched counter-line. The verse stays voice-steel-and-fiddle focused, with short steel and fiddle fills trading between vocal phrases. The arrangement remains compact and radio-friendly throughout.
+
+This differs from a generation prompt because every element is observed in the source audio, not requested.
+3.3 Caption Dimensions (Chinese SOP)
+
+The NewVFX Chinese SOP defines the required caption dimensions:
+
+    构成维度： 风格 + 情绪 + 乐器 + 音色质感 + 时代参考 + 制作风格 + 人声特点 + 结构提示
+
+Translation: Style + Mood + Instruments + Timbre + Era Reference + Production Style + Vocal Character + Structural Hints.
+
+SFT-specific note: Structural hints in the caption (e.g., "opens with a sparse intro") are useful for SFT because the SFT model was trained to parse semantic structure. Turbo does not benefit from this as much because its alignment logic is removed.
+3.4 What the Model Actually Understands
+
+The SFT model uses a specific prompt template during training and inference:
+text
+
+# Instruction
+{}
+# Caption
+{}
+# Metas
+{}<|endoftext|>
+
+This means the model was trained to associate the Caption section with the audio content and the Metas section with numeric metadata. Captions that contain metadata (BPM, key, time signature) confuse the model because it learns that captions are for descriptive content and metas are for numbers.
+
+Vocabulary that SFT responds to well:
+
+    Genre terms: Specific genre and subgenre names (e.g., outlaw country, psychedelic rock, doom metal).
+
+    Instrument names: Concrete instruments (Vox Continental organ, pedal steel guitar, 808 sub bass).
+
+    Vocal descriptors: Gender + texture + delivery (raspy male baritone vocal, high nasal strained timbre, sneering delivery).
+
+    Production terms: monaural, reverb-heavy, raw 1970s analog production, polished Nashville production.
+
+    Mood terms: lonesome, ominous, swaggering, rebellious.
+
+Vocabulary that SFT does NOT respond well to:
+
+    Turbo-specific tags (turbo, shift, distillation references).
+
+    BPM/key/time signature inside the caption.
+
+    Vague adjectives without concrete backing (good, nice, cool).
+
+    Creative/literary language not grounded in musical terminology.
+
+3.5 Caption Length and Truncation
+
+The SFT model has a maximum caption length. Community field reports indicate that caption length was strictly controlled during training to avoid truncation, and that the lyrics truncation length was modified to be consistent with the 2048-token limit used during inference.
+
+Practical recommendation:
+
+    Keep the tag list to 5–12 keywords (maximum 15).
+
+    Keep the flow narrative to 2–3 sentences (maximum 4).
+
+    Total caption should not exceed roughly 512 tokens.
+
+4. Lyrics Tagging and Structure
+4.1 Structural Markers
+
+Every song section must begin with an explicit structural marker in square brackets. The following markers are supported by the ACE-Step transcriber (the official annotation model used for training data labeling):
+
+Core structure: [Intro], [Verse], [Verse 1], [Verse 2], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Outro], [Hook], [Refrain]
+
+Dynamic/EDM: [Build], [Drop], [Breakdown]
+
+Instrumental: [Instrumental], [Guitar Solo], [Piano Interlude], [Organ Solo], [Drum Break], [Bass Solo], [Solo]
+
+Special: [Fade Out], [Silence], [Spoken]
+
+These markers are explicitly listed in the acestep-transcriber documentation as supported section tags.
+
+SFT note: SFT benefits from structural tags more than Turbo. Including structural tags helps the model learn song structure more effectively, but training without them is possible. For LoKR training on SFT, always include structural tags.
+4.2 Architectural Descriptors
+
+Descriptors attach to section markers with a dash:
+text
+
+[Marker - descriptor 1, descriptor 2, descriptor 3]
+
+Hard rule: max 3 descriptors per bracket. More risks the model singing tag names as lyrics.
+
+Descriptors that SFT understands (from official and community vocabularies):
+
+    Vocal: whispered, belted, falsetto, spoken word, layered, harmonized, call-and-response, raspy vocal, powerful belting, breathy, screamed vocals, shouted vocals, growl, vibrato, yodel, nasal, strained, wailing, crooning, sneering
+
+    Energy: quiet, sparse, building, rising, peak, intense, stripped back, full, low energy, high energy, explosive, driving, relentless
+
+    Instrument focus: synth lead, guitar solo, organ solo, drum fill, bass groove, strings swell, brass stabs, 808 bass, acoustic rhythm
+
+    Dynamics: fade in, fade out, abrupt cut, swell, drop out, reverb-heavy, dry, filtered, tape stop
+
+Turbo-specific warning: Turbo does not parse descriptors with the same fidelity as SFT because its alignment logic is reduced. If you are preparing a dataset for SFT, you can use descriptors confidently. If you were preparing for Turbo, you would need to simplify drastically.
+4.3 Lyric Text Formatting Rules
+Rule	Detail
+Capitalization	Section marker names always capitalized: [Verse], [Chorus], [Outro]
+Section spacing	Always separate distinct sections with a blank line (\n\n)
+Syllable cadence	6–10 syllables per line; deviation within a section should not exceed 2 syllables per line
+Vocal intensity	UPPERCASE for belting, screaming, shouted delivery
+Harmonies	(parentheses) for backing vocals, echoes, call-and-response
+Instrumental songs	Set lyrics to [Instrumental] only
+Language tags	Non-English: [EN - Chorus - anthemic], [JA - Verse - whispered, sparse]
+
+Critical for SFT: The SFT model was trained with accurate lyric-to-audio alignment. Inaccurate lyrics (wrong words, missing sections, wrong syllable counts) directly degrade LoKR quality. Use acestep-transcriber or manual correction — auto-generated lyrics from general-purpose models (Whisper, etc.) frequently contain errors and require correction.
+4.4 Instrumental Sections
+
+For instrumental sections, place the tag on its own line with no lyrics below:
+text
+
+[Instrumental - Vox Continental organ solo]
+
+[Guitar Solo - blues-based, wah-wah]
+
+[Drum Break - thunderous, tom-heavy]
+
+SFT note: SFT handles instrumental sections well because it retains the alignment logic that tells it when no vocals are present. Turbo often hallucinates vocals in instrumental sections.
+5. Preprocessing and Tensor Generation
+
+Dataset building decouples preprocessing from training. This is the single most impactful step for reducing VRAM during the training loop.
+5.1 Two-Pass Preprocessing
+Pass	VRAM	Components Loaded	Output
+Pass 1 (Light)	~3 GB	VAE + Text Encoder	.tmp.pt intermediate files
+Pass 2 (Heavy)	~6 GB	DiT Encoder	Final .pt training tensors
+
+The sequential pass system minimizes peak VRAM by loading only the necessary model components per pass.
+5.2 Tensor Components
+
+Each preprocessed .pt file contains:
+Tensor	Shape	Description
+target_latents	[T, 64]	VAE-encoded audio latents (ground truth)
+attention_mask	[T]	Audio latent mask (1=valid, 0=padding)
+encoder_hidden_states	[L, D]	Text encoder output (caption + lyrics embeddings)
+encoder_attention_mask	[L]	Text token mask
+context_latents	[T, 65]	Source context/conditioning latents
+5.3 Preprocessing Commands
+bash
+
+# With dataset JSON (recommended)
+uv run python train.py fixed \
+  --checkpoint-dir ../ACE-Step-1.5/checkpoints \
+  --model-variant sft \
+  --preprocess \
+  --dataset-json ./my_dataset.json \
+  --audio-dir ./my_audio \
+  --tensor-output ./my_tensors
+
+# Without metadata (all tracks treated as instrumentals)
+uv run python train.py fixed \
+  --checkpoint-dir ../ACE-Step-1.5/checkpoints \
+  --model-variant sft \
+  --preprocess \
+  --audio-dir ./my_audio \
+  --tensor-output ./my_tensors
+
+Critical: Use --model-variant sft, not base or turbo. The preprocessing must use the same model variant that will be used for training, because the text encoder and DiT encoder are variant-specific.
+6. Common Pitfalls and Conflicting Advice Resolved
+6.1 "Should I use generation-style captions or descriptive captions?"
+
+Answer: Descriptive captions. Generation-style captions (the short, evocative prompts shown in the Gradio UI) are designed to elicit generation. Training captions must describe what the audio actually contains. The confusion arises because the ACE-Step 1.5 XL UI shows generation examples, not training examples.
+6.2 "Can I use auto-labeling?"
+
+Answer: Yes, but with caution. The acestep-5Hz-lm auto-labeling can generate captions and metadata, but community reports indicate it produces random metadata that does not match the audio (e.g., labeling male vocals as female). Use auto-labeling as a starting point, then manually correct. For SFT, accurate labels are essential.
+6.3 "How many songs do I need?"
+
+Answer: For a style LoKR: 12–30 songs with consistent genre/style. For a vocal LoKR: 8–20 songs minimum, but more is better. A Reddit field report noted that 12 songs with 1000 epochs produced poor results — more data with a lower learning rate is better than fewer songs with more epochs.
+6.4 "Should I use structural tags in lyrics?"
+
+Answer: Yes, for SFT. Structural tags ([Verse], [Chorus]) help the model learn song structure more effectively. Training without them is technically possible but suboptimal for SFT.
+6.5 "What about the 2048-token lyrics limit?"
+
+Answer: The SFT model has a 2048-token limit for lyrics during inference. Modify your training data's lyric truncation length to be consistent with this 2048 limit. If your lyrics exceed 2048 tokens, they will be truncated during training and inference in ways that may not align.
+6.6 "SFT vs Base — which dataset format?"
+
+Answer: Use SFT. Base is for special tasks (lego, complete, extract) and broad creative work. SFT is for high-fidelity fine-tuning and has CFG support for tunable prompt adherence. The dataset format is the same for both, but the preprocessing must use --model-variant sft for SFT training.
+7. Quick Reference
+7.1 Caption Checklist (SFT LoKR)
+
+    □
+
+    Genre + subgenre specified
+    □
+
+    2–4 concrete instruments named
+    □
+
+    Vocal presence and character declared
+    □
+
+    Production/mix aesthetic described
+    □
+
+    Era/aesthetic reference included
+    □
+
+    2–3 sentences of arrangement flow
+    □
+
+    No BPM, key, or time signature in caption
+    □
+
+    No Turbo-specific tags
+    □
+
+    5–12 front-loaded keywords (max 15)
+
+7.2 Lyrics Checklist (SFT LoKR)
+
+    □
+
+    Every section has a capitalized structural marker
+    □
+
+    Max 3 descriptors per bracket
+    □
+
+    6–10 syllables per line
+    □
+
+    Blank lines between sections
+    □
+
+    UPPERCASE for intensity
+    □
+
+    Parentheses for backing vocals
+    □
+
+    Instrumental sections have no lyrics below
+    □
+
+    Lyrics are accurate (manually verified)
+    □
+
+    Total lyrics within 2048 tokens
+
+7.3 Model Variant Selection for Preprocessing
+Variant	Command Flag	When to Use
+SFT	--model-variant sft	Your use case — LoKR training
+Base	--model-variant base	Special tasks (lego/complete/extract)
+Turbo	--model-variant turbo	Fast generation only — not for LoKR
+8. Sources
+
+    Official LoRA Training Tutorial — ACE-Step 1.5 repository, docs/en/LoRA_Training_Tutorial.md and docs/zh/LoRA_Training_Tutorial.md.
+
+    PR #438 — Auto-load .caption.txt and .lyrics.txt files for LoRA datasets.
+
+    DeepWiki — Dataset Building, Preprocessing & Data Loading, Large-Scale SFT Training.
+
+    NewVFX Chinese SOP — ACE-Step 1.5 精密操作规范 (SOP).
+
+    acestep-transcriber — Hugging Face model card, supported section tags.
+
+    Korean Tutorial — SFT vs Turbo vs Base model comparison.
+
+    Reddit field reports — r/StableDiffusion LoKR training experiments.
+
+    RunComfy Training Guide — Caption and lyric best practices, common failure modes.
+
+    Civitai SFT LoRA — Practical caption length and truncation notes.
+
+

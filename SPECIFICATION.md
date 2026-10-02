@@ -36,11 +36,30 @@ quality threshold; it validates manifest structure instead.
    * View Toggle: `[ All Tracks (N) ]` | `[ Exceptions Queue (N) ]`.
    * Quick Actions: `[ 🎚 DSP Normalize ]` | `[ 🚀 Run AI Captioner ]`.
 4. **Central Workspace (Split View)**:
-   * **Left (60%)**: Responsive Dataset Matrix with per-track status badges, locked/unlocked state, and quick-playback compare buttons.
+   * **Left (60%)**: Responsive Dataset Matrix — Filename, Tag, Genre, Language,
+     Key, BPM, Time, Duration. Every column is drag-resizable and the widths are
+     remembered by column name; `Time` and `Duration` start hidden and a
+     right-click on the header shows or hides any column. There is no per-row
+     Actions button: editing is a double-click, and deleting is a right-click on
+     the row — or the `🗑 Delete Track` button above the table / the Delete key,
+     which act on the selected row(s). A track with no vocals is marked by
+     choosing `instrumental` in the Language column (shown as 🎸), which is the
+     same state as the inspector's Instrumental checkbox.
+   * **Lyric capitalization gesture** (the shared `LyricTextEdit`, used by the
+     Track Inspector's lyrics field and the Lyrics Studio window):
+     double-click uppercases the word under the pointer. This is the ONLY
+     gesture — Tab moves focus (Qt's key) and Ctrl+U is left to Qt. A word
+     is matched by the letters, not by Qt's idea of a word boundary, so a word
+     ending in a special character (`dog.`, `dog,`, `dog-`, `dog"`, `dog?`,
+     `dog!`) capitalizes from a click on any of its letters, and a contraction
+     (`don't`, `o'clock`) is treated as ONE word.
    * **Right (40%)**: Scrollable Track Inspector with individual lock checkboxes for every field, lyrics editor, and diagnostic report.
 5. **Appearance & Customization Tab (Gentoo Philosophy)**:
    * **Theme & Colors**: Fully customizable background, surface, text, border, and accent colors.
    * **Typography**: System font selector matching installed OS fonts with real-time preview.
+   * **Text Size**: Global base text size in px (Auto = the built-in 13 px), plus a
+     separate size for the lyrics fields so they can be read from a distance
+     without enlarging every other panel.
    * **UI Zoom**: Dynamic scale factor slider (75% to 200%) to accommodate 720p monitors through 4K displays.
 
 ---

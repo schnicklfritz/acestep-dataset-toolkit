@@ -216,9 +216,16 @@ def build_lyrics_tab(manager, parent):
     manager.lyrics_apply_btn.setToolTip("Rewrite lyrics on the tracks in scope (undoable).")
     manager.lyrics_manual_edit_btn = QPushButton("📝 Edit Raw Lyrics…")
     manager.lyrics_manual_edit_btn.setToolTip("Open the selected track's lyrics for manual editing.")
+    manager.lyrics_capitalizer_btn = QPushButton("🔠 Lyric Capitalizer…")
+    manager.lyrics_capitalizer_btn.setToolTip(
+        "Open the Lyrics Studio — double-click a word to mark it shouted "
+        "(UPPERCASE), double-click it again to undo, then write it straight "
+        "into the track's caption / lyrics field."
+    )
     preview_row.addWidget(manager.lyrics_preview_btn)
     preview_row.addWidget(manager.lyrics_apply_btn)
     preview_row.addWidget(manager.lyrics_manual_edit_btn)
+    preview_row.addWidget(manager.lyrics_capitalizer_btn)
     preview_row.addStretch()
     p_layout.addLayout(preview_row)
     layout.addWidget(preview)

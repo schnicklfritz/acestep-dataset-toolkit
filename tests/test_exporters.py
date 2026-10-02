@@ -37,6 +37,69 @@ class TestExportJson:
             assert key not in written["samples"][0]
 
 
+class TestVirtualTracksNeverExport:
+    """A concept-only placeholder must not leave the app as data.
+
+    Regression: ``virtual`` samples were filtered nowhere. ``to_export_sample``
+    strips the flag but still emits a row, so ``dataset.json``/``.csv``/``.jsonl``
+    all contained a sample pointing at a ``virtual_01_*.wav`` with no audio. The
+    suite passed because the only assertion checked flag-stripping.
+    """
+
+    def _dataset(self):
+        from modules.dataset_schema import new_dataset, new_sample
+
+        ds = new_dataset(name="virtual_leak")
+        ds["samples"] = [
+            new_sample(filename="real.wav", audio_path="./real.wav",
+                       genre="Rock", caption="real"),
+            new_sample(filename="virtual_01_doom.wav", audio_path="",
+                       genre="Doom", virtual=True),
+        ]
+        return ds
+
+    def test_for_export_drops_virtual_placeholders(self):
+        from modules.exporters import for_export
+
+        kept = for_export(self._dataset()["samples"])
+        assert [s["filename"] for s in kept] == ["real.wav"]
+
+    def test_worker_writes_no_virtual_row_in_any_format(self, qapp, tmp_path):
+        from modules.exporters import for_export
+        from workers.export import ExportWorker
+
+        ds = self._dataset()
+        # The worker is the boundary that shipped the leak, so drive it directly.
+        worker = ExportWorker(ds, {
+            "dest_dir": str(tmp_path), "json": True, "csv": True,
+            "jsonl": True, "folders": False,
+        })
+        errors = []
+        worker.failed.connect(errors.append)
+        worker.run()
+        assert errors == []
+
+        manifest = json.loads((tmp_path / "dataset.json").read_text(encoding="utf-8"))
+        # ``to_export_sample`` maps ``file_name`` from audio_path (preferred) or
+        # filename, so the real track appears under its path. What matters here
+        # is that the placeholder is ABSENT, not which name the real one got.
+        names = [s["file_name"] for s in manifest["samples"]]
+        assert names == ["./real.wav"]
+        assert "virtual_01_doom.wav" not in names
+
+        csv_text = (tmp_path / "dataset.csv").read_text(encoding="utf-8")
+        assert "virtual" not in csv_text
+
+        jsonl = [json.loads(l) for l in
+                 (tmp_path / "dataset.jsonl").read_text(encoding="utf-8").splitlines()
+                 if l.strip()]
+        assert [s.get("audio_path") or s["filename"] for s in jsonl] == ["./real.wav"]
+
+        # Sanity: the filter is what did it, not an empty dataset.
+        assert len(ds["samples"]) == 2
+        assert len(for_export(ds["samples"])) == 1
+
+
 class TestOtherExporters:
     def test_jsonl_writes_one_object_per_line(self, dataset, tmp_path):
         path = tmp_path / "out.jsonl"

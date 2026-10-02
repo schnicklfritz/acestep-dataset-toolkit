@@ -13,6 +13,7 @@ widget-building code lives, not the object model it builds.
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QScrollArea, QFrame, QWidget,
     QGroupBox, QLabel, QLineEdit, QCheckBox,
+    QPlainTextEdit,
     QPushButton,
 )
 # Scroll-wheel-guarded value widgets (see modules/wheel_guard.py): the wheel
@@ -121,6 +122,7 @@ def build_settings_tab(manager, parent):
     manager.llm_provider_combo.addItems([
         "groq (free tier — default)",
         "gemini (free tier)",
+        "openai (paid)",
         "openrouter (free models)",
         "deepseek (paid)",
         "local (custom endpoint)",
@@ -165,6 +167,20 @@ def build_settings_tab(manager, parent):
     manager.remember_groq.setChecked(bool(manager.config.get("remember_groq_key", True)))
     llm_form.addRow("", manager.remember_groq)
 
+    # OpenAI is the paid route (GPT-4o / o-series). Kept as its own explicit
+    # field next to the free providers so the key is never a mystery.
+    manager.openai_key = QLineEdit(manager.config.get("openai_key", ""))
+    manager.openai_key.setEchoMode(QLineEdit.Password)
+    manager.openai_key.setPlaceholderText("sk-…")
+    manager.openai_key.setToolTip(
+        "Official OpenAI API key (platform.openai.com/api-keys). Select the "
+        "'openai (paid)' provider above to route the assistant / captioner here."
+    )
+    llm_form.addRow("OpenAI Key:", manager.openai_key)
+    manager.remember_openai = QCheckBox("Remember on this device (encrypted)")
+    manager.remember_openai.setChecked(bool(manager.config.get("remember_openai_key", True)))
+    llm_form.addRow("", manager.remember_openai)
+
     # ---- Per-role overrides (aggregator / captioner / assistant) ----
     roles_box = QGroupBox("Per-role overrides (empty = use the global provider/model)")
     rform = QFormLayout(roles_box)
@@ -203,6 +219,59 @@ def build_settings_tab(manager, parent):
     manager._on_llm_provider_changed()
 
     layout.addWidget(llm_grp)
+
+    # ---- MCP servers: tools the assistant reaches outside this app ----
+    # Shown as raw JSON rather than a table: it is a config list, it stays
+    # hand-editable, and the shape is one small object per server.
+    import json as _json
+
+    mcp_grp = QGroupBox("🔌 MCP servers (extra tools for the assistant)")
+    mcp_form = QFormLayout(mcp_grp)
+    mcp_form.setContentsMargins(8, 18, 8, 8)
+
+    manager.mcp_servers_edit = QPlainTextEdit()
+    stored = manager.config.get("mcp_servers") or []
+    try:
+        manager.mcp_servers_edit.setPlainText(_json.dumps(stored, indent=2))
+    except (ValueError, TypeError):
+        manager.mcp_servers_edit.setPlainText("[]")
+    manager.mcp_servers_edit.setPlaceholderText(
+        '[\n  {"name": "dataset", "command": "python",\n'
+        '   "args": ["mcp_server.py", "--dataset", "dataset.json"]}\n]'
+    )
+    manager.mcp_servers_edit.setToolTip(
+        "JSON array of stdio MCP servers. Each server's tools appear to the "
+        'assistant as "<name>__<tool>" alongside the built-in ones. '
+        'Install the client with: pip install "mcp[cli]"'
+    )
+    manager.mcp_servers_edit.setMaximumHeight(150)
+    mcp_form.addRow("Servers:", manager.mcp_servers_edit)
+
+    mcp_note = QLabel(
+        'Each server is a command plus args, run locally. Without the optional '
+        'package the app still runs — it just offers no MCP tools. '
+        'The app ships two: <code>mcp_server.py</code> (dataset) and '
+        '<code>mcp_research_server.py</code> (research).'
+    )
+    mcp_note.setWordWrap(True)
+    mcp_note.setProperty("muted", True)
+    mcp_note.setProperty("small", True)
+    mcp_form.addRow(mcp_note)
+
+    manager.mcp_status = QLabel("Not loaded yet — save to discover tools.")
+    manager.mcp_status.setWordWrap(True)
+    manager.mcp_status.setProperty("muted", True)
+    mcp_form.addRow(manager.mcp_status)
+
+    reload_btn = QPushButton("Save && Reload MCP Tools")
+    reload_btn.setToolTip(
+        "Validate the JSON, store it, then start each server once to list its "
+        "tools. Reported in the Assistant transcript if any server fails."
+    )
+    reload_btn.clicked.connect(manager.reload_mcp_tools)
+    mcp_form.addRow(reload_btn)
+
+    layout.addWidget(mcp_grp)
 
     pipe_grp = QGroupBox("🎛 Pipeline && Model Defaults")
     p_form = QFormLayout(pipe_grp)

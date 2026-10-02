@@ -14,9 +14,45 @@ dynamic property instead:
 After changing a property at runtime call ``repolish(widget)``.
 
 Config keys (see config.DEFAULT_CONFIG): ``theme_name``, ``theme_overrides``
-(``{theme_name: {role: "#rrggbb"}}``), ``ui_font_family``, ``ui_zoom``.
+(``{theme_name: {role: "#rrggbb"}}``), ``ui_font_family``, ``ui_font_size``,
+``lyrics_font_size``, ``ui_zoom``.
+
+Text size has two layers, and they are deliberately not the same knob:
+``ui_font_size`` is the base size every widget inherits, while
+``lyrics_font_size`` overrides it for the lyrics surfaces only (the inline
+field and the Lyrics Studio window). ``ui_zoom`` is a third thing again — it
+magnifies the whole look, padding and corner radius included.
+
+``0`` means "Auto": for ``ui_font_size`` that is ``DEFAULT_FONT_SIZE``, and for
+``lyrics_font_size`` it means "same as the rest of the app".
 """
 import re
+
+# The base text size in px when ``ui_font_size`` is Auto, and the range both
+# size controls offer. Before this existed the base was the literal 13 buried
+# in build_stylesheet().
+DEFAULT_FONT_SIZE = 13
+FONT_SIZE_MIN, FONT_SIZE_MAX = 9, 32
+
+# Lyrics get their own ceiling above the app-wide one. Lyrics are read from a
+# distance, in a field the user can expand, and 32px is not enough for that:
+# measured, the collapsed field (a fixed-height box) showed only 4 lines at the
+# old cap. The raise is a SEPARATE constant, not a bigger FONT_SIZE_MAX, so the
+# rest of the app keeps its tested 9-32 range. It matters that the ceiling is
+# real rather than cosmetic: ``clamp_font_size`` maps any out-of-range value to
+# 0 (Auto), so without this a hand-edited ``lyrics_font_size`` of 48 would not
+# merely be refused by the spinner — it would silently snap back to Auto/13px.
+LYRICS_FONT_SIZE_MAX = 72
+
+# Widgets that should follow the lyrics size mark themselves with this dynamic
+# property, and build_stylesheet() emits one rule for them. Why a stylesheet
+# rule and not QWidget.setFont(): the app stylesheet's ``* { font-size }``
+# overrides any font a widget sets on itself the next time the theme is
+# applied (measured — a setFont(26px) field snapped back to the base size on a
+# theme switch), whereas a property rule outranks ``*`` and survives the
+# re-apply. See ui/lyrics_studio.py and DatasetManager.init_ui for the users.
+FONT_REGION_PROPERTY = "fontRegion"
+FONT_REGION_LYRICS = "lyrics"
 
 # role -> label shown in the color editor. Order is the editor's order.
 ROLES = {
@@ -135,12 +171,52 @@ def _icon(name, color):
     return path.replace("\\", "/")
 
 
-def build_stylesheet(p, font_family="", zoom=1.0):
-    """Qt stylesheet for palette ``p``."""
+def clamp_font_size(value, minimum=FONT_SIZE_MIN, maximum=FONT_SIZE_MAX):
+    """Coerce a stored ``ui_font_size`` / ``lyrics_font_size`` to a usable px int.
+
+    Settings files are hand-editable and get written by older versions of the
+    app, so a value here can be a string, ``None``, or nonsense. Anything that
+    is not an int in range becomes ``0`` — "Auto", i.e. "follow the default" —
+    rather than raising, because a bad number in settings.json must not stop
+    the window from opening.
+    """
+    try:
+        size = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    return size if minimum <= size <= maximum else 0
+
+
+def resolve_font_sizes(config):
+    """Return ``(base_px, lyrics_px)`` for a config dict.
+
+    ``base_px`` is what the whole app uses; ``lyrics_px`` is what the lyrics
+    surfaces use, and is ``None`` when they are set to Auto — meaning "emit no
+    override rule at all", so they inherit ``base_px`` exactly.
+    """
+    base = clamp_font_size((config or {}).get("ui_font_size")) or DEFAULT_FONT_SIZE
+    lyrics = clamp_font_size((config or {}).get("lyrics_font_size"),
+                             maximum=LYRICS_FONT_SIZE_MAX)
+    return base, (lyrics or None)
+
+
+def build_stylesheet(p, font_family="", zoom=1.0, font_size=None, lyrics_font_size=None):
+    """Qt stylesheet for palette ``p``.
+
+    ``font_size`` is the base text size in px (``None`` keeps
+    ``DEFAULT_FONT_SIZE``, the historical hard-coded 13). ``lyrics_font_size``
+    is the override for widgets carrying the ``FONT_REGION_LYRICS`` property;
+    ``None`` emits no rule, which is the Auto case.
+    """
     check, dot, chevron = (_icon("check", p["accent_text"]), _icon("dot", p["accent_text"]),
                            _icon("chevron", p["text_muted"]))
     zoom = max(0.75, min(1.75, float(zoom or 1.0)))
-    fs = round(13 * zoom)
+    fs = round((clamp_font_size(font_size) or DEFAULT_FONT_SIZE) * zoom)
+    # The lyrics override is scaled by zoom as well, so enlarging the lyrics
+    # relative to the app survives a zoom change instead of inverting.
+    lyrics = clamp_font_size(lyrics_font_size, maximum=LYRICS_FONT_SIZE_MAX)
+    region_rule = (f'\n[{FONT_REGION_PROPERTY}="{FONT_REGION_LYRICS}"] '
+                   f'{{ font-size: {round(lyrics * zoom)}px; }}') if lyrics else ""
     small = max(9, fs - 2)
     pad_v, pad_h = round(5 * zoom), round(12 * zoom)
     radius = round(6 * zoom)
@@ -149,7 +225,7 @@ def build_stylesheet(p, font_family="", zoom=1.0):
     accent_press = _mix(p["accent"], p["window"], 0.2)
     btn_hover = _mix(p["surface_alt"], p["text"], 0.06)
     return f"""
-* {{ {font} font-size: {fs}px; }}
+* {{ {font} font-size: {fs}px; }}{region_rule}
 QWidget {{ background: {p['window']}; color: {p['text']}; }}
 QMainWindow::separator {{ background: {p['window']}; width: 6px; height: 6px; }}
 QMainWindow::separator:hover {{ background: {p['accent']}; }}
@@ -260,13 +336,10 @@ QSlider::handle:horizontal {{ background: {p['text']}; width: 12px; height: 12px
 """
 
 
-def apply_theme(app, config):
-    """Apply the configured theme to the whole QApplication (dialogs included)."""
+def _qpalette(p):
+    """QPalette for palette ``p`` — the native pieces the stylesheet misses."""
     from PySide6.QtGui import QColor, QPalette
 
-    name, p = resolve_palette(config)
-    app.setStyleSheet(build_stylesheet(p, config.get("ui_font_family") or "", config.get("ui_zoom") or 1.0))
-    # Native pieces the stylesheet does not reach (color dialog, some popups).
     pal = QPalette()
     for role, key in [
         (QPalette.Window, "window"), (QPalette.Base, "input"), (QPalette.AlternateBase, "surface"),
@@ -276,8 +349,54 @@ def apply_theme(app, config):
         (QPalette.PlaceholderText, "text_muted"), (QPalette.Link, "accent"),
     ]:
         pal.setColor(role, QColor(p[key]))
-    app.setPalette(pal)
-    return name, p
+    return pal
+
+
+def _stylesheet(config):
+    """The stylesheet for ``config`` — one place, so scope cannot change the look."""
+    _name, p = resolve_palette(config)
+    font_size, lyrics_size = resolve_font_sizes(config)
+    return build_stylesheet(
+        p, config.get("ui_font_family") or "", config.get("ui_zoom") or 1.0,
+        font_size=font_size, lyrics_font_size=lyrics_size,
+    )
+
+
+def apply_theme(app, config):
+    """Apply the configured theme to the whole QApplication (dialogs included).
+
+    Setting the stylesheet on the QApplication re-polishes every widget in the
+    process. That is correct at startup and for a one-off change, but it is what
+    makes a live Appearance/zoom control freeze the GUI thread for seconds (see
+    ``apply_theme_to``). Prefer this only when new top-level windows may appear.
+    """
+    _name, p = resolve_palette(config)
+    app.setStyleSheet(_stylesheet(config))
+    app.setPalette(_qpalette(p))
+    return _name, p
+
+
+def apply_theme_to(widget, config, app=None):
+    """Apply the theme to ``widget`` and its Qt children only.
+
+    The stylesheet is set on the WINDOW, not on the QApplication, so a slider
+    step re-polishes one window instead of the whole process. Measured on this
+    app: ~1 s scoped vs ~6 s app-wide per step, and the difference is entirely
+    re-polishing widgets the change cannot affect (menus, other docks, dialogs).
+
+    Windows and dialogs opened with this widget as their Qt parent inherit the
+    sheet, because a stylesheet applies to a widget's whole QObject subtree; the
+    application palette is still set so the few detached popups (tooltips) stay
+    readable. Falls back to app-wide when ``widget`` is ``None``.
+    """
+    _name, p = resolve_palette(config)
+    if widget is not None:
+        widget.setStyleSheet(_stylesheet(config))
+    elif app is not None:
+        app.setStyleSheet(_stylesheet(config))
+    if app is not None:
+        app.setPalette(_qpalette(p))
+    return _name, p
 
 
 def repolish(widget):

@@ -59,6 +59,13 @@ lyrics_profiles/
 # gathered locally. Never commit it; regenerate with the tools instead.
 docs/research/
 
+# Stray secrets dropped next to the code they were being tested against. These
+# are never source: a key belongs in the app's settings or a keyring, never in
+# the working tree. Ignored rather than deleted so an accidental paste cannot be
+# committed while the owner decides where the key really lives.
+workers/*API*.txt
+workers/Experientiallabs.txt
+
 # The generated change index and its scratch file. Both are derived data and
 # must NOT be tracked: a commit cannot contain its own SHA, so a committed
 # marker is always stamped with the previous HEAD, and every regeneration

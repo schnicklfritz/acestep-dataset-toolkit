@@ -31,14 +31,16 @@ import re
 DEFAULT_CONTRACTIONS = {
     # --- 'll : vowel-matched, the she'll / he'll / I'll problem ---------
     "she'll": "sheel",
-    "he'll": "heel",
-    "i'll": "aisle",
+    "he'll": "h-eel",
+    "i'll": "eyel",
     "we'll": "weel",
     "you'll": "yool",
     "they'll": "theyl",
-    "it'll": "idle",
-    "that'll": "thadle",
-    "there'll": "therel",
+    "we'd": "weid",
+    "I'd": "eye-d",
+    "it'll": "ittle",
+    "that'll": "thatel",
+    "there'll": "there-ill",
     "who'll": "hool",
     # --- n't : keeps the syllable count / rhythm (cant, dont, wont) -----
     "can't": "cant",
@@ -66,10 +68,10 @@ DEFAULT_CONTRACTIONS = {
     "i've": "ive",
     "you've": "youve",
     "they've": "theyve",
-    "i'm": "im",
+    "i'm": "eyem",
     "let's": "lets",
     # --- leading apostrophes (more often sung as one word) --------------
-    "'cause": "cause",
+    "'cause": "kuz",
     "'bout": "bout",
     "'til": "til",
     "'round": "round",
@@ -94,6 +96,25 @@ STRIP_TRAILING_PUNCT = ".,!?;:-–—…•*_~`^"
 # A structure tag alone on its line, e.g. "[Verse 1]" / "[Guitar Solo]".
 _TAG_LINE = re.compile(r"^\s*(\[.*?\])\s*$")
 # Leading structure tags followed by lyric text on the same line.
+
+# Any bracketed group. The tag tidy rules below work on these, not on
+# ``_TAG_LINE``: they must see every bracket on a line, including several at
+# once ("[Raspy Vocal] [Mid-Tempo Groove]") and brackets sitting mid-line.
+_TAG_BRACKETS = re.compile(r"\[[^\]]*\]")
+# A two-letter language prefix a tag may begin with, e.g. ``[EN - Verse]``.
+# docs/descriptor_reference.md tells writers to put the language FIRST in the
+# bracket ("[EN - Chorus - anthemic]", "[JA - Verse - whispered, sparse]"), so a
+# " - " straight after it separates the language from the section rather than
+# introducing a modifier. Trimming it would destroy the language declaration,
+# so such a bracket is left alone.
+_LANG_PREFIX = re.compile(r"^[A-Z]{2}$")
+
+# Every double-quote character stripped by ``strip_quotes``. ACE-Step has no
+# use for a lyric quote — it neither sings it nor reads it as a delimiter — and
+# a stray one defeats ``capitalize_first_word`` (the quote is "punctuation", so
+# the line is skipped). Curly forms are included because transcribed lyrics mix
+# them in freely.
+_QUOTE_CHARS = ('"', "\u201c", "\u201d", "\u201e", "\u201f", "\u00ab", "\u00bb")
 
 
 def _title_keep_hyphens(word):
@@ -207,6 +228,82 @@ def strip_all_apostrophes(text):
     return text.replace("'", "")
 
 
+def strip_quotes(text):
+    """Remove every double-quote character, wherever it appears.
+
+    ACE-Step does not sing a quote and does not read it as a delimiter, so a
+    quote in the lyrics is at best noise. It is also actively harmful: a line
+    that opens with ``"`` starts with punctuation, which makes
+    ``capitalize_first_word`` skip it, so ``"hello`` never becomes ``Hello``.
+    Straight and curly forms both go; apostrophes are a different character and
+    are handled by ``strip_all_apostrophes``.
+    """
+    for ch in _QUOTE_CHARS:
+        text = text.replace(ch, "")
+    return text
+
+
+def trim_tag_modifiers(text):
+    """Cut the `` - modifier`` tail out of a structure tag.
+
+    Only the part before the first ``" -"`` (space + hyphen) survives, so the
+    conditioning descriptors addended to a tag are dropped while the tag itself
+    is kept::
+
+        [Chorus]                  -> [Chorus]
+        [Chorus - Raspy Vocals]   -> [Chorus]
+        [Verse 1 - whispered]     -> [Verse 1]
+        [Chorus - loud - big]     -> [Chorus]
+
+    A bracket that begins with a two-letter language code is the one exception
+    (``[EN - Verse]``, ``[JA - Verse - whispered, sparse]``): the " - " there
+    separates language from section, not section from modifier, and trimming it
+    would delete the language (docs/descriptor_reference.md).
+
+    A *joined* hyphen is never a separator — ``[Pre-Chorus]`` has no ``" -"``,
+    so it is returned untouched, exactly as ``capitalize_tags`` treats it.
+    """
+    def _fix(match):
+        inner = match.group(0)[1:-1]
+        if " -" not in inner:
+            return match.group(0)
+        head = inner.partition(" -")[0].rstrip()
+        if _LANG_PREFIX.match(head):
+            return match.group(0)
+        return "[" + head + "]"
+
+    return _TAG_BRACKETS.sub(_fix, text)
+
+
+def drop_stray_tags(text):
+    """Keep the first tag line of a run; delete the tags stacked under it.
+
+    A run is two or more tag-only lines with nothing but newlines between them.
+    The rule targets the transcription artefact where a section's descriptors
+    end up as their own bracket group on the following line::
+
+        [Verse 1]
+        [Raspy Vocal] [Mid-Tempo Groove]      <- dropped
+        I walked alone                        <- kept
+
+    Only the first line of the run survives. A tag that follows *lyric* text is
+    never dropped, and a tag after a blank line is never dropped, so the two
+    legal shapes from docs/descriptor_reference.md (one tag per section, and
+    sections separated by a blank line) both pass through untouched.
+    """
+    lines = text.split("\n")
+    out = []
+    prev_was_tag = False
+    for line in lines:
+        is_tag = bool(line.strip()) and not _TAG_BRACKETS.sub("", line).strip()
+        if is_tag and prev_was_tag:
+            prev_was_tag = True          # still inside the run; keep swallowing
+            continue
+        out.append(line)
+        prev_was_tag = is_tag
+    return "\n".join(out)
+
+
 def shorten_ing(text, exceptions):
     """Convert word-final ``-ing`` to ``-in``, skipping ``exceptions``."""
     exceptions = {w.lower() for w in (exceptions or ())}
@@ -279,11 +376,16 @@ def normalize_lyrics(
     do_strip_punctuation=True,
     do_capitalize_lines=True,
     protect_markers=True,
+    do_strip_quotes=True,
+    do_trim_tag_modifiers=True,
+    do_drop_stray_tags=True,
 ):
     """Normalize a lyrics block. Returns ``(new_text, report)``.
 
     ``report`` carries ``contractions`` (list of ``(from, to)`` applied),
-    ``ing`` (count converted), ``tags`` (count touched) and ``lines_changed``.
+    ``ing`` (count converted), ``tags`` (count touched), ``lines_changed``,
+    ``quotes`` (quote characters removed), ``tags_trimmed`` (brackets whose
+    modifiers were cut) and ``tags_dropped`` (stray tag lines deleted).
 
     ``do_capitalize_lines`` capitalises the first word of every lyric line.
     Lyrics are normally written as sentences, and a lowercase line start reads
@@ -293,6 +395,14 @@ def normalize_lyrics(
     ``protect_markers`` leaves ``---- filename ----`` separator lines (used by
     the all-lyrics view) completely untouched, so tidying a whole-dataset block
     cannot corrupt the markers that write-back depends on.
+
+    The three structure-tag rules run in this order, and the order matters:
+
+    1. ``do_strip_quotes`` removes every ``"``. It runs first because a line
+       opening with a quote starts with punctuation, and ``capitalize_first_word``
+       skips such a line — strip later and ``"hello`` would stay lowercase.
+    2. ``do_trim_tag_modifiers`` cuts ``[Chorus - Raspy Vocals]`` to ``[Chorus]``.
+    3. ``do_drop_stray_tags`` deletes tag lines stacked under another tag line.
     """
     if contractions is None:
         contractions = DEFAULT_CONTRACTIONS
@@ -300,12 +410,55 @@ def normalize_lyrics(
         ing_exceptions = DEFAULT_ING_EXCEPTIONS
 
     report = {"contractions": [], "ing": 0, "tags": 0, "lines_changed": 0,
-              "apostrophes": 0, "capitalized": 0, "word_changes": []}
+              "apostrophes": 0, "capitalized": 0, "word_changes": [],
+              "quotes": 0, "tags_trimmed": 0, "tags_dropped": 0}
     changed = set()
     lowered = {k.lower(): v for k, v in (contractions or {}).items()}
     out_lines = []
 
-    for raw_line in (text or "").splitlines():
+    # ---- Block-wide tag rules, applied before the per-line passes so the
+    # ---- line loop only ever sees tags already in their final shape.
+    # ---- Separator markers are split out first and put back untouched, so a
+    # ---- "-- [x] --" inside a marker can never be mistaken for a tag.
+    body_text = text or ""
+    markers = []
+    if protect_markers:
+        kept = []
+        for ln in body_text.splitlines():
+            s = ln.strip()
+            if s.startswith("----") and s.endswith("----") and len(s) > 8:
+                kept.append(("marker", ln))
+            else:
+                kept.append(("book", ln))
+        # Only bother interleaving when there is actually a marker to protect.
+        if any(kind == "marker" for kind, _ in kept):
+            markers = kept
+            body_text = "\n".join(ln for kind, ln in kept if kind == "book")
+
+    if do_trim_tag_modifiers and "[" in body_text:
+        trimmed = trim_tag_modifiers(body_text)
+        if trimmed != body_text:
+            # Count the brackets whose TEXT changed, not the brackets: trimming
+            # ``[Chorus - loud]`` to ``[Chorus]`` leaves the count identical, so
+            # a before/after findall() difference would always read zero.
+            before_tags = _TAG_BRACKETS.findall(body_text)
+            after_tags = _TAG_BRACKETS.findall(trimmed)
+            report["tags_trimmed"] = sum(
+                1 for a, b in zip(before_tags, after_tags) if a != b
+            )
+            body_text = trimmed
+
+    if do_drop_stray_tags and "[" in body_text:
+        dropped = drop_stray_tags(body_text)
+        if dropped != body_text:
+            report["tags_dropped"] = (
+                len(body_text.splitlines()) - len(dropped.splitlines())
+            )
+            body_text = dropped
+
+    body_text = _reinsert_markers(body_text, markers)
+
+    for raw_line in body_text.splitlines():
         line = raw_line
 
         # 0. Separator markers (---- filename ----) pass through verbatim.
@@ -313,6 +466,14 @@ def normalize_lyrics(
         if protect_markers and stripped.startswith("----") and stripped.endswith("----") and len(stripped) > 8:
             out_lines.append(line)
             continue
+
+        # 0b. Quotes. Before the tag pass, so a line that opens with a quote is
+        #     a lyric line again (and can be capitalised in pass 7) rather than
+        #     a line that begins with punctuation.
+        if do_strip_quotes and any(ch in line for ch in _QUOTE_CHARS):
+            before_quotes = line
+            line = strip_quotes(line)
+            report["quotes"] += sum(before_quotes.count(ch) for ch in _QUOTE_CHARS)
 
         # 1. Structure tags: capitalize only.
         if do_capitalize_tags and "[" in line:
@@ -391,3 +552,17 @@ def normalize_lyrics(
     return "\n".join(out_lines), report
 
 _LEADING_TAGS = re.compile(r"^((?:\s*\[[^\]]*\]\s*)+)(.*)$")
+
+
+def _reinsert_markers(body_text, markers):
+    """Put the protected ``---- filename ----`` lines back where they were."""
+    if not markers:
+        return body_text
+    body_lines = iter(body_text.splitlines())
+    out = []
+    for kind, ln in markers:
+        if kind == "marker":
+            out.append(ln)
+        else:
+            out.append(next(body_lines, ""))
+    return "\n".join(out)
