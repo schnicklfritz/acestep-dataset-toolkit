@@ -1,0 +1,388 @@
+The Complete Guide to Caption & Lyric Annotation for ACE-Step 1.5 XL LoKR Dataset Creation (SFT Variant)
+
+    Scope: This guide is the first comprehensive reference for preparing annotation data (captions and lyrics) for LoKR adapter training on ACE-Step 1.5 XL using the SFT model variant. It is written for dataset creators who will use an external LLM (such as Gemini 3.8 Flash) to assist with annotation.
+
+    Model Variant Note: SFT is assumed throughout. Where Base or Turbo behavior differs materially, it is explicitly flagged. Turbo's removed alignment logic makes it unsuitable for LoKR training on this material.
+
+1. The Fundamental Distinction: Training Annotation vs. Creation Prompting
+
+The most important concept in LoKR dataset preparation is that training annotations and creation prompts serve opposite purposes. Confusing them is the primary cause of weak adapters.
+Dimension	Music Creation Prompting	LoKR Training Annotation
+Purpose	Elicit generation from the model	Teach the adapter what the audio actually contains
+Content	Desired outcome	Observed reality
+Common variables	Describe them — you want them generated	Omit them — the trigger tag absorbs them
+Variable elements	May be omitted or left open	Describe them — they differentiate songs
+Language	Creative, evocative, natural	Concrete, factual, consistent
+The Omission Principle
+
+The rule that governs every annotation decision:
+
+    If a feature appears in every song in your dataset, it must not appear in any caption or lyric descriptor. The trigger tag is the only name for that feature.
+
+This is not a stylistic preference. It is a property of how LoKR adapters learn. During training, the adapter adjusts its weights based on both the caption and the lyric descriptors. If a descriptor appears in every solo bracket, the adapter learns that descriptor is the cause of the solo sound rather than the trigger. The trigger becomes a weighted blend instead of a clean on/off switch.
+
+The official ACE-Step training documentation confirms that structural tags help the model learn song structure, but it does not explicitly address the omission principle for LoKR training. This principle is derived from the broader LoRA/LoKR training literature, where it is well-established that adapters learn whatever is constant across the dataset and not described in the captions.
+What This Means in Practice
+Element	Creation Prompting	LoKR Training Annotation
+raspy vocal	Include — you want a raspy vocal	Omit if every song has one; absorbed by the trigger
+[Guitar Solo - explosive]	Include — you want an explosive solo	Omit if every solo is explosive; include only if this solo is distinct
+[Verse 1 - whispered]	Include — you want whispered delivery	Include if this specific verse is whispered; omit if all verses are whispered
+hard rock	Include — you want hard rock	Omit if every song is hard rock; the trigger handles genre
+2. The Trigger Tag (Persona / Custom Tag)
+
+Your persona is the trigger tag that becomes the on/off switch for your LoKR. When the trigger is present in a prompt, the adapter activates the trained style. When absent, the base model's default behavior returns.
+How the Trigger Works in Training
+
+The custom_tag field in the dataset JSON is your trigger. During preprocessing, it is prepended (or appended, or replaced) relative to the caption.
+json
+
+{
+  "custom_tag": "acdc_bon",
+  "tag_position": "prepend",
+  "caption": "mid-tempo swagger, party anthem, ..."
+}
+
+The trigger is not inserted into the sung lyrics. It belongs in the caption only.
+Choosing a Trigger
+
+    Be specific enough to avoid confusion with broader styles (e.g., acdc_bon rather than just acdc).
+
+    The trigger absorbs every element that is constant across your dataset: the guitar tone, vocal character, production aesthetic, arrangement style, and genre identity.
+
+    The trigger must be the only thing that reliably predicts the common sound.
+
+3. Caption Annotation for LoKR Training
+3.1 What Belongs in a Training Caption
+
+A LoKR training caption describes the song-specific variables — the elements that differ between songs in your dataset. It does not describe the constants.
+
+Structure:
+text
+
+[Trigger Tag], [Song-Specific Tempo/Feel], [Song-Specific Mood], [Song-Specific Structure], [Song-Specific Solo Character], [Song-Specific Dynamic].
+
+Example (corrected):
+text
+
+acdc_bon, mid-tempo swagger, party anthem, opens with a single guitar riff before drums crash in, shouted gang vocal on the title phrase, short stabbed solo phrases with wah-wah, abrupt cut ending.
+
+Example (wrong — leaks constants):
+text
+
+hard rock, raspy male vocal, gretsch jet firebird, gibson sg, raw analog, punchy, 1970s
+
+Every tag in the wrong example is a constant across a Bon Scott-era dataset. The adapter would learn that hard rock and raspy male vocal are the cause of the sound, not the trigger.
+3.2 Caption Length
+
+The caption has a maximum of 512 characters. Front-load 5–12 keywords, maximum 15, followed by 2–3 sentences of flow narrative.
+3.3 Mono Recordings
+
+If your dataset contains mono recordings (e.g., 1950s–1960s era recordings), this is a constant production characteristic across the dataset. It should be omitted from every caption and absorbed by the trigger.
+
+If only some songs in your dataset are mono and others are stereo, then mono becomes a variable element and can be described in the caption for the mono tracks only. For example:
+text
+
+acdc_bon, mono recording, mid-tempo swagger, party anthem, ...
+
+For Bon Scott-era AC/DC (all mono or near-mono), mono is a constant and should be omitted.
+3.4 What to Leave Out of Captions (Negatives)
+
+These are common variables that must be omitted from every caption when they appear in nearly every song of the dataset:
+Category	Words to Omit
+Genre	hard rock, blues rock, rock n roll, pub rock
+Vocal character	raspy male vocal, gritty male vocal, sneering, snarling, swaggering, bluesy shout
+Guitar tone & gear	Gibson SG, Marshall Plexi, Gretsch Jet Firebird, clean-to-crunchy, edge of breakup
+Production	raw analog, 1970s analog production, dry, punchy, in-your-face
+Mood & energy	energetic, aggressive, driving, rebellious, relentless
+Solo	pentatonic, blues-based leads, vibrato, explosive
+4. Lyric Annotation for LoKR Training
+4.1 Structural Markers
+
+Every song section must begin with an explicit structural marker in square brackets. These markers control when elements occur.
+
+Supported core markers: [Intro], [Verse], [Verse 1], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Outro], [Hook], [Refrain], [Guitar Solo], [Instrumental], [Breakdown], [Silence], [Build-Up], [Break], [Fade Out], [Spoken]
+
+Marker formatting rules:
+
+    Section marker names are always capitalized: [Verse], [Chorus], [Outro].
+
+    Separate distinct sections with a blank line (\n\n).
+
+    Instrumental sections have no lyrics below the tag.
+
+    For non-English songs, place language tags at the start: [EN - Chorus - anthemic].
+
+4.2 Architectural Descriptors (The Omission Principle Applied)
+
+Descriptors attach to section markers with a dash:
+text
+
+[Marker - descriptor 1, descriptor 2, descriptor 3]
+
+Hard rule: maximum 3 descriptors per bracket. More risks the model singing tag names as lyrics.
+
+Constant descriptors (omit from every bracket):
+Category	Examples
+Vocal	raspy vocal, sneering, snarling, swaggering, bluesy shout
+Solo	blues-based leads, pentatonic, vibrato, bend, pull-off
+Energy	high energy, driving, relentless, anthemic, explosive
+Production	dry, raw production, live feel, punchy, in-your-face
+
+Variable descriptors (include when they describe song-specific variation):
+Category	Examples
+Vocal variation	whispered, spoken word, menacing, building, strained
+Solo character	wah-wah engaged, slow sustained bends, short stabbed phrases
+Structural variation	solo guitar riff intro, no drums, abrupt cut, fade out
+Dynamic variation	sparse, stripped back, explosive, full band
+4.3 Lyric Text Formatting Rules
+Rule	Detail
+Capitalization	Section markers capitalized. Use UPPERCASE for belting, screaming, or shouted delivery. Use lowercase for normal sung lines.
+Syllable cadence	Keep lines between 6 to 10 syllables for optimal beat alignment. Deviation within a section should not exceed 2 syllables per line.
+Section spacing	Always separate distinct sections with a blank line (\n\n).
+Vocal intensity	UPPERCASE for belting, screaming, or shouted delivery.
+Harmonies & backing	Use (parentheses) for backing vocals, echoes, and call-and-response.
+Instrumental songs	Set lyrics to [Instrumental] only.
+4.4 Capitalization for Shouted Words
+
+UPPERCASE in lyrics signals stronger vocal intensity — shouting, belting, or screaming.
+
+Example:
+text
+
+[Bridge - building intensity, ascending vocal]
+NO, BABY PLEASE DONT LEAVE ME
+WHY MUST YOU GO AWAY AND DO THIS TO ME, BABY
+I want to suffer for you, SUFFER, SUFFER
+OH! BABY! please dont GO
+NO
+
+The ALL CAPS lines are correct because the vocalist is genuinely belting. If he is singing normally, use lowercase.
+4.5 Punctuation Removal
+
+Remove all punctuation that the model is not trained to interpret: quotation marks ("), periods (.), commas (,), question marks (?), exclamation marks (!), backslashes (\), and any other non-phonetic punctuation at the end of lines.
+
+Why: The lyric normalizer handles punctuation removal, emoji stripping, and case folding. Punctuation inside lyrics is noise for the tokenizer and can cause misalignment.
+
+Wrong:
+text
+
+Baby, please don't go, baby, please dont go.
+You know I love you so, baby, please dont go.
+
+Right:
+text
+
+Baby please dont go
+Baby please dont go
+Baby please dont go down to New Orleans
+You know I love you so
+Baby please dont go
+
+4.6 Phonetic Spelling and Apostrophe Handling
+
+The SFT tokenizer and alignment model treat apostrophes as ambiguous. Dropping an apostrophe often creates a real word (we'll → well, can't → cant), causing the model to sing the wrong word. This produces "吞字" (word swallowing) — misaligned syllables and incorrect vocal timing.
+Tier 1 — Apostrophe Removal Only (safe)
+
+The resulting string is not a real word, so the tokenizer has no ambiguity.
+Standard	Phonetic
+don't	dont
+didn't	didnt
+isn't	isnt
+aren't	arent
+I've	ive
+I'm	im
+you've	youve
+you're	youre
+that's	thats
+it's	its
+let's	lets
+we've	weve
+Tier 2 — Phonetic Respelling Required
+
+These collapse into real words if you only drop the apostrophe. The model will sing the wrong word.
+Standard	Phonetic	Collision if you only drop
+won't	wohnt	wont (accustomed)
+can't	kant	cant (hypocritical talk)
+we'll	weel	well
+he'll	heel	hell
+she'll	sheel	shell
+we're	weer	were
+I'll	eyel	ill
+I'd	eyed	id
+we'd	wead	wed
+'cause	kuz	cause
+Tier 3 — Vowel Elongation and Melisma
+
+When a vocalist stretches a vowel across multiple beats (a melisma), repeated vowels and hyphens mark the elongation.
+Delivery	Notation
+Single sustained vowel	baaaaby
+Vowel re-articulated rhythmically	ba-aa-aa-abe
+Vowel sustained then consonant lands late	baaaa-be
+Clean two-syllable delivery	Ba-by
+
+A melisma counts as one syllable regardless of how many vowels are written.
+4.7 Words That Stay Dictionary Words
+
+Words that should NOT be respelled phonetically (because they are already dictionary words or informal reductions that the model understands):
+
+gonna, wanna, gotta, gimme, lemme, kinda, outta, dunno, ya, em, til, round, bout, mm, ah-uh-huh, ooh, woah, yeah
+
+Dropped -ing endings: If the vocalist drops the final g, write the dropped form: goin, lyin, waitin, tryin, nothin, somethin. If he pronounces it, write the full form. Verify against the audio.
+4.8 Backing Vocals and Parentheses
+
+Parentheses ( ) are for echoes, ad-libs, doubles, or backing-vocal responses inside lyric lines.
+
+Example:
+text
+
+[Chorus - call-and-response]
+(Bad boy boogie) I said "up", they said "down"
+(Bad boy boogie) They said "straight", I said "round"
+Bad boy boogie
+
+Important: The vocalist should be singing these as actual backing vocals, not just as a normal line. If the backing vocal is not clearly present in the audio, do not use parentheses.
+
+For shouted backing vocals:
+text
+
+[Chorus - shouted gang vocal]
+HIGHWAY TO HELL
+(Highway to hell)
+
+4.9 The 2048-Token Lyrics Limit
+
+The SFT model has a 2048-token limit for lyrics during inference. Modify your training data's lyric truncation length to be consistent with this limit. If your lyrics exceed 2048 tokens, they will be truncated during training and inference in ways that may not align.
+5. The Relationship Between Captions and Lyrics
+
+The caption and lyrics are two separate conditioning streams that the adapter reads during training.
+Stream	What it conditions	What the adapter learns from it
+Caption	Global sound portrait	"When these words appear, produce this overall sound"
+Lyrics + section descriptors	Temporal script	"When this section marker and these descriptors appear, produce this specific moment"
+
+Both streams are active during training. The adapter adjusts its weights based on both. If a descriptor appears in every solo bracket across your dataset, the adapter learns that descriptor is a cause of the solo sound — exactly the same leakage problem as putting "hard rock" in every caption.
+
+Consistency checklist:
+Area	Caption (Global)	Lyrics (Temporal)
+Instrumentation	Vox Continental organ, Gibson SG P-90	[Instrumental - Vox Continental Organ solo]
+Vocal delivery	raspy male baritone vocal	[Verse 1 - powerful belting]
+Energy & mood	rebellious mood, driving tempo	[Bridge - shouting], [Chorus - high energy]
+6. Dataset File Structure and Preprocessing
+Required Files
+
+Each training sample requires three files sharing the same basename, placed in the same directory:
+text
+
+dataset/
+├── song1.flac              # Audio (.mp3, .wav, .flac, .ogg, .opus)
+├── song1.lyrics.txt       # Lyrics (recommended)
+├── song1.caption.txt      # Caption (or in JSON)
+├── song1.json             # Optional: bpm, keyscale, timesignature, language
+
+File lookup priority during scanning:
+
+    {filename}.lyrics.txt (recommended)
+
+    {filename}.txt (backward compatible)
+
+    {filename}.caption.txt for captions
+
+JSON Metadata Format
+json
+
+{
+  "custom_tag": "acdc_bon",
+  "tag_position": "prepend",
+  "caption": "acdc_bon, mid-tempo swagger, party anthem, ...",
+  "bpm": 122,
+  "keyscale": "E Minor",
+  "timesignature": "4",
+  "language": "en"
+}
+
+SFT note: For SFT, accurate bpm, keyscale, and timesignature are essential because CFG guidance uses these as conditioning signals. Turbo can tolerate inaccurate metadata; SFT cannot. Common metadata errors to correct: a Major → A Major, a mAJOR → A Major, E major → E Major.
+Model Variant Selection for Preprocessing
+
+Use --model-variant sft for preprocessing. The preprocessing must use the same model variant that will be used for training, because the text encoder and DiT encoder are variant-specific.
+Variant	Command Flag	When to Use
+SFT	--model-variant sft	Your use case — LoKR training
+Base	--model-variant base	Special tasks (lego/complete/extract)
+Turbo	--model-variant turbo	Fast generation only — not for LoKR
+7. Master Checklist for LoKR Dataset Annotation
+Step	Action
+1	Choose a specific trigger tag (e.g., acdc_bon) and use it in every caption
+2	Identify constant variables across the dataset (genre, vocal character, gear, production)
+3	Remove all constants from captions and lyric brackets
+4	Rewrite captions to describe only song-specific variables
+5	Rewrite lyric brackets to describe only song-specific variation
+6	Apply Tier 1 / Tier 2 / Tier 3 apostrophe and phonetic rules to all lyrics
+7	Remove all punctuation from lyrics (periods, commas, quotes, question marks, exclamation marks)
+8	Capitalize only sections that are genuinely shouted/belted
+9	Keep lines between 6–10 syllables for normal sung lines
+10	Use parentheses only for clear backing vocals in the audio
+11	Verify every lyric line against the audio for accuracy
+12	Normalize all metadata (keyscale casing, BPM, time signature)
+13	Ensure all files have matching basenames (.flac, .lyrics.txt, .caption.txt, .json)
+14	Run the dataset builder with --model-variant sft
+8. The One-Sentence Rule
+
+    If a descriptor appears in every caption AND every bracket across your dataset, it must appear in neither. The trigger tag is the only name for that descriptor.
+
+9. Comprehensive Prompt for Gemini 3.8 Flash
+
+Copy the entire prompt below and paste it into Gemini. Replace the bracketed [TRIGGER_TAG] and [ARTIST_STYLE] with your specific values.
+text
+
+You are an expert music annotation assistant for ACE-Step 1.5 XL LoKR dataset creation. Your task is to generate captions and lyrics for a training dataset.
+
+CRITICAL CONTEXT: This is for LoKR adapter training, NOT music creation prompting. The goal is to teach the adapter what the audio ACTUALLY CONTAINS, not what you want it to generate.
+
+THE OMISSION PRINCIPLE (most important rule):
+If a feature appears in EVERY song in the dataset, it must NOT appear in ANY caption or lyric descriptor. The trigger tag is the only name for that feature. Describe ONLY what differs between songs.
+
+DATASET PARAMETERS:
+- Trigger tag: [TRIGGER_TAG]
+- Artist/style: [ARTIST_STYLE]
+- Model variant: SFT
+- Language: English
+
+YOUR TASK:
+For each audio file provided, generate:
+1. A CAPTION (max 512 characters) that describes only song-specific variables.
+2. LYRICS with structural markers and descriptors that describe only song-specific variation.
+
+CAPTION FORMAT:
+[TRIGGER_TAG], [song-specific tempo/feel], [song-specific mood], [song-specific structure], [song-specific solo character], [song-specific dynamic].
+Do NOT include genre, vocal character, gear, or production terms that are constant across the dataset.
+Do NOT include BPM, key, or time signature in the caption — these belong in metadata.
+
+LYRICS FORMAT:
+Every section must begin with a structural marker in square brackets: [Intro], [Verse 1], [Chorus], [Bridge], [Guitar Solo], [Instrumental], [Outro], [Breakdown], [Silence], [Build-Up], [Break], [Fade Out].
+Maximum 3 descriptors per bracket, attached with a dash: [Verse 1 - whispered, sparse].
+Do NOT use constant descriptors (e.g., raspy vocal, explosive, high energy) in brackets. Use only song-specific variation.
+
+LYRIC TEXT RULES:
+1. Remove ALL punctuation: periods, commas, question marks, exclamation marks, quotation marks, backslashes.
+2. UPPERCASE only for genuine shouted/belted lines. Lowercase for normal sung lines.
+3. Keep lines between 6 and 10 syllables for optimal beat alignment.
+4. Use parentheses ( ) only for clear backing vocals or call-and-response in the audio.
+5. Apostrophe handling:
+   - Tier 1 (safe to drop): dont, didnt, isnt, arent, ive, im, thats, its, lets
+   - Tier 2 (must respell phonetically): wont→wohnt, cant→kant, well→weel, hell→heel, were→weer, ill→eyel, id→eyed, cause→kuz
+   - Tier 3 (vowel elongation): ba-aa-aa-abe, baaaaby
+6. Dropped -ing endings: goin, lyin, waitin, tryin, nothin, somethin
+7. Words that stay as dictionary words: gonna, wanna, gotta, gimme, em, til, round, mm, ah-uh-huh, ooh, yeah
+8. Separate sections with a blank line.
+
+OUTPUT FORMAT (JSON only):
+{
+  "caption": "<trigger_tag>, <song-specific variables>. <flow narrative>.",
+  "lyrics": "[Intro - ...]\n\n[Verse 1 - ...]\nLyrics...\n\n[Chorus - ...]\nLyrics...",
+  "bpm": <integer>,
+  "keyscale": "<key>",
+  "timesignature": "<time signature>",
+  "language": "en"
+}
+
+Do NOT include any text outside this JSON structure.
+
+This guide and prompt represent the first comprehensive reference for ACE-Step 1.5 XL LoKR dataset annotation. The omission principle, phonetic rules, and caption-lyric relationship described here are derived from official ACE-Step training documentation, community field reports, and direct analysis of LoKR adapter behavior. Apply them consistently, and your trigger will function as a clean on/off switch for the trained style.
