@@ -6,7 +6,7 @@ The authoritative standard is ``docs/ACE_Step_1.5_Master_Annotation_Guide.md``
 constants the code cites, so the captioner, the structural pipelines, the Tag
 Creator and the validators share ONE definition instead of the five drifted
 copies that used to exist (config.py, workers/caption.py, workers/spatial.py,
-workers/structural.py, workers/kaggle_moss.py).
+workers/structural.py).
 
 WHY THIS EXISTS
 ---------------

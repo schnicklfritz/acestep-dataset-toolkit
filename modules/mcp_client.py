@@ -2,13 +2,12 @@
 
 WHY THIS EXISTS
 ---------------
-The app already *ships* two MCP servers (``mcp_server.py`` for dataset tools,
-``mcp_research_server.py`` for corpus/vocabulary research), but they were only
-reachable from another program — Claude Desktop, Cursor, Cline. This module
+The app already *ships* an MCP server (``mcp_server.py`` for dataset tools), but
+it was only reachable from another program — Claude Desktop, Cursor, Cline. This
+module
 makes the relationship bidirectional: the Assistant in the app can be *given*
 those tools, plus any other MCP server you add to settings, so the model can
-reach beyond what the app implements natively (filesystem, web search, DSP, a
-research corpus…).
+reach beyond what the app implements natively (filesystem, web search, DSP, …).
 
 DESIGN NOTES
 ------------

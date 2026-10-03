@@ -6,7 +6,7 @@ the kernel then finds no audio and captions nothing.
 
 That is exactly what was observed in a real run:
 
-    [moss] /kaggle/input/ace-audio-48bd46 was empty; found audio elsewhere ...
+    [kernel] /kaggle/input/ace-audio-48bd46 was empty; found audio elsewhere ...
 
 ``modules/kaggle.py`` already had ``wait_dataset_ready()`` with a docstring
 describing this precise failure — but only **two** of eight workers called it.
@@ -95,8 +95,6 @@ def test_dataset_sources_drops_empty_slugs():
 def test_every_caption_kernel_pusher_uses_the_dataset_sources_helper():
     """A hand-built [audio, model] list breaks when the weights setting is cleared.
 
-    MOSS builds its own list, conditionally, and is not a caption-kernel pusher —
-    so it is deliberately out of scope here.
     """
     problems = []
     for path in sorted(glob.glob(os.path.join(WORKERS, "*.py"))):

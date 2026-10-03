@@ -152,56 +152,20 @@ caption audit, manifest validation, health scan, instrument detection, **sound
 profile**, and **curate dataset for a target sound** (picks the genre/artist/
 instrument gaps to fill so the dataset converges on a specific sound).
 
-### MCP servers
-The app ships **two** MCP servers (both optional, both need `pip install "mcp[cli]"`):
+### MCP server
+The app ships **one** optional MCP server (needs `pip install "mcp[cli]"`):
 
 1. **Dataset server** — `python mcp_server.py --dataset path/to/dataset.json`.
    Exposes dataset summary, tagging, and curation tools to any MCP client
    (Claude Desktop, Cursor, Cline, custom agents). This is rare in dataset apps —
    your dataset becomes directly steerable by AI.
 
-2. **Research server** — `python mcp_research_server.py --corpus <dir>`. Points an
-   agent at a folder of prose about your artists (reviews, session notes,
-   interviews, liner notes) and inducts the vocabulary those sources actually
-   use, so captions are grounded in evidence rather than guesswork:
-   * `corpus_stats`, `grep_corpus` — census and line-level evidence
-   * `induct_terms` — which known descriptors real sources use, ranked by how many
-     *distinct files* use them (one file repeating a term is one person's idiolect)
-   * `unlisted_terms` — community terms your vocabulary is missing
-   * `vocab_diff`, `spec_coverage` — compare vocabularies, find spec gaps
-   * `kaggle_kernel_status` / `kaggle_kernel_log` — diagnose a failed Kaggle run
-
-   **No research tool returns raw document text.** `corpus_stats` returns counts
-   only; `grep_corpus` returns only lines an explicit regex matched, capped. That
-   is enforced in `modules/research_tools.py`, so connecting an agent to a
-   multi-megabyte corpus cannot blow its context window.
-
-The corpus itself is built by `scripts/gather_corpus.py`: give it a manifest of
-source URLs (Wikipedia pages, album reviews, interviews, session write-ups) and it
-downloads each one, strips the HTML down to prose only, and writes
-`docs/research/<artist>/*.txt`. Provenance goes to a sidecar `sources.json`, so
-URLs and citation debris never reach the n-gram counts. A fetch that fails (403,
-PDF, thin page) is reported rather than hidden, and already-present files are
-skipped, so re-running is cheap. The corpus is gitignored — regenerate it, don't
-commit it.
-
-```bash
-# Add new URLs to the END of an artist's list (filenames are positional).
-.venv/bin/python scripts/gather_corpus.py --manifest docs/research/sources.json --dry-run
-.venv/bin/python scripts/gather_corpus.py --manifest docs/research/sources.json
-```
-
-Build the descriptor vocabulary from the master reference doc with:
-
-```bash
-.venv/bin/python scripts/build_lexicon.py --check
-```
-
-which writes three generated artifacts, all read at prompt time:
+The invocation vocabulary is hand-maintained (there is no generator), read
+at prompt time:
 
 | File | Contents |
 |---|---|
-| `docs/vocabulary.txt` | 393 descriptors, one per line (flat) |
+| `docs/vocabulary.txt` | flat term list, one per line (fallback) |
 | `docs/vocabulary.json` | the same terms grouped **by artist** and facet |
 | `docs/section_markers.txt` | `[Marker]` names for the lyrics block |
 
@@ -330,7 +294,6 @@ dataset_manager.py          Entry point (PySide6 desktop app)
 config.py                   Defaults + secret-key policy + settings.json
 stem_separator.py           MVSEP 3-stage separation (PolarFormer first stage)
 mcp_server.py               MCP server — dataset tools (optional, needs `mcp`)
-mcp_research_server.py      MCP server — corpus research / vocabulary induction
 models.json                 Curated model catalog (sources, backend, notes, leaderboards)
 modules/
   tagger.py                 BPM/key + spectral/CLAP instrument tagging, hybrid captions
@@ -342,13 +305,12 @@ modules/
   model_manager.py          Catalog downloader (HF / GitHub)
   mcp_tools.py              Headless tools for the MCP server
   mcp_compat.py             mcp 1.x FastMCP / 2.x MCPServer import shim
-  research_tools.py         Corpus research: census, grep, vocabulary induction
+  vocabulary.py             Invocation vocabulary loader (artist-scoped)
   kaggle.py                 Private audio-dataset upload + kernel push/wait/download
   caption_kaggle_run.py     ACE-Step local staging (MP3), versioned dataset, caption diff/merge
   mvsep_api.py              MVSEP live algorithm list + separation jobs
   config_store.py           settings.json + encrypted secrets
   secrets_manager.py        OS keyring / Fernet-encrypted secrets
-  audio_analysis.py         Structural sections + slicing
   caption_audit.py          Instrument-naming consistency across captions
   instruments_db.py         Filename-keyword instrument lookup
   manifest_validation.py    ACE-Step schema validation
@@ -370,7 +332,7 @@ ui/                         Tab builders: caption, ace_step, lyrics, settings, b
   package not installed, or a **Model weights dataset** that is not a real
   `owner/slug` (a placeholder such as `me/my-weights` used to be accepted at
   entry and only failed later, at kernel-push time). Every Kaggle run path
-  (ACE-Step, MOSS, lyrics, stems, structure, spatial, structural) now runs this
+  (ACE-Step, lyrics, stems, structure, spatial, structural) now runs this
   check first, inside its own worker thread — so a credentials problem costs
   seconds rather than a staging pass and an upload.
 * **"Kaggle credentials not configured"** → ⚙ Settings → Cloud & Execution

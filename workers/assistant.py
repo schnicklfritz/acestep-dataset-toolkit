@@ -1,7 +1,3 @@
-
-import os
-os.environ["GOOGLE_GENERATIVE_AI_API_KEY"] = AIzaSyCI-E5X-GG5u0n0c9eJMbD5Evo5VNLx6Yo
-
 """AI Assistant: DeepSeek-powered live help for the app.
 The assistant answers questions about using the app using an embedded help
 document, and can reason about the user's current dataset (summary provided at
@@ -173,16 +169,9 @@ ASSISTANT_TOOLS = [
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "curate_dataset",
-        "description": "Recommend what to add so the dataset converges on a target sound. Pass a target_sound (artist/genre/mood); the tool returns the current sound profile + gap hints and you compose the curation plan. After proposing candidates, optionally call rockstar_lookup(song, artist) for any you want to flag for licensing verification.",
+        "description": "Recommend what to add so the dataset converges on a target sound. Pass a target_sound (artist/genre/mood); the tool returns the current sound profile + gap hints and you compose the curation plan.",
         "parameters": {"type": "object", "properties": {
             "target_sound": {"type": "string", "description": "e.g. 'Black Sabbath / doom blues, downtuned, slow'"}}, "required": ["target_sound"]}}},
-    {"type": "function", "function": {
-        "name": "rockstar_lookup",
-        "description": "Check whether multitrack stems are known to exist for a song (community chart indices). Returns existence + references (titles/sites) only, never file links. Use to note which candidate songs have community multitracks available for licensing verification.",
-        "parameters": {"type": "object", "properties": {
-            "song": {"type": "string", "description": "song title"},
-            "artist": {"type": "string", "description": "artist name (optional)"}},
-            "required": ["song"]}}},
 ]
 
 # ---------------------------------------------------------------------------

@@ -189,7 +189,6 @@ class TrackPickerButton(QToolButton):
 # Backend labels -> config value in config["caption_backend"].
 CAPTION_BACKENDS = (
     ("ace_step", "ACE-Step captioner (Kaggle GPU)"),
-    ("moss", "MOSS-Audio on Kaggle (open model, raw style + lyrics)"),
     ("gemini", "Google Gemini (audio-native)"),
     ("deepseek", "DeepSeek LLM (text-only synthesis)"),
     ("custom", "Custom OpenAI-compatible endpoint"),
@@ -357,82 +356,6 @@ def build_caption_tab(manager, parent):
     p_form.addRow("System Prompt (added):", manager.system_prompt_edit)
     layout.addWidget(prompt_grp)
 
-    # ------------------------------------------------------------------
-    # MOSS-Audio on Kaggle (open model)
-    # ------------------------------------------------------------------
-    moss_grp = QGroupBox("MOSS-Audio on Kaggle (open model)")
-    m_layout = QVBoxLayout(moss_grp)
-
-    moss_note = QLabel(
-        "Runs the open <b>MOSS-Audio</b> model on a free Kaggle GPU. It writes raw "
-        "style text into <i>caption</i> and raw lyrics into <i>raw_lyrics</i>, then "
-        "you format them with the Structural Tag Creator. "
-        "Requires Kaggle credentials in ⚙ Settings."
-    )
-    moss_note.setProperty("muted", True)
-    moss_note.setWordWrap(True)
-    m_layout.addWidget(moss_note)
-
-    m_row = QHBoxLayout()
-    manager.moss_track_picker = TrackPickerButton()
-    manager.moss_track_picker.setToolTip(
-        "Tick the tracks to send to MOSS. 'Select tracks missing captions' is a "
-        "quick way to only process what needs it."
-    )
-    m_row.addWidget(manager.moss_track_picker, 1)
-    m_layout.addLayout(m_row)
-
-    m_row = QHBoxLayout()
-    manager.moss_model_edit = QLineEdit(
-        manager.config.get("moss_model_id", "")
-        or "OpenMOSS-Team/MOSS-Music-8B-Instruct"
-    )
-    manager.moss_model_edit.setToolTip(
-        "Hugging Face repo id for the MOSS weights.\n\n"
-        "MOSS-Music-8B-Instruct (recommended) is music-specialised: its tags are "
-        "music-captioning / lyrics-asr / chord-recognition. "
-        "MOSS-Audio-8B-Instruct is the general speech+environment+music model.\n\n"
-        "Both are ~17 GiB and shard across Kaggle's two T4s. The kernel derives "
-        "the repo and class names from this id, so either works."
-    )
-    m_row.addWidget(QLabel("Model:"))
-    m_row.addWidget(manager.moss_model_edit, 1)
-    m_layout.addLayout(m_row)
-
-    m_row2 = QHBoxLayout()
-    manager.moss_weights_dataset_edit = QLineEdit(
-        manager.config.get("moss_model_dataset", "")
-    )
-    manager.moss_weights_dataset_edit.setToolTip(
-        "Optional: a private Kaggle dataset holding the MOSS weights, e.g. "
-        "'you/moss-audio-8b'. Set this to skip a ~17 GiB download inside the "
-        "kernel on every run."
-    )
-    m_row2.addWidget(QLabel("Cached weights (optional):"))
-    m_row2.addWidget(manager.moss_weights_dataset_edit, 1)
-    m_layout.addLayout(m_row2)
-
-    m_run = QHBoxLayout()
-    manager.moss_run_btn = QPushButton("🚀 Caption via MOSS (Kaggle)")
-    manager.moss_run_btn.setToolTip(
-        "Uploads the selected tracks, runs MOSS-Audio on a Kaggle GPU, then writes "
-        "the raw style + lyrics back into the dataset. Nothing is overwritten: "
-        "previous values are kept in caption_before_moss / raw_lyrics_before_moss."
-    )
-    manager.moss_open_btn = QPushButton("Open last Kaggle run")
-    manager.moss_open_btn.setToolTip(
-        "Open the most recent MOSS kernel's output page in Kaggle to inspect the log."
-    )
-    m_run.addWidget(manager.moss_run_btn)
-    m_run.addWidget(manager.moss_open_btn)
-    m_run.addStretch()
-    m_layout.addLayout(m_run)
-
-    manager.moss_status = QLabel("Not run yet.")
-    manager.moss_status.setProperty("muted", True)
-    manager.moss_status.setWordWrap(True)
-    m_layout.addWidget(manager.moss_status)
-    layout.addWidget(moss_grp)
 
     layout.addStretch()
     return inner

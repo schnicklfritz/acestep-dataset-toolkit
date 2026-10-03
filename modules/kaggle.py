@@ -260,7 +260,6 @@ def probe_kaggle(config, slugs=None):
         slugs = (
             config.get("caption_audio_dataset"),
             config.get("kaggle_model_dataset"),
-            config.get("moss_model_dataset"),
         )
     result["problems"].extend(slug_problems(*slugs))
 

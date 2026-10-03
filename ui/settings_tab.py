@@ -250,8 +250,7 @@ def build_settings_tab(manager, parent):
     mcp_note = QLabel(
         'Each server is a command plus args, run locally. Without the optional '
         'package the app still runs — it just offers no MCP tools. '
-        'The app ships two: <code>mcp_server.py</code> (dataset) and '
-        '<code>mcp_research_server.py</code> (research).'
+        'The app ships one: <code>mcp_server.py</code> (dataset).'
     )
     mcp_note.setWordWrap(True)
     mcp_note.setProperty("muted", True)

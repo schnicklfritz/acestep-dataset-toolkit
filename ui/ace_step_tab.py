@@ -5,7 +5,7 @@ stage the dataset's audio locally as MP3, upload it as a private Kaggle dataset,
 push the caption kernel, download the captions into a folder the user picked,
 then diff them against the captions already in the dataset. Those controls used
 to be scattered through the shared 🎤 Caption tab, where they competed for space
-with four other backends (Gemini, DeepSeek, custom endpoint, MOSS).
+with three other backends (Gemini, DeepSeek, custom endpoint).
 
 One STRIP, in the order the steps happen
 ----------------------------------------
@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from modules.caption_kaggle_run import default_output_dir, default_staging_dir
-# The same tickable-dropdown used by the MOSS row: a menu with "Select all /
+# A tickable dropdown: a menu with "Select all /
 # Select none / Select tracks missing captions" plus a checkbox per track, with
 # ticks keyed by FILENAME so they survive table refreshes and reloads.
 from ui.caption_tab import TrackPickerButton

@@ -125,7 +125,7 @@ def test_missing_vocabulary_raises_with_the_fix(monkeypatch, tmp_path):
     monkeypatch.setattr(tag_creator, "FLAT_PATH", str(tmp_path / "nope.txt"))
     with pytest.raises(FileNotFoundError) as exc:
         load_vocabulary("sabbath")
-    assert "build_lexicon" in str(exc.value)
+    assert "No invocation vocabulary found" in str(exc.value)
 
 
 def test_flat_list_is_used_when_groups_are_absent(monkeypatch, tmp_path):

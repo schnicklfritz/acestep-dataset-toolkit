@@ -7,13 +7,17 @@ Produces the two blocks of the two-layer model:
 
 WHERE THE VOCABULARY COMES FROM
 -------------------------------
-Not from this file. It is generated from ``docs/descriptor_reference.md`` —
-the project's authoritative annotation vocabulary — by
-``scripts/build_lexicon.py``, and loaded at prompt time:
+Not from this file, and not from the dataset. It is the *invocation*
+vocabulary — the descriptors you paste into a generation prompt to steer the
+model — and it is hand-maintained. It is loaded at prompt time:
 
     docs/vocabulary.json      artist-scoped facets (preferred)
     docs/vocabulary.txt       flat term list (fallback)
     docs/section_markers.txt  [Marker] names for the lyrics block
+
+It is NOT a validation list. It must never gate what a training annotation is
+allowed to say, because a trained LoKR records what *varies* between its
+tracks — see ``modules/vocabulary.py`` and the dataset annotation guide §1.
 
 WHY ARTIST SCOPING MATTERS
 --------------------------
@@ -44,11 +48,16 @@ def _format_facets(facets):
 def load_vocabulary(artist=""):
     """Return ``(vocabulary_text, resolved_artist_name)`` for the prompt.
 
-    Prefers the artist-scoped groups; falls back to the flat list if the JSON is
-    absent. Raises FileNotFoundError with the fix, rather than silently sending
-    the model an empty vocabulary (which would make it invent descriptors).
+    Prefers the artist-scoped groups (``docs/vocabulary.json``); falls back to
+    the flat list (``docs/vocabulary.txt``). Raises FileNotFoundError rather
+    than silently sending the model an empty vocabulary, which would make it
+    invent descriptors.
+
+    THIS IS THE INVOCATION VOCABULARY, NOT A VALIDATION LIST. It steers a
+    generation prompt; it must never gate what a training annotation is allowed
+    to say. See ``modules/vocabulary.py`` for why that distinction matters.
     """
-    from modules.research_tools import (
+    from modules.vocabulary import (
         load_vocabulary_groups, load_vocabulary as load_flat, terms_for_artist,
     )
 
@@ -69,8 +78,11 @@ def load_vocabulary(artist=""):
                 + ", ".join(terms)), None
 
     raise FileNotFoundError(
-        "No vocabulary found. Generate it with:\n"
-        "    .venv/bin/python scripts/build_lexicon.py"
+        "No invocation vocabulary found. Expected one of:\n"
+        f"    {GROUPS_PATH}\n"
+        f"    {FLAT_PATH}\n"
+        "These are hand-maintained prompt-steering lists, not generated "
+        "artifacts and not a dataset validation list."
     )
 
 

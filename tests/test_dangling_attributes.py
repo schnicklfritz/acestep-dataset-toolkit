@@ -166,7 +166,7 @@ class TestAssignmentScanIsReal:
         # These live in ui/*.py, not dataset_manager.py. If they are missing the
         # scan is not covering the extracted modules, and every extracted widget
         # would be reported as dangling.
-        for name in ("caption_blend_slider", "moss_track_picker",
+        for name in ("caption_blend_slider",
                      "caption_backend_combo"):
             assert name in assigned, f"scan missed {name}"
 

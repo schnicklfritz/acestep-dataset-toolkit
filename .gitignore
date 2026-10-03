@@ -27,6 +27,7 @@ settings.json
 !.claude/settings.json
 kaggle.json
 *.local
+.nohup.out
 
 # Encrypted secrets store (OS keyring fallback)
 secrets.enc
@@ -72,3 +73,4 @@ workers/Experientiallabs.txt
 # dirties the tree. Regenerate with scripts/gen_changed_markers.sh.
 .changed_markers
 .changed_markers.*
+nohup.out

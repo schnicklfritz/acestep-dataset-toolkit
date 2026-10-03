@@ -274,16 +274,9 @@ def test_every_caption_kernel_placeholder_is_filled_by_every_pusher():
         assert not missing, f"{pusher} does not fill {missing}"
 
 
-def test_moss_kernel_placeholders_are_filled():
-    todo = _placeholders(_read("kernels/moss_caption_kernel.py"))
-    source = _read("workers/kaggle_moss.py")
-    missing = sorted(p for p in todo if p not in source)
-    assert not missing, f"workers/kaggle_moss.py does not fill {missing}"
-
-
 def test_caption_kernels_carry_repetition_controls():
     """Greedy decoding with no penalty is what let a caption loop ~200 times."""
-    for kernel in (CAPTION_KERNEL, "kernels/moss_caption_kernel.py"):
+    for kernel in (CAPTION_KERNEL,):
         source = _read(kernel)
         assert "repetition_penalty=REPETITION_PENALTY" in source, kernel
         assert "no_repeat_ngram_size=NO_REPEAT_NGRAM" in source, kernel

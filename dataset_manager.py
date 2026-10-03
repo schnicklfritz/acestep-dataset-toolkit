@@ -12,11 +12,9 @@ from modules.mvsep_gui import MVSEPDialog
 from modules.config_store import load_config, save_config
 from modules.model_manager import load_catalog, find_model, is_downloaded, remove_model
 from workers.model_manager import ModelDownloadWorker
-from workers.rockstar import RockstarLookupWorker
 from workers.embeddings import EmbeddingWorker
 from workers.export import ExportWorker
 from workers.tag_creator import TagCreatorWorker
-from workers.musicbrainz import MusicBrainzWorker
 from modules.dataset_schema import (
     derive_instrumental_mode,
     new_sample,
@@ -437,7 +435,7 @@ class DatasetManager(QMainWindow):
             "Caption",
             [
                 ("🅰 ACE-Step (Kaggle)", ace_step_tab),
-                ("🎤 Other backends && MOSS", caption_tab),
+                ("🎤 Other backends", caption_tab),
             ],
         )
 
@@ -639,14 +637,6 @@ class DatasetManager(QMainWindow):
         self.tag_creator_btn = QPushButton("🏷️ Structural Tag Creator")
         self.tag_creator_btn.clicked.connect(self.start_structural_tag_creator)
         advanced_strip.addWidget(self.tag_creator_btn)
-
-        self.rockstar_btn = QPushButton("🎸 Rockstar Check")
-        self.rockstar_btn.clicked.connect(self.start_rockstar_lookup)
-        advanced_strip.addWidget(self.rockstar_btn)
-
-        self.musicbrainz_btn = QPushButton("🎵 MusicBrainz Lookup")
-        self.musicbrainz_btn.clicked.connect(self.start_musicbrainz_lookup)
-        advanced_strip.addWidget(self.musicbrainz_btn)
 
         advanced_strip.addStretch()
         parts["advanced_strip"] = advanced_strip
@@ -1582,17 +1572,13 @@ class DatasetManager(QMainWindow):
 
         The RUN buttons and the limits live in the ACE-Step page
         (``init_ace_step_tab``): this page owns the backend choice, the
-        prose/tags blend and the MOSS-Audio group.
+        prose/tags blend.
         """
         from ui.caption_tab import build_caption_tab
         build_caption_tab(self, parent)
         self.caption_blend_slider.valueChanged.connect(self.on_caption_blend_changed)
         self.caption_override_btn.clicked.connect(self.set_track_caption_override)
         self.caption_clear_override_btn.clicked.connect(self.clear_track_caption_override)
-        # MOSS-Audio (open model on a Kaggle GPU)
-        self.moss_run_btn.clicked.connect(self.run_moss_captioning)
-        self.moss_open_btn.clicked.connect(self.open_last_moss_kernel)
-        self.refresh_moss_track_picker()
 
     def init_ace_step_tab(self, parent):
         """Build the 🅰 ACE-Step (Kaggle) page and connect its actions."""
@@ -1651,170 +1637,6 @@ class DatasetManager(QMainWindow):
         # staging and caption steps start disabled, with the reason in their
         # tooltips instead of a dialog after the click.
         self.update_ace_actions()
-
-    # -----------------------------------------------------------------------
-    # MOSS-Audio (open model) on Kaggle
-    # -----------------------------------------------------------------------
-    def refresh_moss_track_picker(self):
-        """Keep the MOSS track picker in step with the dataset.
-
-        Ticks are keyed by filename and survive the rebuild, so a refresh after
-        an add/delete/load does not silently clear the user's selection.
-        """
-        picker = getattr(self, "moss_track_picker", None)
-        if picker is not None:
-            picker.set_tracks(self.dataset.get("samples", []))
-
-    def run_moss_captioning(self):
-        """Send the ticked tracks to MOSS-Audio on a Kaggle GPU."""
-        from workers.kaggle_moss import KaggleMossWorker
-
-        samples = self.dataset.get("samples", [])
-        if not samples:
-            QMessageBox.warning(self, "No Tracks", "Add audio tracks first.")
-            return
-
-        picked = self.moss_track_picker.selected_filenames()
-        if not picked:
-            QMessageBox.information(
-                self, "No Tracks Selected",
-                "Tick the tracks to send to MOSS using the “Tracks” dropdown.",
-            )
-            return
-
-        by_name = {s.get("filename", ""): s for s in samples}
-        paths = []
-        missing = []
-        for name in picked:
-            sample = by_name.get(name)
-            path = (sample or {}).get("audio_path", "")
-            if path and os.path.exists(path):
-                paths.append(path)
-            else:
-                missing.append(name)
-        if not paths:
-            QMessageBox.warning(
-                self, "Files Not Found",
-                "None of the selected tracks exist on disk:\n\n"
-                + "\n".join(missing[:10]),
-            )
-            return
-        if missing:
-            resp = QMessageBox.question(
-                self, "Some Files Missing",
-                f"{len(missing)} selected track(s) are missing on disk and will "
-                "be skipped:\n\n" + "\n".join(missing[:10])
-                + "\n\nContinue with the rest?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-            )
-            if resp != QMessageBox.Yes:
-                return
-
-        # Persist the backend choices the user just made in the tab.
-        self.config["moss_model_id"] = self.moss_model_edit.text().strip()
-        self.config["moss_model_dataset"] = \
-            self.moss_weights_dataset_edit.text().strip()
-
-        self.moss_run_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-        self.moss_status.setText(f"Starting MOSS on {len(paths)} track(s)...")
-        self.status_label.setText("Uploading tracks to Kaggle...")
-
-        self.moss_worker = KaggleMossWorker(paths, self.config)
-        self.moss_worker.progress.connect(self.on_moss_progress)
-        self.moss_worker.finished_ok.connect(self.on_moss_finished)
-        self.moss_worker.failed.connect(self.on_moss_failed)
-        self.moss_worker.start()
-
-    def on_moss_progress(self, pct, msg):
-        self.progress_bar.setValue(pct)
-        self.moss_status.setText(msg)
-        self.status_label.setText(msg)
-
-    def on_moss_finished(self, results):
-        """Write the raw MOSS output into the dataset (backups preserved)."""
-        from modules.moss_import import apply_moss_output
-
-        self.moss_run_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        if not results:
-            self.moss_status.setText("MOSS returned no results.")
-            return
-
-        report = apply_moss_output(self.dataset, results)
-        self.refresh_table()
-        self.on_table_selection_changed()
-        self.refresh_moss_track_picker()
-
-        if report["matched"] == 0:
-            # Say WHY, with names. A silent "0 written" is what made this take
-            # several rounds to diagnose: the results were for a different set
-            # of tracks than the dataset currently loaded.
-            got = list(results)[:3]
-            have = [s.get("filename", "?")
-                    for s in self.dataset.get("samples", [])][:3]
-            QMessageBox.warning(
-                self, "MOSS Returned Nothing Usable",
-                f"MOSS returned {len(results)} result(s), but none matched the "
-                "currently-loaded dataset.\n\n"
-                f"MOSS returned:\n    {chr(10) + '    '.join(got)}\n\n"
-                f"Dataset has:\n    {chr(10) + '    '.join(have)}\n\n"
-                "If those look like different songs, a different dataset was "
-                "loaded while the run was in progress — re-run MOSS with the "
-                "right dataset open.",
-            )
-            self.moss_status.setText(
-                f"0 of {len(results)} result(s) matched this dataset — see the "
-                "dialog for the names."
-            )
-            return
-
-        self.moss_status.setText(
-            f"Done — {report['matched']} track(s) written "
-            f"({report['overwritten']} replaced, previous kept in "
-            f"caption_before_moss). {report['prompt_override_fixed']} "
-            f"prompt_override value(s) normalised to bool."
-            + (f" No result for {len(report['no_result'])} track(s)."
-               if report["no_result"] else "")
-            + (f" {len(report['unknown_results'])} result(s) matched no track."
-               if report["unknown_results"] else "")
-        )
-        self.status_label.setText(
-            "MOSS finished. Next: 🎶 Structural Pipeline tab → "
-            "✨ Structural Tag Creator."
-        )
-        QMessageBox.information(
-            self, "MOSS Captioning Complete",
-            f"Wrote raw style + lyrics for {report['matched']} track(s).\n\n"
-            "Next step — format them into the ACE-Step caption and "
-            "[Section]-tagged lyrics:\n\n"
-            "    🎶 Structural Pipeline tab → ✨ Structural Tag Creator\n\n"
-            "That step uses an LLM. If none is configured, open "
-            "⚙ Settings → LLM Provider and pick one (Groq, Gemini and "
-            "OpenRouter all have free tiers).\n\n"
-            "Nothing was destroyed — previous values are in "
-            "caption_before_moss / raw_lyrics_before_moss.",
-        )
-
-    def on_moss_failed(self, err):
-        self.moss_run_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.moss_status.setText(f"Failed: {err}")
-        self.status_label.setText("MOSS captioning failed.")
-        QMessageBox.critical(self, "MOSS Captioning Failed", str(err))
-
-    def open_last_moss_kernel(self):
-        """Open the most recent MOSS kernel's output page in Kaggle."""
-        import webbrowser
-        from workers.kaggle_moss import LAST_KERNEL_REF
-
-        if not LAST_KERNEL_REF:
-            self.moss_status.setText(
-                "No MOSS run yet this session — nothing to open."
-            )
-            return
-        webbrowser.open_new_tab(f"https://www.kaggle.com/code/{LAST_KERNEL_REF}/output")
 
     def on_caption_blend_changed(self, value):
         """Dataset-wide prose/tags blend ratio (persisted with other defaults)."""
@@ -2294,7 +2116,7 @@ class DatasetManager(QMainWindow):
         — Kaggle is used without asking again.
         """
         configured = (self.config.get("caption_backend") or "ace_step").strip().lower()
-        if configured not in ("ace_step", "moss"):
+        if configured != "ace_step":
             return resolve_backend(self.config)      # an explicit choice: honour it
 
         user = (self.config.get("kaggle_user") or "").strip()
@@ -2888,9 +2710,9 @@ class DatasetManager(QMainWindow):
     def _call_mcp_tool(self, server_name, tool_name, args):
         """Invoke a namespaced tool on a configured MCP server.
 
-        Runs on the GUI thread like every other tool here (see
-        ``_rockstar_lookup_tool``, which does the same for a network lookup), so
-        the timeout is deliberately short: a stuck server must not hold the
+        Runs on the GUI thread like every other tool here, so the timeout is
+        deliberately short: a stuck server must not hold the window hostage
+        any longer than an unresponsive website would.
         window hostage any longer than an unresponsive website would.
         """
         from modules.mcp_client import McpUnavailable, call_tool, parse_mcp_servers
@@ -3016,8 +2838,6 @@ class DatasetManager(QMainWindow):
                     "Suggest specific songs/artists/genres to add, and which gaps to fill "
                     "(instruments, tempo, key, era) so the dataset converges on the target sound."
                 )
-            if name == "rockstar_lookup":
-                return self._rockstar_lookup_tool(args)
             # --- Action tools: things the assistant does, not just reports ---
             if name in ("set_track_metadata", "write_caption", "import_lyrics",
                         "find_gaps", "create_virtual_dataset",
@@ -3214,22 +3034,6 @@ class DatasetManager(QMainWindow):
         if unresolved:
             lines.append(f"(not found: {', '.join(str(u) for u in unresolved)})")
         return "\n".join(lines)
-
-    def _rockstar_lookup_tool(self, args):
-        from modules.rockstar_lookup import lookup_rockstar_track, format_lookup
-
-        song = (args.get("song") or "").strip()
-        artist = (args.get("artist") or "").strip()
-        if not song:
-            return "Provide a 'song' (and optionally 'artist')."
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            result = lookup_rockstar_track(artist, song, timeout=15)
-            return format_lookup(result)
-        except Exception as e:  # noqa: BLE001
-            return f"rockstar_lookup error: {e}"
-        finally:
-            QApplication.restoreOverrideCursor()
 
     def on_assistant_error(self, err):
         self._set_assistant_busy(False)
@@ -4709,7 +4513,6 @@ class DatasetManager(QMainWindow):
             self.filter_count_label.setText(f"{shown} of {total} tracks")
         # Keep the track pickers in step with the dataset. Cheap when the track
         # list is unchanged (see TrackPickerButton.set_tracks).
-        self.refresh_moss_track_picker()
         self.refresh_ace_track_picker()
 
     def _matches_filters(self, s):
@@ -6730,95 +6533,6 @@ class DatasetManager(QMainWindow):
         QMessageBox.warning(self, "Transcription Failed", str(err))
 
     # -----------------------------------------------------------------------
-    # Rockstar multitrack-existence lookup (metadata only + disclaimer)
-    # -----------------------------------------------------------------------
-    def start_rockstar_lookup(self):
-        selected = self.get_selected_sample()
-        if not selected:
-            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
-            return
-        base = Path(selected.get("filename", "")).stem.replace("_", " ").replace("-", " - ")
-        parts = [p.strip() for p in base.split(" - ", 1)]
-        artist = parts[0] if len(parts) > 1 else ""
-        song = parts[1] if len(parts) > 1 else parts[0]
-
-        song, ok = QInputDialog.getText(self, "Rockstar Track Check", "Song:", text=song)
-        if not ok or not song.strip():
-            return
-        artist, ok2 = QInputDialog.getText(self, "Rockstar Track Check", "Artist:", text=artist)
-        if not ok2:
-            return
-
-        self.rockstar_btn.setEnabled(False)
-        self.status_label.setText(f"Checking multitrack availability: {song.strip()}…")
-        self.rockstar_worker = RockstarLookupWorker(artist.strip(), song.strip(), parent=self)
-        self.rockstar_worker.finished_ok.connect(self.on_rockstar_result)
-        self.rockstar_worker.failed.connect(self.on_rockstar_failed)
-        self.rockstar_worker.start()
-
-    def on_rockstar_result(self, result):
-        self.rockstar_btn.setEnabled(True)
-        exists = result.get("exists")
-        if exists is None:
-            verdict = "⚠️ Search failed (offline or blocked)"
-        elif exists:
-            verdict = "✅ Multitrack stems appear to EXIST"
-        else:
-            verdict = "❌ No multitrack references surfaced in public indices"
-        lines = [
-            f"<b>{html.escape(result.get('artist', ''))} — {html.escape(result.get('song', ''))}</b>",
-            verdict, "",
-            html.escape(result.get("note", "")),
-        ]
-        matches = result.get("matches") or []
-        if matches:
-            lines.append("")
-            lines.append("References (titles + sites only):")
-            for m in matches:
-                idx = " 📋 index" if m.get("index") else ""
-                lines.append(f"  • {html.escape(m.get('title', ''))} ({html.escape(m.get('domain', '?'))}){idx}")
-        lines.append("")
-        lines.append("This lookup reports existence only — it provides no files and no links.")
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Rockstar Track Check")
-        dialog.resize(720, 520)
-        lay = QVBoxLayout(dialog)
-        browser = QTextBrowser()
-        browser.setHtml("<br>".join(l.replace("\n", "<br>") for l in lines))
-        lay.addWidget(browser, 1)
-        row = QHBoxLayout()
-        disclaim_btn = QPushButton("⚠️ Show Disclaimer (what NOT to do)")
-        disclaim_btn.clicked.connect(self._show_rockstar_disclaimer)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dialog.accept)
-        row.addWidget(disclaim_btn)
-        row.addStretch()
-        row.addWidget(close_btn)
-        lay.addLayout(row)
-        dialog.exec()
-
-    def on_rockstar_failed(self, err):
-        self.rockstar_btn.setEnabled(True)
-        self.status_label.setText("Rockstar check failed.")
-        QMessageBox.warning(self, "Rockstar Check Failed", str(err))
-
-    def _show_rockstar_disclaimer(self):
-        from modules.rockstar_lookup import disclaimer_text
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("⚠️ Disclaimer — What NOT to Do")
-        dialog.resize(760, 620)
-        lay = QVBoxLayout(dialog)
-        browser = QTextBrowser()
-        browser.setPlainText(disclaimer_text())
-        lay.addWidget(browser, 1)
-        close_btn = QPushButton("I Have Read It and Will Do None of It")
-        close_btn.clicked.connect(dialog.accept)
-        lay.addWidget(close_btn)
-        dialog.exec()
-
-    # -----------------------------------------------------------------------
     # Structural Tag Creator
     # -----------------------------------------------------------------------
     def _tag_creator_artist(self):
@@ -6911,64 +6625,8 @@ class DatasetManager(QMainWindow):
         QMessageBox.warning(self, "Tag Creator Failed", str(err))
 
     # -----------------------------------------------------------------------
-    # MusicBrainz enrichment + dataset stats
+    # Dataset statistics
     # -----------------------------------------------------------------------
-    def start_musicbrainz_lookup(self):
-        selected = self.get_selected_sample()
-        if not selected:
-            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
-            return
-        base = Path(selected.get("filename", "")).stem.replace("_", " ").replace("-", " - ")
-        parts = [p.strip() for p in base.split(" - ", 1)]
-        artist = parts[0] if len(parts) > 1 else ""
-        song = parts[1] if len(parts) > 1 else parts[0]
-        song, ok = QInputDialog.getText(self, "MusicBrainz", "Song:", text=song)
-        if not ok or not song.strip():
-            return
-        artist, ok2 = QInputDialog.getText(self, "MusicBrainz", "Artist:", text=artist)
-        if not ok2:
-            return
-        self.musicbrainz_btn.setEnabled(False)
-        self.status_label.setText(f"Looking up {song.strip()} on MusicBrainz…")
-        self.musicbrainz_worker = MusicBrainzWorker(artist.strip(), song.strip(), parent=self)
-        self.musicbrainz_worker.finished_ok.connect(self.on_musicbrainz_result)
-        self.musicbrainz_worker.failed.connect(self.on_musicbrainz_failed)
-        self.musicbrainz_worker.start()
-
-    def on_musicbrainz_result(self, result):
-        self.musicbrainz_btn.setEnabled(True)
-        sample = self.get_selected_sample()
-        if not result.get("ok"):
-            QMessageBox.information(self, "MusicBrainz", result.get("note", "No match."))
-            return
-        lines = [
-            f"<b>{result.get('artist')} — {result.get('title')}</b>",
-            "Year: " + (result.get("year") or "unknown")
-            + (f" | Country: {result.get('country')}" if result.get("country") else ""),
-        ]
-        if result.get("genres"):
-            lines.append("Genres: " + ", ".join(result["genres"]))
-        lines.append("")
-        lines.append("Apply the genre / year to the selected track?")
-        reply = QMessageBox.question(
-            self, "MusicBrainz", "<br>".join(lines), QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.Yes and sample:
-            self.record_snapshot()
-            if not (sample.get("genre") or "").strip() and result.get("genres"):
-                sample["genre"] = result["genres"][0]
-            sample["year"] = result.get("year", "")
-            sample["country"] = result.get("country", "")
-            self.refresh_table()
-            self.on_table_selection_changed()
-            self.status_label.setText(f"Applied MusicBrainz metadata for {sample.get('filename', '')}.")
-        else:
-            self.status_label.setText("MusicBrainz metadata not applied.")
-
-    def on_musicbrainz_failed(self, err):
-        self.musicbrainz_btn.setEnabled(True)
-        QMessageBox.warning(self, "MusicBrainz Failed", str(err))
-
     def show_stats_report(self):
         from modules.stats import build_dataset_report as compute_stats_charts
 
@@ -7192,7 +6850,7 @@ class DatasetManager(QMainWindow):
         """Default bulk-rename: keep only the song name, spaces -> underscores.
 
         Strips a leading track number ("01 - ...") and an "Artist - " prefix
-        (the app's MusicBrainz convention), then replaces whitespace runs with
+        (the app's "Artist - Song" convention), then replaces whitespace runs with
         underscores. Extension is preserved by the caller.
         """
         stem = os.path.splitext(name)[0]

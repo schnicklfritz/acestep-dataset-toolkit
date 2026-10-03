@@ -160,11 +160,11 @@ def test_valid_and_blank_slugs_are_accepted():
 
 
 def test_a_bad_unrelated_slug_does_not_fail_this_run(monkeypatch):
-    """MOSS must not fail because the CAPTION weights field is wrong."""
+    """A wrong slug elsewhere must not fail this run."""
     _patch(monkeypatch, _FakeApi())
     config = {"kaggle_user": "someone", "kaggle_key": "KGAT_abc",
               "caption_audio_dataset": "me/my-weights"}
-    result = kg.probe_kaggle(config, slugs=(config.get("moss_model_dataset"),))
+    result = kg.probe_kaggle(config, slugs=(None,))
     assert result["problems"] == []
 
 
@@ -200,7 +200,6 @@ def test_the_preflight_fails_on_a_bad_slug_alone(monkeypatch):
 
 @pytest.mark.parametrize("path", [
     "workers/caption.py",           # ACE-Step captioner
-    "workers/kaggle_moss.py",       # MOSS-Audio
     "workers/kaggle_lyrics.py",     # Kaggle lyrics
     "workers/kaggle_stems.py",      # Demucs stems
     "workers/structure.py",         # SongFormer structure

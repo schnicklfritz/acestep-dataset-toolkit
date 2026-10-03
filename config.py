@@ -22,41 +22,10 @@ DEFAULT_CONFIG = {
     "kaggle_model_dataset": "michelmoalem9b/acestep-captioner-model",  # cached captioner weights
     # Suppress the "Before You Add Tracks" dataset-quality warnings dialog.
     "suppress_add_track_warnings": False,
-    # ---- MOSS (open model captioning on a Kaggle GPU) ----
-    # MOSS-Music is the music-specialised model ("music-captioning, lyrics-asr,
-    # chord-recognition"); MOSS-Audio is general audio. Both are ~17 GiB and
-    # shard across Kaggle's two T4s. Swap to
-    # "OpenMOSS-Team/MOSS-Audio-8B-Instruct" for the general model -- the kernel
-    # derives the repo and class names from whichever id is set.
-    "moss_model_id": "OpenMOSS-Team/MOSS-Music-8B-Instruct",
-    # Optional: a private Kaggle dataset holding the weights. Set this to skip a
-    # ~17 GiB download inside the kernel on every run.
-    "moss_model_dataset": "",
-    # Empty = use the built-in prompts in workers/kaggle_moss.py.
-    "moss_style_prompt": "",
-    "moss_lyrics_prompt": "",
-    "moss_max_tokens": 1024,
-    # One MOSS pass covers ~120 s (hard encoder limit); 110 leaves headroom.
-    "moss_chunk_seconds": 110,
     # Structural Tag Creator: which artist's vocabulary to offer the model.
     # Empty = use the dataset name as a hint ("sabbath" -> Black Sabbath).
-    # Unrecognised = cross-artist fundamentals only. See docs/vocabulary.json.
+    # Unrecognised = cross-artist fundamentals only.
     "tag_creator_artist": "",
-    # Attention backend. Empty = leave it to the model/transformers.
-    #
-    # WHY THIS IS EMPTY BY DEFAULT: MOSS's audio encoder config pins
-    # "_attn_implementation": "eager" for the Whisper layers, and the encoder
-    # does deepstack feature injection through forward hooks. Forcing a
-    # different backend at the top level might not reach the encoder, and
-    # changing it is untested -- so the default stays out of the way.
-    #
-    # Options are "sdpa" / "flash_attention_2" / "eager". Note that
-    # flash-attn does NOT support Turing (T4, sm_75) at all; its README points
-    # Turing users at a separate fork with only a subset of features. It is only
-    # worth setting on an Ampere+ allocation (A100 / L4), and installing it
-    # needs `pip install flash-attn --no-build-isolation` plus a multi-minute
-    # CUDA compile.
-    "moss_attn_implementation": "",
     # ---- Lyrics tidy (contraction -> phonetic table + -ing exceptions) ----
     # Empty = use the shipped defaults in modules/lyrics_normalizer.py.
     "lyrics_contractions": {},
@@ -151,7 +120,6 @@ DEFAULT_CONFIG = {
     "lyrics_initial_prompt": "",      # e.g. "1970s hard rock by Black Sabbath"
     # ---- Caption backend (pluggable providers) ----
     #   ace_step  = ACE-Step captioner (Qwen2.5-Omni) on a Kaggle GPU  [default]
-    #   moss      = MOSS-Audio (open model) on a Kaggle GPU — raw style + lyrics
     #   gemini    = Google Gemini (audio-native)
     #   deepseek  = DeepSeek LLM (text-only synthesis)
     #   custom    = any OpenAI-compatible endpoint (vLLM / Ollama / local or rented GPU)
