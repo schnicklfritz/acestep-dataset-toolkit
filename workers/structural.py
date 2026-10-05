@@ -416,7 +416,7 @@ class StructuralPipelineWorker(QThread):
         # 4. Push, wait, download
         self.progress.emit(60, "Pushing caption kernel to Kaggle GPU...")
         push_kernel(self.config, kernel_dir, kernel_slug)
-        ok = wait_kernel_done(self.config, kernel_slug)
+        wait_kernel_done(self.config, kernel_slug)
         out_dir = os.path.join(temp_dir, "output")
         download_kernel_output(self.config, kernel_slug, out_dir)
 
@@ -577,7 +577,6 @@ class StructuralPipelineBatchWorker(QThread):
             worker.progress.connect(lambda p, msg, idx=idx, total=total:
                 self.progress.emit(int((idx/total)*100 + (p/total)),
                                    f"[{idx+1}/{total}] {msg}"))
-            worker.step_completed.connect(lambda step, data: None)
             worker.pipeline_finished.connect(lambda tid, result: self.track_done.emit(tid, result))
             worker.error_occurred.connect(self.error_occurred.emit)
 

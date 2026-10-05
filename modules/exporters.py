@@ -74,10 +74,10 @@ def export_jsonl(samples, path):
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
 
 
-def export_sidecar_captions(samples, dest_dir, name_fn=None):
+def export_sidecar_captions(samples, dest_dir):
     """Write ``<stem>.txt`` next to the track (or in ``dest_dir`` when copying).
 
-    ``name_fn(sample)`` returns the caption text; default = caption or tags.
+    The text is the sample's caption, falling back to its tag.
     Returns the number written.
     """
     dest_dir = Path(dest_dir)
