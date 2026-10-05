@@ -370,7 +370,6 @@ class DatasetManager(QMainWindow):
         # 🛡️ GLOBAL CLASS ATTRIBUTE GUARDS: Declare early to eliminate initial initialization AttributeErrors
         self.lyrics_engine_combo = QComboBox()
         self.import_json_manifest_btn = None
-        self.sync_meta_btn = None
         self.normalize_btn = None
         self.transcribe_btn = None
         # The window is assembled at the end of init_ui by ui.shell.install_shell
@@ -576,11 +575,6 @@ class DatasetManager(QMainWindow):
         self.import_json_manifest_btn.setToolTip("Instantly loads your schema-enforced 1.5XL caption and lyrics tags to fix placeholders.")
         self.import_json_manifest_btn.clicked.connect(self.import_acestep_15xl_tags)
         audit_strip.addWidget(self.import_json_manifest_btn)
-
-        self.sync_meta_btn = QPushButton("🔄 Sync Metadata Guards")
-        self.sync_meta_btn.setToolTip("Forces health report alerts to match your manifest properties, clearing false warnings.")
-        self.sync_meta_btn.clicked.connect(self.force_sync_manifest_to_metadata)
-        audit_strip.addWidget(self.sync_meta_btn)
 
         self.normalize_btn = QPushButton("🎚️ Fix && DSP Normalize")
         self.normalize_btn.clicked.connect(self.start_dsp_normalize)
@@ -3602,11 +3596,6 @@ class DatasetManager(QMainWindow):
     # Structural Pipeline Methods
     # -----------------------------------------------------------------------
     def run_structural_pipeline(self):
-        # ---- Read the active track layout options ----
-        stem_source = self.struct_stem_combo.currentText()
-        use_deepseek = self.struct_deepseek_check.isChecked()
-
-        
         # ---- Determine which tracks to process based on scope ----
         scope = self.struct_scope_combo.currentText().strip()
         all_samples = self.dataset.get("samples", [])
@@ -5514,40 +5503,6 @@ class DatasetManager(QMainWindow):
         )
 
         self.status_label.setText("DSP normalization finished. Dataset is ready to edit.")
-
-# Metadata Correction Script
-    def force_sync_manifest_to_metadata(self):
-        """
-        Runs an explicit reconciliation script pass over the active collection.
-        Forces the internal health reports to respect your canonical metadata fields,
-        overwriting false 4/4 auto-detection warnings.
-        """
-        samples = self.dataset.get("samples", [])
-        if not samples:
-            self.status_label.setText("Synchronization skipped: Dataset contains no track rows.")
-            return
-
-        # 1. Initiate atomic snapshot backup
-        self.record_snapshot()
-        reconciled_count = 0
-
-        for sample in samples:
-            sid = sample.get("id", "")
-
-            # Fetch the actual metadata values defined in your manifest
-            canonical_time_sig = str(sample.get("timesignature", "4/4")).strip()
-
-        # 3. 🛡️ THE SIGNAL BLOCKER GATEWAY: Pause table signals before updating cell properties
-        self.table.blockSignals(True)
-        try:
-            self.refresh_table()
-            self.on_table_selection_changed()
-        finally:
-            self.table.blockSignals(False) # Securely restore signals regardless of compilation output
-
-        self.status_label.setText(f"Manifest sync pass finished! Reconciled {reconciled_count} tracks.")
-        QMessageBox.information(self, "Metadata Alignment Pass Complete",
-                                f"Successfully matched {reconciled_count} tracks.")
 
     def import_acestep_15xl_tags(self):
         """
