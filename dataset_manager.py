@@ -2674,65 +2674,8 @@ class DatasetManager(QMainWindow):
         self.assistant_status.setText("Thinking…" if busy else "Ready.")
 
     def _assistant_tools(self):
-        """The tool list for one assistant turn: app tools plus MCP tools.
-
-        MCP discovery spawns server processes, so it runs once per session (and
-        again when the user asks to reload) rather than on every message. A
-        server that will not start is reported once in the transcript and left
-        out — not retried, and not allowed to prevent the app's own tools from
-        being offered.
-        """
-        if getattr(self, "_mcp_specs", None) is None:
-            from modules.mcp_client import gather_specs, parse_mcp_servers
-
-            servers = parse_mcp_servers(self.config.get("mcp_servers"))
-            self._mcp_specs, self._mcp_problems = gather_specs(servers)
-            if self._mcp_problems:
-                self.assistant_history.append(
-                    "<i>⚙ MCP: "
-                    + html.escape("; ".join(str(p) for p in self._mcp_problems))
-                    + "</i>"
-                )
-        return list(ASSISTANT_TOOLS) + list(self._mcp_specs or [])
-
-    def reload_mcp_tools(self):
-        """Re-discover MCP tools after the server list in ⚙ Settings changed."""
-        self._mcp_specs = None
-        self._mcp_problems = []
-        tools = self._assistant_tools()
-        return tools, getattr(self, "_mcp_problems", [])
-
-    def save_and_reload_mcp(self):
-        """Bridge alias so settings tab UI button works."""
-        if hasattr(self, "reload_mcp_tools"):
-            return self.reload_mcp_tools()
-
-    def _call_mcp_tool(self, server_name, tool_name, args):
-        """Invoke a namespaced tool on a configured MCP server.
-
-        Runs on the GUI thread like every other tool here, so the timeout is
-        deliberately short: a stuck server must not hold the window hostage
-        any longer than an unresponsive website would.
-        window hostage any longer than an unresponsive website would.
-        """
-        from modules.mcp_client import McpUnavailable, call_tool, parse_mcp_servers
-
-        server = next(
-            (s for s in parse_mcp_servers(self.config.get("mcp_servers"))
-             if s["name"] == server_name),
-            None,
-        )
-        if server is None:
-            return (
-                f"MCP server '{server_name}' is not configured. Add it in ⚙ "
-                "Settings (MCP servers), then reload tools."
-            )
-        try:
-            return call_tool(server, tool_name, args or {}, timeout=15.0)
-        except McpUnavailable:
-            return 'MCP tools unavailable: pip install "mcp[cli]".'
-        except Exception as e:  # noqa: BLE001 — one bad server must not kill the turn
-            return f"MCP tool '{server_name}__{tool_name}' failed: {e}"
+        """The tool list for one assistant turn."""
+        return list(ASSISTANT_TOOLS)
 
     def _start_assistant(self):
         from modules.llm_client import get_client
@@ -2843,13 +2786,6 @@ class DatasetManager(QMainWindow):
                         "find_gaps", "create_virtual_dataset",
                         "normalize_audio", "stage_temp_mp3"):
                 return self._run_assistant_action(name, args)
-            # Anything still namespaced here came from a configured MCP server
-            # (modules/mcp_client.py). Native tools never contain "__".
-            from modules.mcp_client import split_tool_name
-
-            server, tool = split_tool_name(name)
-            if server:
-                return self._call_mcp_tool(server, tool, args)
             return f"Unknown tool: {name}"
         except Exception as e:  # noqa: BLE001
             return f"Tool error: {e}"

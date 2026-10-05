@@ -13,7 +13,6 @@ widget-building code lives, not the object model it builds.
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QScrollArea, QFrame, QWidget,
     QGroupBox, QLabel, QLineEdit, QCheckBox,
-    QPlainTextEdit,
     QPushButton,
 )
 # Scroll-wheel-guarded value widgets (see modules/wheel_guard.py): the wheel
@@ -219,58 +218,6 @@ def build_settings_tab(manager, parent):
     manager._on_llm_provider_changed()
 
     layout.addWidget(llm_grp)
-
-    # ---- MCP servers: tools the assistant reaches outside this app ----
-    # Shown as raw JSON rather than a table: it is a config list, it stays
-    # hand-editable, and the shape is one small object per server.
-    import json as _json
-
-    mcp_grp = QGroupBox("🔌 MCP servers (extra tools for the assistant)")
-    mcp_form = QFormLayout(mcp_grp)
-    mcp_form.setContentsMargins(8, 18, 8, 8)
-
-    manager.mcp_servers_edit = QPlainTextEdit()
-    stored = manager.config.get("mcp_servers") or []
-    try:
-        manager.mcp_servers_edit.setPlainText(_json.dumps(stored, indent=2))
-    except (ValueError, TypeError):
-        manager.mcp_servers_edit.setPlainText("[]")
-    manager.mcp_servers_edit.setPlaceholderText(
-        '[\n  {"name": "dataset", "command": "python",\n'
-        '   "args": ["mcp_server.py", "--dataset", "dataset.json"]}\n]'
-    )
-    manager.mcp_servers_edit.setToolTip(
-        "JSON array of stdio MCP servers. Each server's tools appear to the "
-        'assistant as "<name>__<tool>" alongside the built-in ones. '
-        'Install the client with: pip install "mcp[cli]"'
-    )
-    manager.mcp_servers_edit.setMaximumHeight(150)
-    mcp_form.addRow("Servers:", manager.mcp_servers_edit)
-
-    mcp_note = QLabel(
-        'Each server is a command plus args, run locally. Without the optional '
-        'package the app still runs — it just offers no MCP tools. '
-        'The app ships one: <code>mcp_server.py</code> (dataset).'
-    )
-    mcp_note.setWordWrap(True)
-    mcp_note.setProperty("muted", True)
-    mcp_note.setProperty("small", True)
-    mcp_form.addRow(mcp_note)
-
-    manager.mcp_status = QLabel("Not loaded yet — save to discover tools.")
-    manager.mcp_status.setWordWrap(True)
-    manager.mcp_status.setProperty("muted", True)
-    mcp_form.addRow(manager.mcp_status)
-
-    reload_btn = QPushButton("Save && Reload MCP Tools")
-    reload_btn.setToolTip(
-        "Validate the JSON, store it, then start each server once to list its "
-        "tools. Reported in the Assistant transcript if any server fails."
-    )
-    reload_btn.clicked.connect(manager.reload_mcp_tools)
-    mcp_form.addRow(reload_btn)
-
-    layout.addWidget(mcp_grp)
 
     pipe_grp = QGroupBox("🎛 Pipeline && Model Defaults")
     p_form = QFormLayout(pipe_grp)

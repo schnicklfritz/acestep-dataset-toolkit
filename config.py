@@ -179,12 +179,5 @@ DEFAULT_CONFIG = {
     "assistant_remember": True,        # persist the conversation across sessions
     "assistant_context_size": 40,      # max messages kept in context
     "assistant_linear_thinking": True, # step-by-step reasoning
-    # ---- MCP servers offered to the assistant ----
-    # stdio servers this app connects to; each server's tools are exposed as
-    # "<server>__<tool>" next to the built-in ones. JSON array, hand-editable:
-    #   [{"name": "dataset", "command": "python",
-    #     "args": ["mcp_server.py", "--dataset", "dataset.json"]}]
-    # Requires the optional package: pip install "mcp[cli]"
-    "mcp_servers": [],
 }
 

@@ -150,15 +150,8 @@ The built-in assistant (DeepSeek or any LLM provider) exposes **tools** it can
 call against your dataset: dataset summary, list tracks, instrument lookup,
 caption audit, manifest validation, health scan, instrument detection, **sound
 profile**, and **curate dataset for a target sound** (picks the genre/artist/
-instrument gaps to fill so the dataset converges on a specific sound).
-
-### MCP server
-The app ships **one** optional MCP server (needs `pip install "mcp[cli]"`):
-
-1. **Dataset server** — `python mcp_server.py --dataset path/to/dataset.json`.
-   Exposes dataset summary, tagging, and curation tools to any MCP client
-   (Claude Desktop, Cursor, Cline, custom agents). This is rare in dataset apps —
-   your dataset becomes directly steerable by AI.
+instrument gaps to fill so the dataset converges on a specific sound). This is
+rare in dataset apps — your dataset becomes directly steerable by AI.
 
 The invocation vocabulary is hand-maintained (there is no generator), read
 at prompt time:
@@ -236,7 +229,6 @@ Optional extras:
 ```bash
 pip install google-genai            # Gemini caption backend
 pip install whisperx                # lyrics transcription (needs torch + transformers)
-pip install "mcp[cli]"              # MCP server
 pip install transformers torch      # CLAP zero-shot instrument tagging
 ```
 
@@ -293,7 +285,6 @@ pip install transformers torch      # CLAP zero-shot instrument tagging
 dataset_manager.py          Entry point (PySide6 desktop app)
 config.py                   Defaults + secret-key policy + settings.json
 stem_separator.py           MVSEP 3-stage separation (PolarFormer first stage)
-mcp_server.py               MCP server — dataset tools (optional, needs `mcp`)
 models.json                 Curated model catalog (sources, backend, notes, leaderboards)
 modules/
   tagger.py                 BPM/key + spectral/CLAP instrument tagging, hybrid captions
@@ -303,8 +294,6 @@ modules/
   lyrics.py                 WhisperX lyrics (optional)
   llm_client.py             Pluggable LLM providers (DeepSeek/Gemini/Groq/OpenRouter/local)
   model_manager.py          Catalog downloader (HF / GitHub)
-  mcp_tools.py              Headless tools for the MCP server
-  mcp_compat.py             mcp 1.x FastMCP / 2.x MCPServer import shim
   vocabulary.py             Invocation vocabulary loader (artist-scoped)
   kaggle.py                 Private audio-dataset upload + kernel push/wait/download
   caption_kaggle_run.py     ACE-Step local staging (MP3), versioned dataset, caption diff/merge

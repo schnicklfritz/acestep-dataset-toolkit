@@ -126,7 +126,7 @@ def summarize_dataset(dataset):
     return "\n".join(lines)
 
 
-# Shared with the MCP server (kept headless — no Qt dependency here).
+# Re-exported for dataset_manager (kept here so this module stays Qt-free).
 from modules.sound_profile import build_sound_profile  # noqa: E402
 
 

@@ -1,6 +1,6 @@
 """Dataset sound-profile summarizer (headless — no Qt dependency).
 
-Shared by the AI assistant's curation skill and the MCP server.
+Shared by the AI assistant's curation skill.
 """
 
 
