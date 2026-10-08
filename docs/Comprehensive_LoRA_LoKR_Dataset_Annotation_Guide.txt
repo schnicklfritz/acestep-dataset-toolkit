@@ -19,6 +19,40 @@ Language	        Creative, evocative, natural	                 Concrete, factual
 
 ****The Omission Principle
 
+****How the two conditioning streams are actually wired (verified from source):
+caption and lyrics are never merged into a single prompt string. They are
+encoded as two independent channels, and the model cross-attends to both:
+
+    def prepare_condition(                 # acestep/models/sft/modeling_acestep_v15_base.py:1657-1673
+        self,
+        text_hidden_states: torch.FloatTensor,        # caption stream (256 token cap)
+        text_attention_mask: torch.Tensor,
+        lyric_hidden_states: torch.FloatTensor,       # lyric stream (512 token cap in training)
+        lyric_attention_mask: torch.Tensor,
+        refer_audio_acoustic_hidden_states_packed: torch.FloatTensor,
+        refer_audio_order_mask: torch.Tensor,
+        hidden_states: torch.FloatTensor,
+        attention_mask: torch.Tensor,
+        silence_latent: torch.FloatTensor,
+        src_latents: torch.FloatTensor,
+        chunk_masks: torch.Tensor,
+        is_covers: torch.Tensor,
+        precomputed_lm_hints_25Hz: Optional[torch.FloatTensor] = None,
+        audio_codes: torch.FloatTensor = None,
+    ):
+
+Both streams are passed to self.encoder(...) and returned as one
+(encoder_hidden_states, encoder_attention_mask) pair (same file, lines
+1676-1683), which is what the diffusion transformer cross-attends to. So a
+lyric-bracket descriptor and a caption tag are parallel conditioning on the
+same generation, and the adapter receives gradient from both.
+
+Training consequence (this guide's recommendation, not a code constraint): do
+not name the same feature in both streams. A descriptor written into both the
+caption and every lyric bracket gives the adapter two independent, always-on
+predictors of the same acoustic feature, so the trigger has to out-compete
+both and ends up as a blend instead of a clean on/off switch.
+
 The rule that governs every annotation decision:
 
     If a feature appears in every song in your dataset, it must not appear in any caption or lyric descriptor. The trigger tag is the only name for that feature.
@@ -82,7 +116,24 @@ Every tag in the wrong example is a constant across a Bon Scott-era dataset. The
 
 3.2 Caption Length
 
-The caption has a maximum budget of 512 tokens (roughly 350 words). Front-load 5–12 keywords, maximum 15, followed by 2–3 sentences of flow narrative.
+There is no caption-only token limit. The caption is inserted into the fixed training template
+
+    # Instruction
+    Fill the audio semantic mask based on the given conditions:
+
+    # Caption
+    {your caption}
+
+    # Metas
+    - bpm: ...
+    - timesignature: ...
+    - keyscale: ...
+    - duration: ... seconds
+    <|endoftext|>
+
+(acestep/constants.py:160-168, SFT_GEN_PROMPT) and the whole assembled string is tokenized with max_length=256, truncation=True (acestep/training/dataset_builder_modules/preprocess_text.py:18-24; the v2 preprocessor uses the same 256 cap). Because the metadata block sits after the caption, an over-long caption is what silently consumes the bpm/timesignature/keyscale/duration lines, and the sample then trains on a prompt with no metadata at all. The same 256-token cap applies at inference (acestep/core/generation/handler/conditioning_text.py:127-133), so an over-long caption cannot be used for generation either.
+
+Budget: front-load 5–12 keywords (hard maximum 15) and keep the caption to roughly 80–110 words, then confirm the assembled prompt with the tokenizer. Roughly 350 words of caption is already past the cap for this template.
 
 3.3 Mono Recordings
 
@@ -108,7 +159,7 @@ Solo	            pentatonic, blues-based leads, vibrato, explosive
 
 4. Lyric Annotation for LoKR Training
 
-Every song lyric file requires explicit structural layout and acoustic formatting. The SFT model enforces a strict 2,048-token limit for lyrics; ensure your training data truncation boundaries match this limit to prevent model misalignment.
+Every song lyric file requires explicit structural layout and acoustic formatting. Two different limits apply, and the tighter one wins: during training the lyric string is tokenized with max_length=512, truncation=True (acestep/training/dataset_builder_modules/preprocess_lyrics.py:6-12), while inference allows 2048 tokens (acestep/core/generation/handler/conditioning_text.py:137-144). Keep every lyric file inside 512 tokens. Past that, the tail of the song is silently dropped during training while still being singable at inference — exactly the train/inference misalignment you want to avoid.
 
 4.1 Structural Markers
 
@@ -175,6 +226,10 @@ The ALL CAPS lines are correct because the vocalist is genuinely belting. If he 
 
 4.5 Punctuation Removal
 
+****Evidence note (corrected): punctuation does not break a 25 Hz text grid. The "25 Hz" figure in ACE-Step is a latent rate, not a text rate: the only operation prepare_condition applies to the Lyric hints is a length crop to the latent sequence (precomputed_lm_hints_25Hz[:, :src_latents.shape[1], :], acestep/models/sft/modeling_acestep_v15_base.py:1690), and that tensor replaces src_latents only when is_covers is set (same file:1699). Nothing there constrains punctuation or line length. Punctuation also has no fixed token cost: the lyric channel is tokenized with truncation at 2048 tokens at inference (acestep/core/generation/handler/conditioning_text.py:137-144) and at 512 tokens during training (acestep/training/dataset_builder_modules/preprocess_lyrics.py:6-12).
+
+The rule below is therefore hygiene, not a frame-alignment requirement — and it is still worth following, because the tokenizer is sub-word based, so punctuation is either stripped by the normalizer or billed as its own token for no benefit.
+
 Remove all punctuation that the model is not trained to interpret: quotation marks ("), periods (.), question marks (?), exclamation marks (!), backslashes (\), and any other non-phonetic punctuation at the end of lines.
 
 Why: The lyric normalizer handles punctuation removal, emoji stripping, and case folding. Punctuation inside lyrics is noise for the tokenizer and can cause misalignment.
@@ -185,7 +240,7 @@ There is a vital difference between grammatical punctuation and acoustic punctua
 
     Trailing commas at the end of a line (word,\n): Bad. The newline (\n) already signals the phrase boundary. A comma at the end of a line is redundant noise that can cause trailing hesitation, vocal fry, or rhythmic stuttering.
 
-    Inline commas inside a line (word, word): Helpful, but only when used acoustically. In LLM-based text encoders (like Qwen in ACE-Step), an inline comma acts as a caesura (a musical breath mark or micro-pause of ~150–300ms).
+    Inline commas inside a line (word, word): Helpful, but only when used acoustically. In LLM-based text encoders (like Qwen in ACE-Step), an inline comma acts as a caesura (a musical breath mark or micro-pause).
 
 
 Wrong:
@@ -213,8 +268,8 @@ don't	    dont
 didn't	    didnt
 isn't	    isnt
 aren't	    arent
-I've	    ive
-I'm         im 
+I've	    Ive
+I'm         Im 
 you've	    youve
 you're	    youre
 that's	    thats
@@ -266,6 +321,8 @@ Dropped -ing endings: If the vocalist drops the final g, write the dropped form:
 
 4.8 Backing Vocals and Parentheses
 
+****Parentheses identify secondary vocal material. Their position on the lyric line is used to indicate where the secondary vocal overlaps or follows the lead, but this should be treated as an empirical convention rather than a precisely documented timing language.
+
 When a verse contains a mixture of vocal styles—such as starting solo, hitting a gang-shouted unison phrase, answering with an echo, and finishing with an overlap—you do not split the verse into dozens of tiny brackets.
 
 Instead, use the Macro/Micro Rule:
@@ -288,18 +345,19 @@ In your section marker, declare the most complex interaction present in the vers
 
 
 Line Type in the Verse	     How to Write It	                     Example
-Solo Lead (Normal)	         Lowercase, no parentheses	             well me and the boys are out to have fun
+Solo Lead (Normal)	         Lowercase, no parentheses	             Well me and the boys are out to have fun
 Solo Lead (Shouted)	         ALL CAPS, no parentheses	             GET OUT OF MY WAY
-Full Band Unison (All)	     ALL CAPS, no parentheses	             WE DO THE DIRTY WORK
-Backing Echo (After)	     (parentheses) below or trailing	     Im a live wire (Live wire)
+Full Band Unison (All)	     ALL CAPS, no parentheses	             BAD BOY BOOGIE
+Backing Echo (After)	     (parentheses) below	                 Im a LIVE WIRE
+                                                                     (LIVE WIRE)
 Backing Lead-in (Before)	 (parentheses) at start of line	         (Look out) here comes the man
-Partial Overlap (During)	 (parentheses) placed at overlap word	 You know I love you so (Please dont go)
 Shouted Gang Backing	     (ALL CAPS IN PARENTHESES)	             (DONE DIRT CHEAP)
 
-Partial Overlap	            Embedded at overlap point	        You know I love you so (Please dont go)
-Unison (Same Words)	        No parentheses + gang vocals tag	[Chorus - gang vocals]     DIRTY DEEDS DONE DIRT CHEAP
-Layered (Different Words)	Parentheses + layered tag	        [Bridge - layered] Neck ties contracts (Done dirt cheap)
-
+Partial Overlap	            Embedded at overlap point	           You know I love you so (Please dont go)
+Unison (Same Words)	        No parentheses + gang vocals tag	   [Chorus - gang vocals]     DIRTY DEEDS DONE DIRT CHEAP
+Layered (Different Words)	Parentheses + layered tag	           [Bridge - layered] Neck ties contracts (DONE DIRT CHEAP)
+Partial Overlap (During)	(parentheses) placed at overlap word	 You know I love you so (Please dont go)
+Harmony                     tag modifier + lead with optional harmony     [Chorus - vocal harmonies]  HIGH VOLTAGE ROCK N ROLL
 When SHOULD You Break It into Multiple Sections?
 
 ****Only break the verse into multiple section brackets if the rhythm section physically stops or shifts structure:
@@ -318,9 +376,17 @@ If 1–2 word echoes happen repeatedly on every line:
 Yes. If every line ends with a 1-word bounce (like "Shes got balls (Balls) / Likes to crawl (Crawl)"), then add the descriptor:
 [Verse 1 - call and response]
 
-4.9 The 2048-Token Lyrics Limit
+4.9 The Lyric Token Budget: 512 in Training, 2048 at Inference
 
-The SFT model has a 2048-token limit for lyrics during inference. Modify your training data's lyric truncation length to be consistent with this limit. If your lyrics exceed 2048 tokens, they will be truncated during training and inference in ways that may not align.
+Two ceilings apply to the same lyric file, and they are not the same number:
+
+Path	Limit	Where it is enforced
+Training	512 tokens	acestep/training/dataset_builder_modules/preprocess_lyrics.py:6-12
+Inference	2048 tokens	acestep/core/generation/handler/conditioning_text.py:137-144
+
+512 tokens is the binding constraint, so treat it as your dataset limit: a 600-token lyric file still trains, but only its first 512 tokens do, so the adapter never learns the ending (while that same file sings to the end at inference). If a song cannot fit in 512 tokens, split it into two samples instead of letting the tail be dropped.
+
+Also note what the lyric channel actually is: a bare string. Training feeds this field verbatim, with a fallback of the literal text [Instrumental] when the field is missing (acestep/training_v2/preprocess.py:262), and embeds it directly (text_encoder.embed_tokens, acestep/training/dataset_builder_modules/preprocess_lyrics.py:24) rather than running the transformer encoder over it. The "# Languages" / "# Lyric" wrapper you see in the generation UI is added at inference only (acestep/core/generation/handler/prompt_utils.py:27-29) — do not write those headers into your dataset files.
 
 5. The Relationship Between Captions and Lyrics
 
@@ -527,29 +593,136 @@ File lookup priority during scanning:
 
     {filename}.caption.txt for captions
 
-JSON Metadata Format
-json
+Sample-Level Metadata: What Is Actually Read, and From Where (verified)
+
+There are two ingestion paths, and they read different things. Only the keys listed below are consumed; any other key in your JSON is silently ignored.
+
+Path A — files on disk sharing the audio basename (the original dataset builder, used when you point it at a directory):
+
+<basename>.caption.txt	caption (acestep/training/dataset_builder_modules/audio_io.py:30-38)
+<basename>.lyrics.txt	lyrics; falls back to <basename>.txt for the older convention (same file:72-85)
+<basename>.json	        sidecar metadata; read keys are exactly caption, bpm, keyscale, timesignature, language (acestep/training/dataset_builder_modules/scan.py:84-97)
+<basename>.csv	        per-file rows matched by filename; read keys are bpm, key, caption (same file:99-108)
+the audio file itself	duration is measured from the audio, never read from metadata (same file:54, audio_io.py:88-108)
+
+Precedence on Path A: sidecar .json overrides .caption.txt, then CSV overrides both. custom_tag, tag_position, genre_ratio and all_instrumental are dataset-level fields on this path, not per-sample ones — writing "custom_tag" into a per-sample .json does nothing here. A lyrics file present for a track also forces is_instrumental=false (scan.py:66-68), as does a sidecar language other than "instrumental" (scan.py:94-97).
+
+Path B — one dataset JSON (v2 "Side-Step" preprocessing, --dataset-json):
 
 {
-  "custom_tag": "acdc_bon",
-  "tag_position": "prepend",
-  "caption": "acdc_bon, mid-tempo swagger, party anthem, ...",
-  "bpm": 122,
-  "keyscale": "E Minor",
-  "timesignature": "4",
-  "language": "en"
+  "metadata": {
+    "custom_tag": "acdc_bon",
+    "tag_position": "prepend",
+    "genre_ratio": 0
+  },
+  "samples": [
+    {
+      "audio_path": "audio/song1.flac",
+      "filename": "song1.flac",
+      "caption": "acdc_bon, mid-tempo swagger, party anthem, ...",
+      "lyrics": "[Verse 1]\n...",
+      "genre": "",
+      "bpm": 122,
+      "keyscale": "E Minor",
+      "timesignature": "4",
+      "duration": 197,
+      "is_instrumental": false,
+      "custom_tag": "acdc_bon",
+      "prompt_override": "caption"
+    }
+  ]
 }
 
-SFT note: For SFT, accurate bpm, keyscale, and timesignature are essential because CFG guidance uses these as conditioning signals. Turbo can tolerate inaccurate metadata; SFT cannot. Common metadata errors to correct: a Major → A Major, a mAJOR → A Major, E major → E Major.
+Rules that actually bite on Path B (all in acestep/training_v2/):
+
+    The top level may also be a bare JSON array of samples (preprocess_discovery.py:42). The dataset-level "metadata" block is only read when the top level is an object, so with a bare array you get tag_position=prepend, genre_ratio=0 and no default trigger (:157-175).
+
+    audio_path is used first, filename only as fallback (:50). Relative paths resolve against the directory holding the dataset JSON, not your shell's working directory (:48-55). A sample whose file cannot be found is skipped with a warning (:56-59), and if no file resolves at all the run falls back to scanning --audio-dir (:66-70).
+
+    Per-sample metadata is indexed by filename, by basename when filename contains a path, and by the basename of audio_path (:111-122); the encode-time lookup uses only the audio file's own name (preprocess.py:260). So "filename" must be either absent or exactly the real file name — a path there is tolerated, a wrong name is not.
+
+    Any audio file that is not matched receives defaults that look like real data: caption = file stem with "_" and "-" turned into spaces, lyrics = "[Instrumental]", genre = "", duration = 0, is_instrumental = true (:127-140). An unmatched dataset is the most common way to produce an adapter that trains fine and learns nothing from your captions.
+
+    prompt_override is a STRING, "caption" or "genre" — not a boolean (preprocess_prompt.py:30, 43-52). Any other value, including true/false, is ignored and the caption is used.
+
+    custom_tag placement follows tag_position: prepend yields "{tag}, {caption}", append yields "{caption}, {tag}", replace discards the caption (preprocess_prompt.py:54-61). A dataset-level custom_tag only fills samples that have no custom_tag of their own (preprocess.py:111-116).
+
+    duration must be filled in. It is written into the metadata string verbatim, and the default when the key is missing is 0 (preprocess_prompt.py:66-73), which trains the sample on the literal text "- duration: 0 seconds". Path A measures duration from the audio instead, so the two paths disagree on duration unless you supply it.
+
+    genre is only used for the samples picked by genre_ratio, or for a sample whose prompt_override is "genre" (preprocess_prompt.py:47-52). A blank genre combined with a non-zero genre_ratio trains those samples on an empty caption.
+
+    language is not read at all on Path B, and on Path A it only sets sample.language (plus the instrumental flag). In neither path does it reach the encoded prompt — it is a generation-time control. Do not rely on a "language" key to change training behaviour.
+
+Interop warning — the dataset toolkit's training export does not currently match this contract. acestep-dataset-toolkit (modules/dataset_schema.py:92-96 and 129-145, modules/exporters.py:131-137) writes each sample's path as file_name and its flag as instrumental, and emits an empty top-level "metadata" block. ACE-Step reads neither name — it looks for audio_path/filename (acestep/training_v2/preprocess_discovery.py:50) and is_instrumental (acestep/training_v2/preprocess.py:300), and it takes custom_tag, tag_position and genre_ratio from "metadata". An export handed over as-is therefore resolves no audio files from the JSON (with --audio-dir present it falls back to a directory scan instead), and whatever does load is trained on default captions, default lyrics and "- duration: 0 seconds". Until the exporter is updated, remap the export before training, or the annotation work in this guide never reaches the adapter:
+
+    file_name -> filename, plus audio_path if the loader should use a path
+    instrumental -> is_instrumental
+    "metadata": {} -> {"custom_tag": "<trigger>", "tag_position": "prepend", "genre_ratio": 0}
+    every sample: add a measured "duration" value
+
+The Metadata String Handed to the Text Encoder (verified)
+
+Whichever path you use, the four metadata values end up serialized in exactly this shape and order, with the literal string N/A standing in for an empty value:
+
+- bpm: 122
+- timesignature: 4
+- keyscale: E Minor
+- duration: 197 seconds
+
+(acestep/training/dataset_builder_modules/preprocess_utils.py:16-23; acestep/training_v2/preprocess_prompt.py:63-73.)
+
+What that means for annotation:
+
+    There are exactly four fields, so extra metadata keys you invent never reach the model. The values are copy-pasted verbatim into the prompt: no key spelling is normalized, so "E Minor" and "E minor" become different tokens. Pick one casing for the whole dataset.
+
+    A blank value is not dropped; it becomes the tokens for N/A. If you can hear the tempo but not the key, a reasonable approximation teaches more than N/A in every sample.
+
+    duration is the one field you cannot leave out on the JSON path: missing means "0 seconds" (see above), a mismatch with the real audio, and the model is told the wrong length for that track.
+
+Dataset-Level Prompt Controls: tag_position, genre_ratio, custom_tag
+
+tag_position and custom_tag are covered above. The third one is the most often misused:
+
+    genre_ratio (0-100) is the percentage of samples that are prompted with the genre field instead of the caption. The selection is a deterministic shuffle seeded with 42, so the same dataset always selects the same samples (acestep/training_v2/preprocess_discovery.py:181-201; the older builder uses the same seed in preprocess_utils.py:7-13).
+
+    genre_ratio=0 (the default) means the genre field is never used, at which point a genre field in your JSON is harmless but also pointless.
+
+    If you do set it above 0, every selected sample needs a real genre string, or those samples train with an empty prompt. It is also worth remembering that the samples chosen are arbitrary from the model's point of view — a 20% genre_ratio means 20% of your dataset is annotated inconsistently with the other 80%.
+
+SFT note (corrected): bpm, keyscale and timesignature are not CFG guidance inputs. They reach the model purely as the "# Metas" text block above, inside the same 256-token prompt as the caption (acestep/constants.py:160-168), so they are prompt conditioning and nothing else. --cfg-ratio is unrelated to them: it is the probability that the caption condition is dropped during training (default 0.15, acestep/training_v2/configs.py:142, applied in fixed_lora_module.py:313-317). Accuracy still matters — an inaccurate value is taught to the adapter as fact — but no guidance mechanism reads it. Common metadata errors to correct: a Major → A Major, a mAJOR → A Major, E major → E Major.
 
 Model Variant Selection for Preprocessing
 
-Use --model-variant sft for preprocessing. The preprocessing must use the same model variant that will be used for training, because the text encoder and DiT encoder are variant-specific.
+Use --model-variant sft for preprocessing. The preprocessing must use the same model variant that will be used for training, because the text encoder, the VAE and the silence latent are variant-specific (the variant selects the checkpoint subfolder the silence latent is loaded from).
+
+Audio constraints the preprocessor imposes, which are worth knowing before you master sources (acestep/training/dataset_builder_modules/preprocess_audio.py:4-21, called from acestep/training_v2/preprocess.py:243-244):
+
+    Everything is resampled to 48 kHz (TARGET_SR = 48000, acestep/training_v2/preprocess_vae.py:18). Sample rate is handled for you; it is not a dataset-creation decision.
+
+    Mono is duplicated to two channels, and audio with more than two channels is cut down to the first two (:12-15). So mono is still a real production property worth annotating (section 3.3), but it never reaches the model as a mono layout.
+
+    Audio longer than --max-duration is truncated from the end, keeping the head (default 240.0 s, acestep/training_v2/cli/args.py:318-322). A six-minute track trains on its first four minutes only. Trim deliberately — keep the musically complete portion — or raise the flag and pay the VRAM cost.
+
+The relevant preprocessing flags are --preprocess, --audio-dir, --dataset-json, --tensor-output and --max-duration (acestep/training_v2/cli/args.py:318-322). Preprocessing tokenizes every caption and lyric into frozen tensors: the finished .pt file holds target_latents, attention_mask, encoder_hidden_states, encoder_attention_mask, context_latents and the metadata copy, and no training step re-reads your JSON or your .txt files afterwards (acestep/training_v2/preprocess.py:435-445). Practical consequence: fix metadata errors in the JSON and re-run preprocessing. Editing the JSON alone changes nothing about an already-preprocessed dataset.
 
 Variant	Command Flag	When to Use
 SFT	                         --model-variant sft	Your use case — LoKR training
 Base	                     --model-variant base	Special tasks (lego/complete/extract)
 Turbo	                     --model-variant turbo	Fast generation only — not for LoKR
+
+Verification Before Training (the checks that catch silent data loss)
+
+    1. Every audio file resolves. On Path B the loader needs audio_path or a filename equal to the real file name; unmatched files are not errors, they are defaults (preprocess_discovery.py:50, 127-140). Count the "[Side-Step] Loaded metadata for N samples" line against your file count.
+
+    2. duration is populated for every sample. A missing duration becomes "- duration: 0 seconds" in the prompt (preprocess_prompt.py:66-73).
+
+    3. Captions are not empty. An empty caption with prompt_override absent trains the sample on the wrapper text alone.
+
+    4. Lyric files are inside 512 tokens. Longer lyrics are silently truncated at preprocessing (preprocess_lyrics.py:6-12).
+
+    5. Tracks are within --max-duration, or were trimmed on purpose. The tail beyond the cap never enters training (preprocess_audio.py:17-19).
+
+    6. The trigger tag is in the caption exactly as the adapter will be prompted later. tag_position=replace discards your caption entirely (preprocess_prompt.py:60-61); tag_position=prepend adds the tag in front of it.
 
 8. Master Checklist for LoKR Dataset Annotation
 
@@ -560,14 +733,17 @@ Step	Action
 4	Rewrite captions to describe only song-specific variables
 5	Rewrite lyric brackets to describe only song-specific variation
 6	Apply Tier 1 / Tier 2 / Tier 3 apostrophe and phonetic rules to all lyrics
-7	Remove all punctuation from lyrics (periods, commas, quotes, question marks, exclamation marks)
-8	Capitalize only sections that are genuinely shouted/belted
-9	Keep lines between 6–10 syllables for normal sung lines
-10	Use parentheses only for clear backing vocals in the audio
-11	Verify every lyric line against the audio for accuracy
-12	Normalize all metadata (keyscale casing, BPM, time signature)
-13	Ensure all files have matching basenames (.flac, .lyrics.txt, .caption.txt, .json)
-14	Run the dataset builder with --model-variant sft
+7	Remove all punctuation from lyrics (periods, quotes, question marks, exclamation marks)
+8   Remove all punctuation at the end of a line, except )
+9   Inline commas may be retained only when they intentionally represent a brief vocal pause.
+10	Capitalize only sections that are genuinely shouted/belted
+11	Keep lines between 6–10 syllables for normal sung lines
+12	Use parentheses only for clear backing vocals in the audio
+13	Verify every lyric line against the audio for accuracy
+14	Normalize all metadata (keyscale casing, BPM, time signature)
+15	Ensure all files have matching basenames (.flac, .lyrics.txt, .caption.txt, .json)
+16	Run the dataset builder with --model-variant sft
+17	Confirm that every sample resolved (each file name matched), that duration is populated for every sample, and that no lyric file exceeds 512 tokens
 
 9. The One-Sentence Rule
 
@@ -592,7 +768,7 @@ DATASET PARAMETERS:
 
 YOUR TASK:
 For each audio file provided, generate:
-1. A CAPTION (max 512 characters) that describes only song-specific variables.
+1. A CAPTION (80-110 words; front-load 5-12 keywords, hard maximum 15) that describes only song-specific variables. The caption goes into a fixed prompt template whose total budget is 256 tokens, and the metadata lines sit after the caption, so an over-long caption silently cuts off the bpm/keyscale/timesignature/duration lines.
 2. LYRICS with structural markers and descriptors that describe only song-specific variation.
 
 CAPTION FORMAT:
@@ -606,7 +782,7 @@ Maximum 3 descriptors per bracket, attached with a dash: [Verse 1 - whispered, s
 Do NOT use constant descriptors (e.g., raspy vocal, explosive, high energy) in brackets. Use only song-specific variation.
 
 LYRIC TEXT RULES:
-1. Remove ALL punctuation: periods, commas, question marks, exclamation marks, quotation marks, backslashes.
+1. Remove ALL punctuation: periods, question marks, exclamation marks, quotation marks, backslashes.
 2. UPPERCASE only for genuine shouted/belted lines. Lowercase for normal sung lines.
 3. Keep lines between 6 and 10 syllables for optimal beat alignment.
 4. Use parentheses ( ) only for clear backing vocals or call-and-response in the audio.
@@ -617,7 +793,7 @@ LYRIC TEXT RULES:
 6. Dropped -ing endings: goin, lyin, waitin, tryin, nothin, somethin
 7. Words that stay as dictionary words: gonna, wanna, gotta, gimme, em, til, round, mm, ah-uh-huh, ooh, yeah
 8. Separate sections with a blank line.
-
+9. Remove all puntuation at the end of a line except )
 OUTPUT FORMAT (JSON only):
 {
   "caption": "<trigger_tag>, <song-specific variables>. <flow narrative>.",
@@ -629,5 +805,7 @@ OUTPUT FORMAT (JSON only):
 }
 
 Do NOT include any text outside this JSON structure.
+
+Note on duration: do not guess or estimate it. duration is required for training (a missing value trains the sample with the literal metadata text "- duration: 0 seconds"), and it must be measured from the audio file itself, so fill it in programmatically after annotation rather than asking the LLM for it. The "language" field is kept for your records: it does not reach the model during training.
 
 This guide and prompt represent the first comprehensive reference for ACE-Step 1.5 XL LoKR dataset annotation. The omission principle, phonetic rules, and caption-lyric relationship described here are derived from official ACE-Step training documentation, community field reports, and direct analysis of LoKR adapter behavior. Apply them consistently, and your trigger will function as a clean on/off switch for the trained style.
