@@ -10,27 +10,59 @@ class TestExportJson:
     @pytest.fixture
     def written(self, dataset, tmp_path):
         path = tmp_path / "train.json"
-        export_json(dataset["samples"], str(path))
+        export_json(dataset, str(path))
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def test_uses_ace_step_field_names(self, written):
+    def test_uses_ace_step_1_5_field_names(self, written):
         s = written["samples"][0]
-        assert "file_name" in s
-        assert "instrumental" in s
+        for key in ("id", "audio_path", "filename", "caption", "genre",
+                    "lyrics", "raw_lyrics", "formatted_lyrics", "bpm",
+                    "keyscale", "timesignature", "duration", "language",
+                    "is_instrumental", "custom_tag", "labeled",
+                    "prompt_override"):
+            assert key in s
 
-    @pytest.mark.parametrize("internal", ["audio_path", "is_instrumental", "filename"])
-    def test_no_internal_underscore_names_leak(self, written, internal):
-        assert internal not in written["samples"][0]
+    @pytest.mark.parametrize("v1_name", ["file_name", "instrumental"])
+    def test_ace_step_v1_names_never_leak(self, written, v1_name):
+        # file_name/instrumental are ACE-Step v1 names; the v2 trainer reads
+        # audio_path/filename and is_instrumental instead.
+        assert v1_name not in written["samples"][0]
 
-    def test_instrumental_flag_is_a_bool(self, written):
-        flags = [s["instrumental"] for s in written["samples"]]
+    def test_is_instrumental_flag_is_a_bool(self, written):
+        flags = [s["is_instrumental"] for s in written["samples"]]
         assert all(isinstance(f, bool) for f in flags)
         assert flags == [False, True]
 
     def test_trainable_fields_present(self, written):
         for key in ("genre", "caption", "lyrics", "bpm", "keyscale",
-                    "language", "prompt_override"):
+                    "timesignature", "duration", "language",
+                    "prompt_override"):
             assert key in written["samples"][0]
+
+    def test_prompt_override_is_null_not_a_bool(self, written):
+        # The trainer compares prompt_override against the strings
+        # "caption"/"genre"; null (not false) is the canonical "no override".
+        assert all(s["prompt_override"] is None for s in written["samples"])
+
+    def test_metadata_block_reaches_the_file(self, dataset, tmp_path):
+        """Regression: export_json hard-coded {"metadata": {}}.
+
+        ACE-Step reads custom_tag / tag_position / genre_ratio from it, so an
+        empty block meant no trigger word and no caption/genre policy ever
+        reached a training run.
+        """
+        dataset["metadata"]["custom_tag"] = "mytrigger"
+        path = tmp_path / "meta.json"
+        export_json(dataset, str(path))
+        meta = json.loads(path.read_text(encoding="utf-8"))["metadata"]
+        assert meta["custom_tag"] == "mytrigger"
+        assert meta["tag_position"] == "prepend"
+        assert meta["genre_ratio"] == 0
+        assert meta["all_instrumental"] is False
+
+    def test_audio_path_is_relative_or_bare_not_renamed(self, written):
+        assert written["samples"][0]["audio_path"] == "./songs/song_a.mp3"
+        assert written["samples"][0]["filename"] == "song_a.mp3"
 
     def test_dropped_bookkeeping_absent(self, written):
         for key in ("locked", "spatial_tokens", "chunk_paths"):
@@ -80,10 +112,9 @@ class TestVirtualTracksNeverExport:
         assert errors == []
 
         manifest = json.loads((tmp_path / "dataset.json").read_text(encoding="utf-8"))
-        # ``to_export_sample`` maps ``file_name`` from audio_path (preferred) or
-        # filename, so the real track appears under its path. What matters here
-        # is that the placeholder is ABSENT, not which name the real one got.
-        names = [s["file_name"] for s in manifest["samples"]]
+        # ``audio_path`` is emitted verbatim, so the real track appears under
+        # its path. What matters here is that the placeholder is ABSENT.
+        names = [s["audio_path"] for s in manifest["samples"]]
         assert names == ["./real.wav"]
         assert "virtual_01_doom.wav" not in names
 

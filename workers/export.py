@@ -36,7 +36,7 @@ class ExportWorker(QThread):
             samples = exporters.for_export(samples)
 
             if self.options.get("json"):
-                exporters.export_json(samples, Path(dest) / "dataset.json")
+                exporters.export_json(self.dataset, Path(dest) / "dataset.json")
                 done.append("JSON")
             if self.options.get("csv"):
                 exporters.export_csv(samples, Path(dest) / "dataset.csv")

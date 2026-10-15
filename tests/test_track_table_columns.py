@@ -243,7 +243,7 @@ def test_marking_a_track_instrumental_clears_the_language(manager):
     # And the cell is re-rendered, so it cannot keep showing "en".
     assert _lang_item(manager).data(LANG_ROLE) == LANG_INSTRUMENTAL
     # The boundary name the training loader reads.
-    assert to_export_sample(samples[0])["instrumental"] is True
+    assert to_export_sample(samples[0])["is_instrumental"] is True
 
 
 def test_choosing_the_instrumental_language_option_sets_the_flag(manager):
@@ -253,7 +253,7 @@ def test_choosing_the_instrumental_language_option_sets_the_flag(manager):
     item.setText(LANG_INSTRUMENTAL)
     assert samples[0]["is_instrumental"] is True
     assert samples[0]["language"] == ""
-    assert to_export_sample(samples[0])["instrumental"] is True
+    assert to_export_sample(samples[0])["is_instrumental"] is True
 
 
 def test_choosing_a_real_language_clears_the_instrumental_flag(manager):
@@ -265,7 +265,7 @@ def test_choosing_a_real_language_clears_the_instrumental_flag(manager):
     item.setText("ja")
     assert samples[0]["language"] == "ja"
     assert samples[0]["is_instrumental"] is False
-    assert to_export_sample(samples[0])["instrumental"] is False
+    assert to_export_sample(samples[0])["is_instrumental"] is False
 
 
 def test_the_language_cell_keeps_the_inspector_checkbox_in_step(manager):
@@ -358,12 +358,13 @@ def test_a_bad_bpm_reverts_the_cell_instead_of_writing(manager):
 
 
 def test_the_exported_sample_always_carries_an_explicit_boolean(manager):
-    """``instrumental`` is the only carrier of "no vocals" now that ``language``
-    may legitimately be blank, so it must never be absent from the export."""
-    assert to_export_sample(new_sample(filename="a.mp3"))["instrumental"] is False
+    """``is_instrumental`` is the only carrier of "no vocals" now that
+    ``language`` may legitimately be blank, so it must never be absent from
+    the export."""
+    assert to_export_sample(new_sample(filename="a.mp3"))["is_instrumental"] is False
     assert to_export_sample(
         new_sample(filename="b.mp3", is_instrumental=True)
-    )["instrumental"] is True
+    )["is_instrumental"] is True
 
 
 def test_english_is_not_treated_as_instrumental(manager):

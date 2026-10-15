@@ -17,6 +17,7 @@ translated *into* the boolean ``all_instrumental`` while the original key is
 left in place, so nothing downstream breaks mid-migration.
 """
 import datetime
+import os
 
 # ---------------------------------------------------------------------------
 # metadata
@@ -79,77 +80,151 @@ SAMPLE_DEFAULTS = {
 # ---------------------------------------------------------------------------
 # ACE-Step export mapping
 # ---------------------------------------------------------------------------
-# The app's internal field names differ from the names ACE-Step's training
-# preprocessor expects. Emitting the internal names would make the preprocessor
-# silently fail to parse those values (falling back to NaN / defaults), so the
-# JSON handed to training must use the authoritative keys below.
+# The app's internal sample fields ARE ACE-Step 1.5's canonical field names.
 #
-#   internal            ->  ACE-Step key     type
-#   audio_path          ->  file_name        str
-#   is_instrumental     ->  instrumental     bool
+# Verified against the trainer itself, not against any doc:
+#   ACE-Step-1.5/docs/sidestep/Dataset Preparation.md -> the "Full ACE-Step
+#     format" example lists, in order: id, audio_path, filename, caption,
+#     genre, lyrics, raw_lyrics, formatted_lyrics, bpm, keyscale,
+#     timesignature, duration, language, is_instrumental, custom_tag, labeled,
+#     prompt_override. That is this module's SAMPLE_DEFAULTS, minus the
+#     app-internal keys below.
+#   ACE-Step-1.5/acestep/training_v2/preprocess_discovery.py:48-50 -> a
+#     relative ``audio_path`` resolves against the dataset JSON's own folder.
+#   ACE-Step-1.5/acestep/training_v2/preprocess_discovery.py:110-122 ->
+#     per-sample metadata is indexed by ``filename``, falling back to the
+#     basename of ``audio_path``.
+#   ACE-Step-1.5/acestep/training_v2/preprocess_prompt.py:43-52 -> the
+#     ``prompt_override`` comparison is against the STRINGS "caption"/"genre".
 #
-# Everything else is emitted under its internal name.
-EXPORT_FIELD_MAP = {
-    "filename": "file_name",
-    "audio_path": "file_name",
-    "is_instrumental": "instrumental",
-}
+# So the export is a PASS-THROUGH, not a rename. An earlier revision renamed
+# ``audio_path``/``filename`` -> ``file_name`` and ``is_instrumental`` ->
+# ``instrumental``, and emitted ``prompt_override`` as a bool. ``file_name``
+# and ``instrumental`` are ACE-Step *v1* names, not the trainer this toolkit
+# feeds, and ``True`` is not a value ``preprocess_prompt`` ever compares
+# against -- so each of those renames silently mis-named a real field.
+#
+# Kept as an (empty) seam in case a future ACE-Step renames fields again.
+EXPORT_FIELD_MAP = {}
 
-# Keys written by a training-export (in order). `audio_path` and `filename`
-# both map to file_name, so only the first present is used.
+# App-internal bookkeeping that is not part of ACE-Step's sample schema.
+# ``virtual`` is also filtered upstream (``exporters.for_export``); dropping it
+# here means a sample can never carry it into a manifest by accident.
+EXPORT_DROPPED_FIELDS = (
+    "virtual",
+    "structural_segments",
+    "spatial_tokens",
+    "stem_paths",
+    "chunk_paths",
+    "locked",                   # transient flag the table editor stamps on a row
+)
+
+# Keys written by a training export, in ACE-Step 1.5's documented order.
 EXPORT_SAMPLE_FIELDS = (
     "id",
+    "audio_path",
     "filename",
-    "genre",
     "caption",
-    "prompt_override",
+    "genre",
     "lyrics",
+    "raw_lyrics",
+    "formatted_lyrics",
     "bpm",
     "keyscale",
     "timesignature",
+    "duration",
     "language",
     "is_instrumental",
+    "custom_tag",
+    "labeled",
+    "prompt_override",
 )
+
+# Metadata keys ACE-Step does not read. ``instrumental_mode`` is the toolkit's
+# legacy key; ``all_instrumental`` carries the same fact in the canonical shape.
+EXPORT_METADATA_DROPPED = ("instrumental_mode",)
+
+
+def _canonical_filename(sample):
+    """The bare basename ACE-Step wants in ``filename``.
+
+    ``preprocess_discovery.py:110-122`` indexes per-sample metadata by
+    ``filename`` first and only falls back to the basename of ``audio_path``,
+    so an unset or pathed ``filename`` is reduced here to keep that key
+    unambiguous and to match the documented example (``"track1.mp3"``).
+    """
+    name = (sample.get("filename") or "").strip()
+    if not name:
+        name = (sample.get("audio_path") or "").strip()
+    return os.path.basename(name)
 
 
 def to_export_sample(sample):
-    """Convert one internal sample dict into ACE-Step training JSON.
+    """Convert one internal sample dict into ACE-Step 1.5 training JSON.
 
-    Applies ``EXPORT_FIELD_MAP`` and drops app-internal bookkeeping
-    (``locked``, ``spatial_tokens``, ``structural_segments``, ``raw_lyrics``,
-    ``labeled``, ``stem_paths``, ``chunk_paths``) that training does not read.
+    A pass-through with three jobs:
 
-    ``file_name`` is taken from ``audio_path`` when present (the pointer the
-    loader needs), otherwise from ``filename``.
+    * ``EXPORT_DROPPED_FIELDS`` never reaches training.
+    * ``audio_path``, ``filename``, ``is_instrumental``, ``duration`` and
+      ``prompt_override`` are always present, so the trainer's silent
+      fallbacks (``preprocess.py:295,300`` -> ``duration`` 0 and
+      ``is_instrumental`` True) and its string comparison
+      (``preprocess_prompt.py:47-52``) see the intended value rather than a
+      default.
+    * ``prompt_override`` is normalised to ``None`` unless it is one of the two
+      strings ACE-Step compares against. It is NOT a boolean and must never be
+      coerced into one: an earlier revision emitted ``True``, and the trainer
+      ignores every value except ``"caption"``/``"genre"``.
     """
     out = {}
     for key in EXPORT_SAMPLE_FIELDS:
         if key not in sample:
             continue
-        target = EXPORT_FIELD_MAP.get(key, key)
-        if target == "file_name":
-            # Prefer the real path; filename is only a fallback.
-            if out.get("file_name"):
-                continue
-            value = sample.get("audio_path") or sample.get("filename") or ""
-        else:
-            value = sample[key]
-        out[target] = value
+        out[EXPORT_FIELD_MAP.get(key, key)] = sample[key]
 
-    # prompt_override must be an explicit boolean for the loader.
-    out["prompt_override"] = bool(sample.get("prompt_override"))
-    # ...and so must instrumental. It is the ONLY carrier of "no vocals" once
-    # ``language`` may legitimately be blank (blank == instrumental, see
-    # LANG_INSTRUMENTAL), so it ships on every sample with an explicit default
-    # rather than only when the internal key happened to exist.
-    out["instrumental"] = bool(sample.get("is_instrumental"))
+    for key in EXPORT_DROPPED_FIELDS:
+        out.pop(key, None)
+
+    # Canonical values, always present, with the same defaults the trainer
+    # assumes when a key is missing.
+    out["filename"] = _canonical_filename(sample)
+    if not (out.get("audio_path") or "").strip():
+        # The trainer falls back to ``filename`` itself
+        # (``preprocess_discovery.py:50``); filling it here keeps the manifest
+        # self-sufficient.
+        out["audio_path"] = out["filename"]
+    out["duration"] = sample.get("duration", 0) or 0
+    out["is_instrumental"] = bool(sample.get("is_instrumental"))
+
+    override = sample.get("prompt_override")
+    out["prompt_override"] = override if override in ("caption", "genre") else None
     return out
 
 
 def to_export_dataset(dataset):
-    """Whole-dataset conversion for training export."""
+    """Whole-dataset conversion for training export.
+
+    Emits the canonical two-layer shape ACE-Step 1.5 accepts: a top-level
+    ``metadata`` block plus ``samples``
+    (``docs/sidestep/Dataset Preparation.md``, "Full ACE-Step format").
+
+    Regression this guards: an earlier revision of ``exporters.export_json``
+    bypassed this function and hand-rolled ``{"metadata": {}, ...}``, so
+    ``custom_tag``, ``tag_position`` and ``genre_ratio`` were discarded
+    entirely -- no trigger word and no caption/genre policy ever reached
+    training (``preprocess_discovery.py:145-177`` reads all three from here).
+    """
     samples = dataset.get("samples", []) or []
-    meta = dict(dataset.get("metadata", {}) or {})
+    meta = {
+        key: value
+        for key, value in dict(dataset.get("metadata", {}) or {}).items()
+        if key not in EXPORT_METADATA_DROPPED
+    }
+    # The manifest must describe itself. ``normalize_dataset`` recomputes this on
+    # load/save, but a caller that never normalized (a test, an export script)
+    # would otherwise ship ``num_samples: 0`` next to N real samples. Assigning
+    # in place keeps the canonical key order when it was already present.
+    meta["num_samples"] = len(samples)
     return {
         "metadata": meta,
         "samples": [to_export_sample(s) for s in samples],

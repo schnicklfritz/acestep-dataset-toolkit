@@ -49,9 +49,11 @@ def for_export(samples):
     use it — but it is not training data, so it must never appear in a manifest,
     a CSV row, a JSONL line, a sidecar, or a train/val folder.
 
-    This is the ONE place that decision is made. ``to_export_sample`` cannot make
-    it: it strips the ``virtual`` key but still emits a row, with ``file_name``
-    falling back to a ``virtual_01_*.wav`` that does not exist on disk.
+    This is the ONE place that decision is made for CSV / JSONL / sidecars /
+    folders. ``to_export_sample`` cannot make it: it strips the ``virtual`` key
+    but still emits a row, whose ``audio_path``/``filename`` would point at a
+    ``virtual_01_*.wav`` that does not exist on disk. (``export_json`` applies
+    it again to the dataset it is handed, so it is correct standalone too.)
     """
     return [s for s in samples if not s.get("virtual")]
 
@@ -69,9 +71,17 @@ def export_csv(samples, path):
 
 
 def export_jsonl(samples, path):
+    """One canonical sample object per line.
+
+    Routed through ``to_export_sample`` so a JSONL line carries the same field
+    names as the manifest, and no app-internal keys (``virtual``,
+    ``structural_segments``, ...) leak into a downstream tool that reads it.
+    """
+    from modules.dataset_schema import to_export_sample
+
     with open(path, "w", encoding="utf-8") as f:
         for s in samples:
-            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+            f.write(json.dumps(to_export_sample(s), ensure_ascii=False) + "\n")
 
 
 def export_sidecar_captions(samples, dest_dir):
@@ -125,15 +135,23 @@ def export_folders(samples, dest_dir, val_ratio=0.2, seed=42, stratify=True):
     return {"train": len(train), "val": len(val)}
 
 
-def export_json(samples, path):
-    """Write the dataset as ACE-Step training JSON.
+def export_json(dataset, path):
+    """Write the dataset as ACE-Step 1.5 training JSON.
 
-    Uses the authoritative field names (``file_name``, ``instrumental``) via
-    modules.dataset_schema.to_export_sample — emitting the app's internal names
-    here would make the training preprocessor silently mis-parse those values.
+    Takes the *whole dataset*, not a bare sample list: ACE-Step reads a
+    dataset-level ``metadata`` block (``custom_tag``, ``tag_position``,
+    ``genre_ratio``) that a sample list cannot supply
+    (``acestep/training_v2/preprocess_discovery.py:145-177``). The field names
+    come from ``modules.dataset_schema.to_export_dataset`` so the canonical
+    mapping stays in exactly one place.
+
+    Regression this guards: this function used to hand-roll
+    ``{"metadata": {}, ...}``, which discarded the entire metadata block -- the
+    trigger word and the caption/genre policy never reached training.
     """
-    from modules.dataset_schema import to_export_sample
+    from modules.dataset_schema import to_export_dataset
 
-    payload = {"metadata": {}, "samples": [to_export_sample(s) for s in samples]}
+    document = dict(dataset or {})
+    document["samples"] = for_export(document.get("samples", []) or [])
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+        json.dump(to_export_dataset(document), f, indent=2, ensure_ascii=False)
