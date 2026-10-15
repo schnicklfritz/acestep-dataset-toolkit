@@ -1,3 +1,33 @@
+Never truly delete anything.  Put everything that is deleted in a separate folder called deletions and then make sure deletions is in .gitignore.  If it is not in .getignore, then add it.
+Do not assume anything.  Treat you training data as obsolete.  Before writing any code, ask user questions for context.  Be comprehensive.
+
+# ============================================================
+# NEVER DELETE ANYTHING (hard rule, non-negotiable)
+# ============================================================
+# Added after a byte-identical duplicate in docs/ was removed without being
+# asked for. It was untracked, so it was unrecoverable. Do not repeat this.
+- Never delete, unlink, truncate, empty, move-to-trash, or move (`mv`) away any
+  file or directory - tracked or untracked, duplicate or not, mine or the user's.
+- FORBIDDEN unless the user names that exact path in the same message:
+  `rm`, `rmdir`, `shred`, `find -delete`, `truncate`, `> file`, `git rm`,
+  `git clean`, `git checkout -- <path>`, IDE/editor delete, trash, or any
+  tool's delete path.
+- Byte-identical duplicates, backups, "copy 1"/"(1)" files, stale drafts and
+  generated artifacts are NOT mine to remove. If a file looks redundant: report
+  the exact path and the reason, then STOP. The user decides.
+- Removal is allowed ONLY when the user explicitly asks for that exact path in
+  the same message. Approval for one file NEVER extends to any other file, and
+  never carries over to a later message.
+- Never reach a removal indirectly: no `sed -i` line deletions, no
+  "rewrite the file without section X", no overwriting a file with a version
+  that drops content the user had.
+- If a task appears to need a deletion, treat it as a SEPARATE step: list the
+  paths, explain why, and wait for an explicit yes.
+- If a deletion is ever approved: copy the file into `deletions/` FIRST, ensure
+  `deletions/` is in `.gitignore`, and only then remove the original.
+
+
+
 # Context Optimization Rules for DeepSeek Coder
 - NEVER read entire binary or data files like wav, mp3, flac, or zip.
 - You are strictly forbidden from running recursive global searches across 'project_backups/' or 'structural_slices/'. 

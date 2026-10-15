@@ -74,3 +74,11 @@ workers/Experientiallabs.txt
 .changed_markers
 .changed_markers.*
 nohup.out
+
+# Rule: nothing is ever truly deleted. Removed files are moved into deletions/
+# instead of being removed, so the folder itself must never be tracked.
+deletions/
+
+# Local safety copies taken before a repair (see the .clinerules backup rule).
+# They are machine-local working state, not source, so they stay untracked.
+*.pre-repair-*
