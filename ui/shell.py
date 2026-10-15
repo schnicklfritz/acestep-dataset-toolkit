@@ -278,7 +278,12 @@ def install_shell(manager, parts, tool_pages, assistant_page, settings_page):
     for grp in parts["bulk"].findChildren(QGroupBox):
         if grp.isCheckable():
             make_collapsible(grp)
-    editor_col = _column(parts["player"], parts["waveform"], parts["bulk"], parts["inspector"])
+    # ``lyrics_limit`` is the ACE-Step token-budget line; it sits directly under
+    # the waveform because that is the panel the lyrics are typed into. It is
+    # read with ``.get`` so a parts dict built by older tooling/tests (without
+    # the widget) still assembles.
+    editor_col = _column(parts["player"], parts["waveform"], parts.get("lyrics_limit"),
+                         parts["bulk"], parts["inspector"])
     manager.center_split = QSplitter(Qt.Horizontal)
     manager.center_split.setChildrenCollapsible(False)
     manager.center_split.addWidget(tracks_col)

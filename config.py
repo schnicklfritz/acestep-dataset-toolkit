@@ -30,6 +30,26 @@ DEFAULT_CONFIG = {
     # Empty = use the shipped defaults in modules/lyrics_normalizer.py.
     "lyrics_contractions": {},
     "lyrics_ing_exceptions": [],
+    # Words whose replacement is a deliberate phonetic spelling used verbatim,
+    # never re-cased to match the source word. "i'm" is here because `I'm` must
+    # become `eyem` and not `Eyem`; without it the tidy pass capitalises the
+    # respelling just because English capitalises the pronoun "I".
+    # Empty = DEFAULT_CASE_FIXED ({"i'm"}) from modules/lyrics_normalizer.py.
+    "lyrics_case_fixed": [],
+    # ---- Lyrics token budget (ACE-Step truncates text silently) ----
+    # ACE-Step cuts text at a fixed token cap with truncation=True and reports
+    # nothing, so a dataset can be full of songs whose tail the model never saw.
+    # modules/lyric_limits.py holds the caps and the source references:
+    #   caption 256 / lyrics-training 512 / lyrics-inference 2048.
+    # lyrics_max_tokens: the enforced lyric cap; 0 = the module default (512,
+    # the trainer's cap, which is the one that governs a training dataset).
+    # Set it to 2048 to target inference, or lower for a stricter budget.
+    "lyrics_max_tokens": 0,
+    # Empty = models/Qwen3-Embedding-0.6B/tokenizer.json, fetched on demand from
+    # the ACE-Step HF repo. Without it the counter falls back to an estimate.
+    "lyrics_tokenizer_path": "",
+    # True once the user has waived the token-limit notice (snarky bypass).
+    "lyrics_limit_ack": False,
     # Per-secret "remember on this device" policy (non-secret, kept in settings.json).
     # When True the secret is stored encrypted (OS keyring / secrets.enc); when
     # False it is used for the current session only and never persisted.

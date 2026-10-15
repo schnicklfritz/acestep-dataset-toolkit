@@ -21,6 +21,15 @@ from modules.dataset_schema import (
     normalize_dataset,
 )
 from modules.dataset_schema import apply_language_choice
+# ACE-Step truncates text at fixed token caps with no warning; these helpers
+# count the real Qwen3 tokens so the UI can show a live budget (see the module
+# docstring for the source references behind the numbers).
+from modules.lyric_limits import (
+    CAPTION_TOKEN_LIMIT,
+    lyric_limit_from_config,
+    measure,
+    tokenizer_path_from_config,
+)
 # The track table's column set/widths live in ONE module (see its docstring:
 # three copies of the index table is how the Instr checkbox and the Actions
 # buttons ended up on the same column).
@@ -717,6 +726,22 @@ class DatasetManager(QMainWindow):
         self.waveform.set_audio(None)
         parts["waveform"] = self.waveform
 
+        # Live token budget for the two text streams ACE-Step truncates: the
+        # vocals (the trainer's 512-token cap) and the caption (256). Sits
+        # directly under the waveform because that is the panel the lyrics are
+        # typed into, so the number is in view while it changes.
+        self.lyrics_limit_label = QLabel("")
+        self.lyrics_limit_label.setWordWrap(True)
+        self.lyrics_limit_label.setTextFormat(Qt.RichText)
+        self.lyrics_limit_label.setToolTip(
+            "ACE-Step cuts text at a fixed token cap with truncation=True and "
+            "reports nothing. Lyrics are capped at 512 tokens for training "
+            "(2048 at inference); captions at 256. Counted with the Qwen3-"
+            "Embedding-0.6B tokenizer ACE-Step itself uses — open the Lyrics "
+            "editor for the full explanation."
+        )
+        parts["lyrics_limit"] = self.lyrics_limit_label
+
         try:
             self.media_player = QMediaPlayer(self)
             self.audio_output = QAudioOutput(self)
@@ -1012,6 +1037,9 @@ class DatasetManager(QMainWindow):
         self.progress_bar.setVisible(False)
 
         self._install_shell(parts, shell_pages)
+        # Show the real ACE-Step budget from the first launch, not only once a
+        # track is selected — the caps are the point of the line.
+        self.update_lyric_limit_label()
 
     # -----------------------------------------------------------------------
     # Settings Tab
@@ -1054,9 +1082,17 @@ class DatasetManager(QMainWindow):
         return container
 
     def init_lyrics_tab(self, parent):
-        """Build the 🎵 Lyrics tab and connect its actions."""
-        from ui.lyrics_tab import build_lyrics_tab
-        build_lyrics_tab(self, parent)
+        """Build the unified Lyrics panel and connect its actions.
+
+        One panel with three inner tabs — Normalize & Tidy, Structure Tags and
+        Studio (see ``ui/lyrics_panel``). It REPLACES the old split, so the
+        three structure-tag rules are no longer built on the "Tags & checks"
+        page; ``build_lyrics_tab`` must not be called as well, or there would be
+        two sets of the same checkboxes and ``manager.<name>`` would resolve to
+        only one of them (see the panel's "BUILD IT ONCE" note).
+        """
+        from ui.lyrics_panel import build_lyrics_panel
+        build_lyrics_panel(self, parent)
 
         self.lyrics_preview_btn.clicked.connect(self.preview_lyrics_tidy)
         self.lyrics_apply_btn.clicked.connect(self.apply_lyrics_tidy)
@@ -1092,11 +1128,16 @@ class DatasetManager(QMainWindow):
 
     def _lyrics_master_rules(self):
         """Master (always-on) rules: settings override, else shipped defaults."""
-        from modules.lyrics_normalizer import DEFAULT_CONTRACTIONS, DEFAULT_ING_EXCEPTIONS
+        from modules.lyrics_normalizer import (
+            DEFAULT_CASE_FIXED,
+            DEFAULT_CONTRACTIONS,
+            DEFAULT_ING_EXCEPTIONS,
+        )
 
         master_c = self.config.get("lyrics_contractions") or dict(DEFAULT_CONTRACTIONS)
         master_i = self.config.get("lyrics_ing_exceptions") or list(DEFAULT_ING_EXCEPTIONS)
-        return dict(master_c), list(master_i)
+        master_f = self.config.get("lyrics_case_fixed") or list(DEFAULT_CASE_FIXED)
+        return dict(master_c), list(master_i), list(master_f)
 
     def load_lyrics_profile(self):
         """Load the selected profile's rules into the tab's table + options."""
@@ -1137,6 +1178,7 @@ class DatasetManager(QMainWindow):
             self.lyrics_contract_table.setItem(r, 1, QTableWidgetItem(profile["contractions"][word]))
 
         self.lyrics_ing_exceptions_edit.setText(", ".join(sorted(profile["ing_exceptions"])))
+        self.lyrics_case_fixed_edit.setText(", ".join(sorted(profile["case_fixed"])))
         self.lyrics_ing_check.setChecked(profile["ing_to_in"])
         self.lyrics_tags_check.setChecked(profile["capitalize_tags"])
         self.lyrics_punct_check.setChecked(profile["strip_punctuation"])
@@ -1148,7 +1190,11 @@ class DatasetManager(QMainWindow):
     def save_lyrics_profile(self):
         """Save the current table + options as a named profile."""
         from modules.lyrics_profiles import save_profile
-        from ui.lyrics_tab import read_contractions_from_table, read_ing_exceptions
+        from ui.lyrics_tab import (
+            read_case_fixed,
+            read_contractions_from_table,
+            read_ing_exceptions,
+        )
 
         name, ok = QInputDialog.getText(
             self, "Save Lyrics Profile",
@@ -1165,6 +1211,7 @@ class DatasetManager(QMainWindow):
             ing_to_in=self.lyrics_ing_check.isChecked(),
             capitalize_tags=self.lyrics_tags_check.isChecked(),
             strip_punctuation=self.lyrics_punct_check.isChecked(),
+            case_fixed=read_case_fixed(self),
         )
         self.refresh_lyrics_profiles(select=name)
         self.lyrics_profile_status.setText(f"Profile <b>{name}</b> saved to {path}")
@@ -1197,12 +1244,17 @@ class DatasetManager(QMainWindow):
         Master = the settings override or the shipped defaults; a profile layers
         on top, overriding master for any word it defines and adding its own.
         """
-        from modules.lyrics_profiles import load_profile, merge_rules
-        from ui.lyrics_tab import read_contractions_from_table, read_ing_exceptions
+        from modules.lyrics_profiles import load_profile, merge_case_fixed, merge_rules
+        from ui.lyrics_tab import (
+            read_case_fixed,
+            read_contractions_from_table,
+            read_ing_exceptions,
+        )
 
-        master_c, master_ing = self._lyrics_master_rules()
+        master_c, master_ing, master_f = self._lyrics_master_rules()
         table_c = read_contractions_from_table(self)
         table_ing = read_ing_exceptions(self)
+        table_f = read_case_fixed(self)
 
         profile_name = self.lyrics_profile_combo.currentText()
         profile = None
@@ -1214,13 +1266,15 @@ class DatasetManager(QMainWindow):
             merged_c, merged_ing = merge_rules(
                 master_c, table_c, master_ing, table_ing
             )
+            merged_f = merge_case_fixed(master_f, table_f)
         else:
-            merged_c, merged_ing = table_c, table_ing
+            merged_c, merged_ing, merged_f = table_c, table_ing, table_f
 
         return {
             "contractions": merged_c,
             "ing_to_in": self.lyrics_ing_check.isChecked(),
             "ing_exceptions": merged_ing,
+            "case_fixed": merged_f,
             "do_capitalize_tags": self.lyrics_tags_check.isChecked(),
             "do_capitalize_lines": self.lyrics_lines_check.isChecked(),
             "do_strip_punctuation": self.lyrics_punct_check.isChecked(),
@@ -1293,6 +1347,9 @@ class DatasetManager(QMainWindow):
         if not targets:
             QMessageBox.warning(self, "Nothing To Tidy", "No tracks match the selected scope.")
             return
+        # Tidy rewrites lyrics on disk — same gate as a manual edit.
+        if not self._lyrics_gate_open():
+            return
 
         opts = self._lyrics_options()
         replace = self.lyrics_replace_check.isChecked()
@@ -1321,6 +1378,13 @@ class DatasetManager(QMainWindow):
         # Persist the (possibly edited) tables so they survive a restart.
         self.config["lyrics_contractions"] = opts["contractions"]
         self.config["lyrics_ing_exceptions"] = sorted(opts["ing_exceptions"])
+        self.config["lyrics_case_fixed"] = sorted(opts["case_fixed"])
+
+        # Re-fill the table from what was just persisted so the capitalised
+        # twins ``read_contractions_from_table`` generated become visible rows
+        # the user can edit, rather than rules that only exist in settings.
+        from ui.lyrics_tab import _fill_contract_table
+        _fill_contract_table(self)
 
         self.refresh_table()
         self.on_table_selection_changed()
@@ -1343,13 +1407,19 @@ class DatasetManager(QMainWindow):
 
     def _lyrics_reset_contracts(self):
         """Restore the master table to the shipped defaults."""
-        from modules.lyrics_normalizer import DEFAULT_CONTRACTIONS, DEFAULT_ING_EXCEPTIONS
+        from modules.lyrics_normalizer import (
+            DEFAULT_CASE_FIXED,
+            DEFAULT_CONTRACTIONS,
+            DEFAULT_ING_EXCEPTIONS,
+        )
         from ui.lyrics_tab import _fill_contract_table
 
         self.config["lyrics_contractions"] = dict(DEFAULT_CONTRACTIONS)
         self.config["lyrics_ing_exceptions"] = sorted(DEFAULT_ING_EXCEPTIONS)
+        self.config["lyrics_case_fixed"] = sorted(DEFAULT_CASE_FIXED)
         _fill_contract_table(self)
         self.lyrics_ing_exceptions_edit.setText(", ".join(sorted(DEFAULT_ING_EXCEPTIONS)))
+        self.lyrics_case_fixed_edit.setText(", ".join(sorted(DEFAULT_CASE_FIXED)))
         self.lyrics_profile_combo.setCurrentIndex(0)
         self.lyrics_profile_status.setText(
             "Master table reset to the shipped defaults; no profile loaded."
@@ -1528,6 +1598,9 @@ class DatasetManager(QMainWindow):
                 "Could not find any “---- filename ----” markers in the block.\n\n"
                 "Press “Load All Lyrics” first so the markers are present.",
             )
+            return
+        # This is the bulk write path — gate it like any other lyrics edit.
+        if not self._lyrics_gate_open():
             return
 
         samples = self.dataset.get("samples", [])
@@ -3050,13 +3123,12 @@ class DatasetManager(QMainWindow):
         tv.addWidget(flow_group("Import && fix", parts["audit_strip"]))
         tv.addWidget(flow_group("Look up", parts["advanced_strip"]))
         tv.addWidget(flow_group("Edit tools", parts["tools_strip"]))
-        # The three structure-tag tidy rules live here, not on the Lyrics tab:
-        # they are tag rules, and this is the tab that already owns the tag
-        # machinery. Built here (not in init_ui) because it needs status_label,
-        # which init_ui creates immediately before calling this method.
-        from ui.tidy_panel import build_tidy_panel
-
-        tv.addWidget(build_tidy_panel(self, tags_page))
+        # The three structure-tag tidy rules USED to be built here. They live on
+        # the unified Lyrics panel now (its "Structure Tags" tab), so the tag
+        # rules sit one click from the contraction rules they are always used
+        # with instead of on a different tool tab. Nothing is left here on
+        # purpose: a second copy would be two sets of checkboxes that could
+        # disagree, and only one of them would be what the tidy pass reads.
         tv.addWidget(pages["organize"], 1)
         self._shell_extra_pages = [lyrics_page, tags_page]
 
@@ -4431,6 +4503,10 @@ class DatasetManager(QMainWindow):
             dur = s.get("duration", 0)
             _put("Duration", _cell(f"{dur}s" if dur else ""))
 
+            # Tint rows whose lyrics exceed the ACE-Step training cap, so an
+            # over-long song is visible without opening every track.
+            self._mark_lyric_over_limit(row, s)
+
         self._loading_table = False
         self.exceptions_view_btn.setText(f"⚠ Missing Captions ({exceptions_count})")
         if hasattr(self, "filter_count_label"):
@@ -4964,6 +5040,8 @@ class DatasetManager(QMainWindow):
         s = self.get_selected_sample()
         if s:
             s["caption"] = self.caption_text.toPlainText()
+        # Keep the caption half of the token budget line live (caption cap = 256).
+        self.update_lyric_limit_label()
 
     # -----------------------------------------------------------------------
     # Caption history & AI review (unchanged from original)
@@ -5100,6 +5178,136 @@ class DatasetManager(QMainWindow):
         self.refresh_table()
         self.on_table_selection_changed()
 
+    # ---- ACE-Step token budget (lyrics + caption) ---------------------------
+    def _lyrics_gate_open(self):
+        """True if a lyrics edit may proceed; shows the limit notice once.
+
+        The notice is the app's only statement of the real ACE-Step caps, so it
+        is shown the first time lyrics are edited and remembered per session.
+        The snarky button in it writes ``lyrics_limit_ack`` to settings.json and
+        silences it for good.
+        """
+        from ui.lyric_limit_notice import acknowledge_lyrics_limit
+
+        return acknowledge_lyrics_limit(self)
+
+    def _revert_lyrics_field(self):
+        """Put the field back to the selected track's saved lyrics.
+
+        Called when the token-limit notice is dismissed, so a declined gate
+        leaves no half-typed text that a later keystroke could flush.
+        """
+        sample = self.get_selected_sample()
+        text = ""
+        if sample:
+            text = sample.get("formatted_lyrics", sample.get("lyrics", "")) or ""
+        if self._lyrics_save_timer.isActive():
+            self._lyrics_save_timer.stop()
+        self._suppress_lyrics_save = True
+        try:
+            self.lyrics_text.blockSignals(True)
+            self.lyrics_text.setPlainText(text)
+            self.lyrics_text.blockSignals(False)
+        finally:
+            self._suppress_lyrics_save = False
+        self.lyrics_save_status.setText(
+            "Not saved — the token-limit notice was closed."
+        )
+        self.update_lyric_limit_label()
+
+    def _mark_lyric_over_limit(self, row, sample):
+        """Tint a table row red when its lyrics exceed the training cap.
+
+        Silent truncation is the failure this whole feature exists to expose, so
+        the offending tracks are marked where the dataset is read, not only in
+        the editor's counter.
+        """
+        from PySide6.QtGui import QBrush, QColor
+
+        config = getattr(self, "config", None) or {}
+        limit = lyric_limit_from_config(config)
+        tokens = self._sample_lyric_tokens(sample)
+        if tokens is None or tokens <= limit:
+            return
+        brush = QBrush(QColor("#5a1f1f"))
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row, col)
+            if item is not None:
+                item.setBackground(brush)
+        name_col = column_index(self.table, "Filename")
+        if name_col >= 0:
+            item = self.table.item(row, name_col)
+            if item is not None:
+                item.setToolTip(
+                    f"Lyrics are {tokens} tokens — over the {limit}-token training "
+                    "cap. ACE-Step truncates the rest silently during preprocessing."
+                )
+
+    def _sample_lyric_tokens(self, sample):
+        """Cached Qwen3 token count of a track's stored lyrics (None if none).
+
+        Cached on the sample dict because ``refresh_table`` runs on every filter
+        change and re-tokenising a whole dataset each time would stutter. The
+        cache is dropped in ``_flush_lyrics_edit`` whenever the lyrics change.
+        """
+        text = sample.get("formatted_lyrics") or sample.get("lyrics") or ""
+        if not text.strip():
+            return None
+        cached = sample.get("_lyric_tokens")
+        if cached is None:
+            config = getattr(self, "config", None) or {}
+            cached = measure(text, tokenizer_path_from_config(config)).tokens
+            sample["_lyric_tokens"] = cached
+        return cached
+
+    def update_lyric_limit_label(self, lyrics_text=None, caption_text=None):
+        """Refresh the token budget line under the waveform.
+
+        ``None`` for either argument reads the live field, so a plain call from
+        a keystroke handler keeps the counter in step with the cursor.
+        """
+        if not hasattr(self, "lyrics_limit_label"):
+            return
+        config = getattr(self, "config", None) or {}
+        tok_path = tokenizer_path_from_config(config)
+        limit = lyric_limit_from_config(config)
+
+        if lyrics_text is None:
+            lyrics_text = self.lyrics_text.toPlainText() if hasattr(self, "lyrics_text") else ""
+        if caption_text is None:
+            caption_text = self.caption_text.toPlainText() if hasattr(self, "caption_text") else ""
+
+        lyrics = measure(lyrics_text, tok_path)
+        caption = measure(caption_text, tok_path)
+
+        chunks = []
+        for label, m, cap in (
+            ("Lyrics", lyrics, limit),
+            ("Caption", caption, CAPTION_TOKEN_LIMIT),
+        ):
+            approx = "" if m.exact else "≈"
+            if m.is_over(cap):
+                chunks.append(
+                    f"<span style='color:#d33'><b>{label} {approx}{m.tokens} / {cap} "
+                    f"tokens — over by {m.over_by(cap)}</b></span>"
+                )
+            else:
+                chunks.append(f"{label} {approx}{m.tokens} / {cap} tokens")
+        html = " &nbsp;·&nbsp; ".join(chunks)
+        if not lyrics.exact:
+            html += (
+                " &nbsp;<span style='color:#888'>(estimated — install the Qwen3 "
+                "tokenizer for exact counts)</span>"
+            )
+        self.lyrics_limit_label.setText(html)
+        # The unified Lyrics panel's Studio tab shows the SAME measurement. This
+        # method is the only writer and drives both views from one measure()
+        # result, so the two cannot disagree — a second counter (its own
+        # tokenizer call, its own cap lookup) could, and would.
+        panel_label = getattr(self, "lyrics_panel_limit_label", None)
+        if panel_label is not None:
+            panel_label.setText(html)
+
     def on_lyrics_edited(self):
         """Restart the auto-save clock. Does NOT write the dataset.
 
@@ -5111,6 +5319,15 @@ class DatasetManager(QMainWindow):
         The signals are still suppressed while the field is being refilled by
         ``_load_lyrics_into_field``, so loading a track never counts as an edit.
         """
+        if self._suppress_lyrics_save:
+            return
+        # Gate the first edit behind the token-limit notice. Declining restores
+        # the track's saved text instead of leaving an unflushed buffer that a
+        # later keystroke could write.
+        if not self._lyrics_gate_open():
+            self._revert_lyrics_field()
+            return
+        self.update_lyric_limit_label()
         if self._lyrics_save_timer.isActive():
             self._lyrics_save_timer.stop()
         self._lyrics_save_timer.start()
@@ -5157,6 +5374,9 @@ class DatasetManager(QMainWindow):
         self.record_snapshot()
         sample["formatted_lyrics"] = text
         sample["lyrics"] = text
+        # The table caches each track's token count for the red "over limit"
+        # mark; this edit invalidates it so the next refresh_table recomputes.
+        sample.pop("_lyric_tokens", None)
         # Preserve what was there BEFORE this edit, once. ``raw_lyrics`` is the
         # pre-tidy text the Lyrics tab tidies from, so filling it with the old
         # value (not the new one) is what keeps a tidy pass re-runnable and the
@@ -5165,6 +5385,7 @@ class DatasetManager(QMainWindow):
             sample["raw_lyrics"] = previous
         self._write_lyrics_sidecar_for(sample)
         self.lyrics_save_status.setText("Saved ✓")
+        self.update_lyric_limit_label()
 
     def _write_lyrics_sidecar_for(self, sample):
         """Write ``<stem>_lyrics.txt`` beside the track's audio, if it has one."""
@@ -5262,6 +5483,7 @@ class DatasetManager(QMainWindow):
         finally:
             self._suppress_lyrics_save = False
         self.lyrics_save_status.setText("Saved" if text else "")
+        self.update_lyric_limit_label()
 
     def on_lyrics_revert(self):
         """Discard the field's text and reload the track's saved lyrics.
@@ -6868,6 +7090,9 @@ class DatasetManager(QMainWindow):
         if not sample:
             QMessageBox.warning(self, "No Track Selected", "Select a track first.")
             return
+        # The Studio is a lyrics editor, so the token-limit notice comes first.
+        if not self._lyrics_gate_open():
+            return
         from ui.lyrics_studio import open_lyrics_studio
 
         open_lyrics_studio(self)
@@ -6886,6 +7111,8 @@ class DatasetManager(QMainWindow):
         """
         from ui.lyrics_studio import open_lyrics_studio
 
+        if not self._lyrics_gate_open():
+            return
         open_lyrics_studio(self)
 
     def _export_lyrics(self, sample, text):

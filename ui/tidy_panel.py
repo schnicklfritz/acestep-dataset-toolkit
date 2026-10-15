@@ -28,16 +28,34 @@ from PySide6.QtWidgets import (
 
 
 def _options(manager):
-    """The three rules, as ``normalize_lyrics`` keyword arguments.
+    """Every rule the tidy pass runs, as ``normalize_lyrics`` keyword arguments.
 
-    Named after the checkbox attributes rather than the pass names so the two
-    cannot drift: the checkbox IS the option.
+    The three TAG rules come from this panel's own checkboxes — named after the
+    checkbox attributes rather than the pass names so the two cannot drift: the
+    checkbox IS the option.
+
+    Everything ELSE (the contraction table, the -ing rules, the case-fixed set,
+    line capitalisation, punctuation) is owned by the Lyrics tab, so those are
+    read back from ``manager._lyrics_options()`` rather than left to fall
+    through to the module defaults. Without this the panel silently ignored the
+    user's edited table and ran the shipped defaults instead — the tidy button
+    here would rewrite ``I'm`` to ``Eyem`` while the Lyrics tab preview showed
+    ``eyem``.
     """
-    return {
+    opts = {}
+    if hasattr(manager, "_lyrics_options"):
+        try:
+            opts = dict(manager._lyrics_options())
+        except AttributeError:
+            # Only the table/checkbox widgets are missing (e.g. a headless
+            # test manager); the three tag rules below still work alone.
+            opts = {}
+    opts.update({
         "do_strip_quotes": manager.lyrics_quotes_check.isChecked(),
         "do_trim_tag_modifiers": manager.lyrics_tagtrim_check.isChecked(),
         "do_drop_stray_tags": manager.lyrics_tagdrop_check.isChecked(),
-    }
+    })
+    return opts
 
 
 def _report_line(report):

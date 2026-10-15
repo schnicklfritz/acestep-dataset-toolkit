@@ -29,8 +29,10 @@ from PySide6.QtWidgets import (
 )
 
 from modules.lyrics_normalizer import (
+    DEFAULT_CASE_FIXED,
     DEFAULT_CONTRACTIONS,
     DEFAULT_ING_EXCEPTIONS,
+    add_case_twins,
 )
 
 # Always-visible warning about why this tool exists.
@@ -57,6 +59,14 @@ def _read_ing_exceptions(manager):
     if isinstance(raw, list) and raw:
         return set(raw)
     return set(DEFAULT_ING_EXCEPTIONS)
+
+
+def _read_case_fixed(manager):
+    """Case-fixed words from settings, falling back to the shipped default."""
+    raw = manager.config.get("lyrics_case_fixed")
+    if isinstance(raw, list) and raw:
+        return set(raw)
+    return set(DEFAULT_CASE_FIXED)
 
 
 def build_lyrics_tab(manager, parent):
@@ -271,6 +281,19 @@ def build_lyrics_tab(manager, parent):
     )
     ing_row.addWidget(manager.lyrics_ing_exceptions_edit, 1)
     t_layout.addLayout(ing_row)
+
+    case_row = QHBoxLayout()
+    case_row.addWidget(QLabel("Never re-case these words:"))
+    manager.lyrics_case_fixed_edit = QLineEdit(
+        ", ".join(sorted(_read_case_fixed(manager)))
+    )
+    manager.lyrics_case_fixed_edit.setToolTip(
+        "Comma-separated. Words whose respelling is a fixed spelling, written "
+        "exactly as the table says whatever case the lyric used — I'm becomes "
+        "eyem, never Eyem."
+    )
+    case_row.addWidget(manager.lyrics_case_fixed_edit, 1)
+    t_layout.addLayout(case_row)
     layout.addWidget(table_grp)
 
     # ------------------------------------------------------------------
@@ -421,7 +444,14 @@ def _fill_contract_table(manager):
 
 
 def read_contractions_from_table(manager):
-    """Return the contraction dict currently shown in the table."""
+    """Return the contraction dict currently shown in the table.
+
+    Every lowercase rule picks up its capitalised twins here, so a word typed
+    once as ``she'll -> sheel`` also owns ``She'll -> Sheel`` and
+    ``SHE'LL -> SHEEL`` as real, editable rows instead of the capitalised forms
+    only ever existing invisibly inside the matcher. A case-fixed word gets no
+    twins — its spelling does not follow the source's case.
+    """
     grid = manager.lyrics_contract_table
     out = {}
     for r in range(grid.rowCount()):
@@ -431,10 +461,16 @@ def read_contractions_from_table(manager):
         said = (v.text() if v else "").strip()
         if word:
             out[word] = said
-    return out
+    return add_case_twins(out, read_case_fixed(manager))
 
 
 def read_ing_exceptions(manager):
     """Return the -ing exception set from the comma-separated field."""
     raw = manager.lyrics_ing_exceptions_edit.text()
+    return {w.strip().lower() for w in raw.split(",") if w.strip()}
+
+
+def read_case_fixed(manager):
+    """Return the case-fixed word set from the comma-separated field."""
+    raw = manager.lyrics_case_fixed_edit.text()
     return {w.strip().lower() for w in raw.split(",") if w.strip()}

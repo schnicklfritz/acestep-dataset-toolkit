@@ -76,28 +76,36 @@ def _track(filename, lyrics=""):
 
 
 # ---------------------------------------------------------------------------
-# The panel lives on the right page, beside the tag tools
+# The rules live on the ONE Lyrics panel, not on a separate tags page
 # ---------------------------------------------------------------------------
 
-def test_the_panel_is_on_the_tags_and_checks_page(manager):
-    from PySide6.QtWidgets import QGroupBox
-
-    page_index = manager._tool_page("Tags & checks")
-    assert page_index >= 0
-    # Walk the real page rather than trusting an attribute: the point is that a
-    # user looking at "Tags & checks" can see the rules.
-    page = manager._shell_extra_pages[-1]
-    titles = [g.title() for g in page.findChildren(QGroupBox)]
-    assert any("Lyrics Tidy" in t for t in titles)
+def _panel_tab_titles(manager):
+    tabs = manager.lyrics_panel_tabs
+    return [tabs.tabText(i) for i in range(tabs.count())]
 
 
-def test_the_panel_is_not_duplicated_on_the_lyrics_page(manager):
-    """It belongs with the tags. A second copy on the Lyrics tab would mean two
-    sets of checkboxes that could disagree."""
+def test_the_panel_is_inside_the_unified_lyrics_panel(manager):
+    """The three tag rules are one inner tab of the unified Lyrics panel, beside
+    the contraction rules — not a group on the "Tags & checks" page, where they
+    used to sit too far from the tidy options they are always used with."""
     from PySide6.QtWidgets import QGroupBox
 
     lyrics_page = manager._shell_extra_pages[0]
     titles = [g.title() for g in lyrics_page.findChildren(QGroupBox)]
+    assert any("Lyrics Tidy" in t for t in titles)
+    # Reachable by NAME, not by index: an index-based lookup is how the wrong
+    # panel ends up refreshing when a tab is inserted.
+    assert "Structure Tags" in _panel_tab_titles(manager)
+
+
+def test_the_panel_is_not_duplicated_on_the_tags_and_checks_page(manager):
+    """It is built by the unified Lyrics panel now. A second copy here would be
+    two sets of checkboxes that could disagree, and only one of them is what the
+    tidy pass actually reads."""
+    from PySide6.QtWidgets import QGroupBox
+
+    tags_page = manager._shell_extra_pages[-1]
+    titles = [g.title() for g in tags_page.findChildren(QGroupBox)]
     assert not any("Lyrics Tidy" in t for t in titles)
 
 
@@ -113,13 +121,32 @@ def test_the_checkbox_state_is_what_the_pass_reads(manager):
     manager.lyrics_quotes_check.setChecked(False)
     manager.lyrics_tagtrim_check.setChecked(True)
     manager.lyrics_tagdrop_check.setChecked(False)
-    assert _options(manager) == {
-        "do_strip_quotes": False,
-        "do_trim_tag_modifiers": True,
-        "do_drop_stray_tags": False,
-    }
+    opts = _options(manager)
+    assert opts["do_strip_quotes"] is False
+    assert opts["do_trim_tag_modifiers"] is True
+    assert opts["do_drop_stray_tags"] is False
     manager.lyrics_quotes_check.setChecked(True)
     manager.lyrics_tagdrop_check.setChecked(True)
+
+
+def test_the_panel_also_reads_the_lyrics_tab_options(manager):
+    """The three tag checkboxes are NOT the whole tidy pass.
+
+    Everything else — the contraction table, the -ing rules, the case-fixed
+    set, line capitalisation, punctuation — is owned by the Lyrics tab. The
+    panel used to return only its three tag rules, so those other options fell
+    through to the module defaults and the button here silently ignored the
+    user's edited table: it rewrote ``I'm`` to ``Eyem`` while the Lyrics tab
+    preview showed ``eyem``.
+    """
+    from ui.tidy_panel import _options
+
+    expected = manager._lyrics_options()
+    opts = _options(manager)
+    for key, value in expected.items():
+        assert opts[key] == value, f"{key} did not come from the Lyrics tab"
+    assert set(opts) >= set(expected)
+
 
 
 
@@ -234,15 +261,19 @@ def test_tidy_with_no_rules_ticked_does_nothing(manager, tmp_path, monkeypatch):
     import ui.tidy_panel as tp
 
     samples = _load(manager, [_track("a.mp3", '[Chorus - loud]\ntext')], tmp_path)
-    for box in (manager.lyrics_quotes_check, manager.lyrics_tagtrim_check,
-                manager.lyrics_tagdrop_check):
+    # EVERY rule, not just this panel's three: the pass also runs the Lyrics
+    # tab's options, so "nothing is ticked" has to mean nothing anywhere.
+    boxes = (manager.lyrics_quotes_check, manager.lyrics_tagtrim_check,
+             manager.lyrics_tagdrop_check, manager.lyrics_tags_check,
+             manager.lyrics_lines_check, manager.lyrics_punct_check,
+             manager.lyrics_ing_check)
+    for box in boxes:
         box.setChecked(False)
     monkeypatch.setattr(tp.QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
 
     assert tp.apply_tidy(manager, "selected") == 0
     assert samples[0]["formatted_lyrics"] == "[Chorus - loud]\ntext"
-    for box in (manager.lyrics_quotes_check, manager.lyrics_tagtrim_check,
-                manager.lyrics_tagdrop_check):
+    for box in boxes:
         box.setChecked(True)
 
 
