@@ -13,6 +13,10 @@ pillow>=10.0.0
 requests>=2.31.0
 keyring>=25.0.0
 cryptography>=42.0.0
+# Exact token counting for the ACE-Step text caps (modules/lyric_limits.py).
+# Rust-backed and torch-free: it reads Qwen3-Embedding-0.6B's tokenizer.json
+# directly, which is what the app uses for the live lyrics/caption counter.
+tokenizers>=0.15.0
 
 # ==============================================================================
 # System Dependencies (Must be installed via OS package manager)

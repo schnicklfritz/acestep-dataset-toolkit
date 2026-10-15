@@ -21,6 +21,12 @@ if ROOT not in sys.path:
 # Qt must run headless in CI / terminals without a display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# The lyrics token-limit notice is a modal page for a human, and it is reached
+# from the field's textChanged handler, so driving it from a test would block
+# forever (see ui/lyric_limit_notice._headless). Tests that exercise the gate
+# itself delete this variable for their duration.
+os.environ.setdefault("ACESTEP_SKIP_LYRICS_GATE", "1")
+
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
