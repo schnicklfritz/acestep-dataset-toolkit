@@ -8,6 +8,7 @@ from modules.lyrics_profiles import (
     delete_profile,
     list_profiles,
     load_profile,
+    merge_case_fixed,
     merge_rules,
     save_profile,
 )
@@ -99,3 +100,28 @@ class TestDefaultTable:
         assert DEFAULT_CONTRACTIONS["she'll"] == "sheel"
         assert DEFAULT_CONTRACTIONS["i'll"] == "aisle"
         assert DEFAULT_CONTRACTIONS["he'll"] == "heel"
+
+
+class TestCaseFixed:
+    """Case-fixed words: written verbatim, never re-cased to the source word."""
+
+    def test_round_trips_through_a_profile(self, profile_root):
+        save_profile("band", {"i'm": "eyem"}, ["morning"], case_fixed={"i'm"})
+        loaded = load_profile("band")
+        assert loaded["case_fixed"] == ["i'm"]
+
+    def test_a_profile_without_the_key_loads_an_empty_list(self, profile_root):
+        save_profile("band", {"gonna": "gunna"}, [])
+        loaded = load_profile("band")
+        assert loaded["case_fixed"] == []
+
+    def test_merge_unions_both_sides(self):
+        assert merge_case_fixed({"i'm"}, {"you're"}) == ["i'm", "you're"]
+
+    def test_merge_lowercases_and_dedupes(self):
+        assert merge_case_fixed(["I'm"], ["i'm", "I'VE"]) == ["i'm", "i've"]
+
+    def test_merge_handles_missing_sides(self):
+        assert merge_case_fixed(None, None) == []
+        assert merge_case_fixed({}, None) == []
+

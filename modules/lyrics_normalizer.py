@@ -37,7 +37,7 @@ DEFAULT_CONTRACTIONS = {
     "you'll": "yool",
     "they'll": "theyl",
     "we'd": "weid",
-    "I'd": "eye-d",
+    "i'd": "eye-d",
     "it'll": "ittle",
     "that'll": "thatel",
     "there'll": "there-ill",
@@ -77,6 +77,28 @@ DEFAULT_CONTRACTIONS = {
     "'round": "round",
     "'em": "em",
 }
+
+# ---------------------------------------------------------------------------
+# Case-fixed entries — a *spelling*, not a re-casing
+# ---------------------------------------------------------------------------
+# Every entry above maps SPELLING only, and ``_match_case`` carries the source
+# word's capitalisation onto the replacement, so one lowercase rule covers
+# lower / Title / ALL-CAPS for free:
+#
+#     she'll -> sheel        She'll -> Sheel        SHE'LL -> SHEEL
+#
+# That is exactly wrong for a respelling whose own letters ARE the sound. The
+# capital in ``I'm`` is English's rule about the pronoun, not a sound the singer
+# should voice, so ``I'm`` must become ``eyem`` and never ``Eyem``. Entries
+# listed here are compared lowercased and their replacement is written verbatim
+# whatever case the source used.
+#
+# This is a user-editable set: it persists as ``settings.json`` ->
+# ``lyrics_case_fixed`` (Lyrics tab -> "Never re-case these words"), and it is
+# seeded with the contractions whose capital is English's rule for the pronoun
+# rather than a sound the singer should voice. ``I'm``/``I'd``/``I'll`` must
+# come out ``eyem``/``eye-d``/``eyel``, never ``Eyem``/``Eye-d``/``Eyel``.
+DEFAULT_CASE_FIXED = {"i'm", "i'd", "i'll"}
 
 # ---------------------------------------------------------------------------
 # -ing -> -in
@@ -190,14 +212,91 @@ def _match_case(replacement, source):
     return replacement[:1].upper() + replacement[1:]
 
 
-def apply_contractions(text, table):
+def case_twins(word, case_fixed=None):
+    """The capitalisations a lowercase rule is meant to cover.
+
+    A rule typed once in lowercase owns the word wherever it appears, so
+    ``she'll -> sheel`` is also the rule for ``She'll -> Sheel`` and
+    ``SHE'LL -> SHEEL``. ``add_case_twins`` writes those exact-case entries into
+    the table so the capitalised forms are *visible and editable* in the Lyrics
+    tab instead of only existing implicitly inside ``_match_case``.
+
+    Only an all-lowercase word has twins: adding a Title- or ALL-CAPS rule is
+    the user being explicit, and it must not be second-guessed. A word marked
+    case-fixed owns no twins at all — its spelling is fixed, so an ``Eyem`` row
+    would be a wrong rule the user then has to delete.
+    """
+    word = (word or "").strip()
+    if not word or not word.islower():
+        return []
+    if word.lower() in {w.lower() for w in (case_fixed if case_fixed is not None
+                                            else DEFAULT_CASE_FIXED)}:
+        return []
+    return [word[:1].upper() + word[1:], word.upper()]
+
+
+def add_case_twins(table, case_fixed=None):
+    """Return ``table`` plus the capitalised twin of every lowercase rule.
+
+    Each twin's value is cased the same way as its key, which is exactly what
+    ``_match_case`` would have produced — so adding the rows changes nothing
+    about the output, it only makes the rule editable. Entries already present
+    are never overwritten, so running this twice is a no-op.
+    """
+    out = dict(table or {})
+    for word, said in list((table or {}).items()):
+        if not said:
+            continue
+        for twin in case_twins(word, case_fixed):
+            if twin not in out:
+                out[twin] = _match_case(said, twin)
+    return out
+
+
+def _apply_outside_brackets(text, fn):
+    """Run ``fn`` on ``text`` with every ``[...]`` span held out verbatim.
+
+    A bracketed group is structure-tag text, not lyric text: the word-level
+    passes must never rewrite inside one, or ``[Singing]`` becomes ``[Singin]``
+    and ``[Rock 'n' Roll]`` loses its apostrophes. Bracket-only lines and
+    *leading* tags are already excluded by the tag passes in
+    ``normalize_lyrics``; this covers a bracket sitting mid-line.
+
+    Spans are split out and re-appended rather than replaced by sentinels, so
+    there is no placeholder string for lyric text to collide with.
+    """
+    spans = _TAG_BRACKETS.findall(text)
+    if not spans:
+        return fn(text)
+    parts = _TAG_BRACKETS.split(text)
+    out = []
+    for i, part in enumerate(parts):
+        out.append(fn(part))
+        if i < len(spans):
+            out.append(spans[i])
+    return "".join(out)
+
+
+def apply_contractions(text, table, case_fixed=None):
     """Replace contractions using ``table`` (case-insensitive whole words).
 
     Capitalisation of the matched word is carried onto the replacement, so a
     single entry covers lower, Title, and ALL-CAPS forms.
+
+    Two things override that mirroring with the author's own spelling:
+
+    * a key that matches the found word *exactly* is used verbatim, so a
+      capitalised twin the user edited by hand is honoured rather than
+      re-derived;
+    * an entry listed in ``case_fixed`` is a deliberate phonetic respelling and
+      is written verbatim whatever case the source used — ``I'm`` -> ``eyem``,
+      never ``Eyem``.
     """
     if not table:
         return text
+    if case_fixed is None:
+        case_fixed = DEFAULT_CASE_FIXED
+    fixed = {w.lower() for w in (case_fixed or ())}
     # Longest first so "she'll" wins over any shorter overlapping entry.
     keys = sorted(table, key=len, reverse=True)
     lowered = {k.lower(): v for k, v in table.items()}
@@ -208,15 +307,21 @@ def apply_contractions(text, table):
 
     def _sub(match):
         found = match.group(0)
-        replacement = lowered.get(found.lower())
+        exact = table.get(found)
+        if exact is not None:
+            return exact            # the author's own capitalisation
+        key = found.lower()
+        replacement = lowered.get(key)
         if replacement is None:
             return found
+        if key in fixed:
+            return replacement      # spelling is fixed; never re-cased
         return _match_case(replacement, found)
 
-    return pattern.sub(_sub, text)
+    return _apply_outside_brackets(text, lambda t: pattern.sub(_sub, t))
 
 
-def strip_all_apostrophes(text):
+def _strip_apostrophes_plain(text):
     """Remove every apostrophe character, wherever it appears.
 
     Applied *after* the contraction table, so a mapped word (``she'll`` ->
@@ -226,6 +331,15 @@ def strip_all_apostrophes(text):
     for ch in ("\u2019", "\u2018", "\u02bc", "\u2032"):  # curly, modifier, prime
         text = text.replace(ch, "")
     return text.replace("'", "")
+
+
+def strip_all_apostrophes(text):
+    """Remove every apostrophe outside any ``[...]`` span.
+
+    Bracket text is structure-tag text, so ``[Rock 'n' Roll]`` keeps its
+    apostrophes while ``rock 'n' roll`` in the lyric becomes ``rock nr roll``.
+    """
+    return _apply_outside_brackets(text, _strip_apostrophes_plain)
 
 
 def strip_quotes(text):
@@ -316,7 +430,7 @@ def shorten_ing(text, exceptions):
             return word
         return word[:-3] + "in"
 
-    return re.sub(r"\b[A-Za-z]+ing\b", _sub, text)
+    return _apply_outside_brackets(text, lambda t: re.sub(r"\b[A-Za-z]+ing\b", _sub, t))
 
 
 def strip_trailing_punctuation(line):
@@ -341,7 +455,7 @@ def strip_trailing_punctuation(line):
     return stripped + tail_kept
 
 
-def capitalize_first_word(line):
+def capitalize_first_word(line, keep_lower=None):
     """Capitalise the first letter of a lyric line, leaving the rest alone.
 
     Skips anything that has no leading letter (blank lines, a lone "'", a
@@ -353,12 +467,20 @@ def capitalize_first_word(line):
     iTunes) is left as written — turning it into IPhone would be worse than
     leaving it lowercase.
     """
+    keep = {w.lower() for w in (keep_lower or ())}
     for i, ch in enumerate(line):
         if ch.isalpha():
             if i == 0 and ch.isupper():
                 return line          # already capitalised
             # Reject deliberate mixed-case words like iPhone / eBay.
             word = line[i:].split(" ", 1)[0]
+            # A case-fixed respelling is spelled the same in every case, so it
+            # must not be capitalised merely for landing first on a line:
+            # "I'm here" -> "eyem here", never "Eyem here".
+            if keep:
+                m = re.match(r"[A-Za-z][A-Za-z'-]*", line[i:])
+                if m and m.group(0).lower() in keep:
+                    return line
             if any(c.isupper() for c in word[1:]):
                 return line
             return line[:i] + ch.upper() + line[i + 1:]
@@ -372,6 +494,7 @@ def normalize_lyrics(
     contractions=None,
     ing_to_in=False,
     ing_exceptions=None,
+    case_fixed=None,
     do_capitalize_tags=True,
     do_strip_punctuation=True,
     do_capitalize_lines=True,
@@ -392,6 +515,12 @@ def normalize_lyrics(
     as a typo in a training caption. Only the first character is affected — the
     rest of the line is untouched, so an intentionally ALL-CAPS line survives.
 
+    ``case_fixed`` lists contraction keys whose replacement is a deliberate
+    phonetic spelling that is written verbatim, whatever case the source word
+    used, so ``I'm`` becomes ``eyem`` and never ``Eyem``. That protection also
+    covers the start of a line, where ``do_capitalize_lines`` would otherwise
+    re-capitalise it. Defaults to ``DEFAULT_CASE_FIXED``.
+
     ``protect_markers`` leaves ``---- filename ----`` separator lines (used by
     the all-lyrics view) completely untouched, so tidying a whole-dataset block
     cannot corrupt the markers that write-back depends on.
@@ -408,12 +537,20 @@ def normalize_lyrics(
         contractions = DEFAULT_CONTRACTIONS
     if ing_exceptions is None:
         ing_exceptions = DEFAULT_ING_EXCEPTIONS
+    if case_fixed is None:
+        case_fixed = DEFAULT_CASE_FIXED
 
     report = {"contractions": [], "ing": 0, "tags": 0, "lines_changed": 0,
               "apostrophes": 0, "capitalized": 0, "word_changes": [],
               "quotes": 0, "tags_trimmed": 0, "tags_dropped": 0}
     changed = set()
     lowered = {k.lower(): v for k, v in (contractions or {}).items()}
+    # The spellings that must never be re-cased, in the form they appear in the
+    # text (each case-fixed key's own replacement, lowercased). Handed to the
+    # line-start capitaliser so such a respelling survives being first on a line.
+    keep_lower = {
+        (lowered.get(w.lower()) or "").lower() for w in (case_fixed or ())
+    } - {""}
     out_lines = []
 
     # ---- Block-wide tag rules, applied before the per-line passes so the
@@ -497,7 +634,7 @@ def normalize_lyrics(
 
         # 4. Contractions.
         before = body
-        body = apply_contractions(body, contractions or {})
+        body = apply_contractions(body, contractions or {}, case_fixed)
         if body != before:
             # Count apostrophes consumed by the table too: from the user's
             # point of view this line DID have apostrophes handled, and a
@@ -530,7 +667,7 @@ def normalize_lyrics(
         #    cannot swallow the change.
         if do_capitalize_lines:
             before_cap = body
-            body = capitalize_first_word(body)
+            body = capitalize_first_word(body, keep_lower)
             if body != before_cap:
                 report["capitalized"] += 1
 

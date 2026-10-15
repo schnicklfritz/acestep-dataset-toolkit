@@ -71,6 +71,7 @@ def load_profile(name, base_dir=None):
         "name": data.get("name") or name,
         "contractions": data.get("contractions") or {},
         "ing_exceptions": data.get("ing_exceptions") or [],
+        "case_fixed": sorted(data.get("case_fixed") or []),
         "ing_to_in": bool(data.get("ing_to_in", False)),
         "capitalize_tags": bool(data.get("capitalize_tags", True)),
         "strip_punctuation": bool(data.get("strip_punctuation", True)),
@@ -80,7 +81,7 @@ def load_profile(name, base_dir=None):
 
 def save_profile(name, contractions, ing_exceptions, ing_to_in=False,
                  capitalize_tags=True, strip_punctuation=True, notes="",
-                 base_dir=None):
+                 case_fixed=(), base_dir=None):
     """Write a profile file. Returns the path written."""
     folder = profile_dir(base_dir)
     os.makedirs(folder, exist_ok=True)
@@ -88,6 +89,7 @@ def save_profile(name, contractions, ing_exceptions, ing_to_in=False,
         "name": name,
         "contractions": dict(sorted((contractions or {}).items())),
         "ing_exceptions": sorted(ing_exceptions or []),
+        "case_fixed": sorted(case_fixed or []),
         "ing_to_in": bool(ing_to_in),
         "capitalize_tags": bool(capitalize_tags),
         "strip_punctuation": bool(strip_punctuation),
@@ -126,3 +128,15 @@ def merge_rules(master_contractions, profile_contractions,
     ing = set(master_ing or ())
     ing |= set(profile_ing or ())
     return merged, ing
+
+
+def merge_case_fixed(master_case=None, profile_case=None):
+    """Union the case-fixed word sets: master plus the profile's own.
+
+    A union (not an override) because the set is additive by nature — a word is
+    either spelled verbatim or it is not, and a profile saying "eyem is fixed"
+    must not un-fix the master's entry for the same idea.
+    """
+    out = {w.strip().lower() for w in (master_case or ()) if w and w.strip()}
+    out |= {w.strip().lower() for w in (profile_case or ()) if w and w.strip()}
+    return sorted(out)

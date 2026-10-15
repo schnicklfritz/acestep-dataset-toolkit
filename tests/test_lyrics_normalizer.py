@@ -6,10 +6,13 @@ building it, so the behaviour is pinned down here explicitly.
 import pytest
 
 from modules.lyrics_normalizer import (
+    DEFAULT_CASE_FIXED,
     DEFAULT_CONTRACTIONS,
     DEFAULT_ING_EXCEPTIONS,
+    add_case_twins,
     apply_contractions,
     capitalize_tags,
+    case_twins,
     normalize_lyrics,
     shorten_ing,
     strip_all_apostrophes,
@@ -375,4 +378,136 @@ class TestTheThreeRulesTogether:
         once, _ = normalize_lyrics(src)
         twice, _ = normalize_lyrics(once)
         assert once == twice
+
+
+class TestCaseFixedEntries:
+    """A respelling whose letters ARE the sound is written verbatim.
+
+    The table maps SPELLING and ``_match_case`` mirrors the source's
+    capitalisation. That is right for ``she'll`` / ``She'll`` / ``SHE'LL`` but
+    wrong for ``I'm``: the capital there is English's rule about the pronoun,
+    not a sound the singer voices, so ``I'm`` must become ``eyem``, never
+    ``Eyem``.
+    """
+
+    @pytest.mark.parametrize("src", ["I'm", "I'M", "i'm"])
+    def test_i_am_is_always_eyem(self, src):
+        assert apply_contractions(src, {"i'm": "eyem"}, {"i'm"}) == "eyem"
+
+    def test_the_shipped_table_gets_i_am_right(self):
+        # The reported defect: the table already said eyem, but the matcher
+        # re-cased it to Eyem because the source word was Title-case.
+        assert apply_contractions("I'm", DEFAULT_CONTRACTIONS) == "eyem"
+        assert DEFAULT_CASE_FIXED == {"i'm", "i'd", "i'll"}
+
+    @pytest.mark.parametrize("src,want", [
+        ("I'm here", "eyem here"),
+        ("I'd like it", "eye-d like it"),
+        ("I'll go", "eyel go"),
+    ])
+    def test_the_pronoun_family_stays_lowercase_at_line_start(self, src, want):
+        """Line-start capitalisation must not re-introduce the pronoun capital.
+
+        The contractions run first and emit the verbatim lowercase respelling;
+        the line-start pass runs afterwards and would otherwise turn the result
+        into ``Eyem here``.
+        """
+        out, _ = normalize_lyrics(src)
+        assert out == want
+
+    @pytest.mark.parametrize("src,want", [
+        ("she'll", "sheel"),
+        ("She'll", "Sheel"),
+        ("SHE'LL", "SHEEL"),
+    ])
+    def test_case_mirroring_still_applies_to_ordinary_rules(self, src, want):
+        assert apply_contractions(src, {"she'll": "sheel"}) == want
+
+    def test_an_exact_entry_wins_verbatim(self):
+        """A capitalised twin the user edited by hand is honoured, not re-derived.
+
+        This is *why* ``add_case_twins`` writes real rows: with all three cases
+        present each is an exact key, so the user's own spelling for that case
+        is used as written instead of being regenerated from the source's case.
+        """
+        table = add_case_twins({"she'll": "sheel"})
+        table["She'll"] = "SHAY-el"
+        assert apply_contractions("she'll", table) == "sheel"
+        assert apply_contractions("She'll", table) == "SHAY-el"
+        assert apply_contractions("SHE'LL", table) == "SHEEL"
+
+
+class TestCaseTwins:
+    def test_a_lowercase_rule_gains_its_uppercase_forms(self):
+        assert case_twins("she'll") == ["She'll", "SHE'LL"]
+
+    @pytest.mark.parametrize("word", ["She'll", "SHE'LL", "", "   "])
+    def test_only_lowercase_words_have_twins(self, word):
+        assert case_twins(word) == []
+
+    def test_case_fixed_words_have_no_twins(self):
+        # An "Eyem" row would be a wrong rule the user then has to delete.
+        assert case_twins("i'm", {"i'm"}) == []
+        assert add_case_twins({"i'm": "eyem"}, {"i'm"}) == {"i'm": "eyem"}
+
+    def test_add_case_twins_is_idempotent(self):
+        once = add_case_twins({"she'll": "sheel"})
+        assert once == {"she'll": "sheel", "She'll": "Sheel", "SHE'LL": "SHEEL"}
+        assert add_case_twins(once) == once
+
+
+class TestBracketRules:
+    """Inside brackets an AI consumer needs only consistency: every word's first
+    letter capitalized, punctuation left alone."""
+
+    @pytest.mark.parametrize("src,want", [
+        ("[GUITAR SOLO]", "[Guitar Solo]"),
+        ("[guitar solo]", "[Guitar Solo]"),
+        ("[Hey!]", "[Hey!]"),
+        ("[Chorus - loud!]", "[Chorus - loud!]"),
+        ("[pre-chorus]", "[Pre-Chorus]"),
+    ])
+    def test_brackets_title_case_every_word_and_keep_punctuation(self, src, want):
+        assert capitalize_tags(src) == want
+
+    def test_bracket_punctuation_survives_the_whole_pass(self):
+        out, _ = normalize_lyrics("[GUITAR SOLO!]")
+        assert out == "[Guitar Solo!]"
+
+    def test_a_mid_line_bracket_keeps_its_apostrophes(self):
+        """Bracket text is tag text wherever it sits, not only on its own line."""
+        assert strip_all_apostrophes("we rock [Rock 'n' Roll] now") == (
+            "we rock [Rock 'n' Roll] now"
+        )
+        # NB: stripping BOTH apostrophes of ``'n'`` leaves "n", not "nr".
+        assert strip_all_apostrophes("rock 'n' roll") == "rock n roll"
+
+    def test_a_mid_line_bracket_is_never_shortened(self):
+        assert shorten_ing("we sing [Singing] loud", []) == "we sing [Singing] loud"
+        assert shorten_ing("we are singing", []) == "we are singin"
+
+    def test_a_mid_line_bracket_keeps_its_contractions(self):
+        assert apply_contractions("don't [Don't] stop", {"don't": "dont"}) == (
+            "dont [Don't] stop"
+        )
+
+    def test_the_whole_pass_leaves_a_mid_line_bracket_alone(self):
+        out, _ = normalize_lyrics("we sing [Singing] loud", ing_to_in=True)
+        assert out == "We sing [Singing] loud"
+
+
+class TestLineCapitalisation:
+    """The first letter of a line is a capital whenever the line changed."""
+
+    def test_a_changed_line_gains_its_capital(self):
+        out, _ = normalize_lyrics("don't stop")
+        assert out == "Dont stop"
+
+    def test_the_rest_of_the_line_keeps_its_case(self):
+        out, _ = normalize_lyrics("WE ARE THE CHAMPIONS", do_capitalize_tags=False)
+        assert out == "WE ARE THE CHAMPIONS"
+
+    def test_an_already_capitalised_line_is_not_touched(self):
+        out, _ = normalize_lyrics("Already fine", do_strip_punctuation=False)
+        assert out == "Already fine"
 
