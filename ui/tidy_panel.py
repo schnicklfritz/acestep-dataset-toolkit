@@ -26,6 +26,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+# The read order for the three lyric fields is declared once, here. Every tidy
+# entry point in this module goes through it -- see the docstring for why
+# ``raw_lyrics`` is the LAST tier and not the first.
+from modules.dataset_schema import lyrics_source
+
 
 def _options(manager):
     """Every rule the tidy pass runs, as ``normalize_lyrics`` keyword arguments.
@@ -74,18 +79,13 @@ def _report_line(report):
     return ", ".join(bits) if bits else "no changes"
 
 
-def _source_of(sample):
-    """The text a tidy pass should start from.
-
-    ``raw_lyrics`` first: it is the pre-tidy text, so re-running the tidy stays
-    idempotent and the original survives. Same order the Lyrics tab uses.
-    """
-    return (sample.get("raw_lyrics") or sample.get("formatted_lyrics")
-            or sample.get("lyrics") or "")
-
-
 def _tidy_one(sample, opts):
     """Work out one track's tidied text. Returns ``(new_text, report)`` or ``None``.
+
+    Reads the CURRENT text (``lyrics_source``, i.e. ``formatted_lyrics`` first).
+    It must not read ``raw_lyrics`` first any more: that field holds the text as
+    it was before the FIRST tidy, so a tidy after a Studio edit would recompute
+    from the original words and silently discard the edit.
 
     Deliberately PURE — it computes, it does not write. The caller has to take
     the per-song backup BETWEEN this call and the write, so a function that
@@ -95,7 +95,7 @@ def _tidy_one(sample, opts):
     """
     from modules.lyrics_normalizer import normalize_lyrics
 
-    source = _source_of(sample)
+    source = lyrics_source(sample)
     if not source.strip():
         return None
     new_text, report = normalize_lyrics(source, **opts)
@@ -109,10 +109,11 @@ def _apply_tidy_to(sample, new_text):
 
     ``formatted_lyrics`` is what the exporter reads, ``lyrics`` is what the
     inspector shows, and ``raw_lyrics`` keeps the PRE-tidy text so the run stays
-    reversible and re-runnable.
+    reversible and re-runnable. Written ONCE per track: a later tidy must not
+    move the snapshot forward, or the original words are gone.
     """
     if not sample.get("raw_lyrics"):
-        sample["raw_lyrics"] = _source_of(sample)
+        sample["raw_lyrics"] = lyrics_source(sample)
     sample["formatted_lyrics"] = new_text
     sample["lyrics"] = new_text
 
@@ -137,8 +138,7 @@ def _write_lyrics_sidecar(manager, sample):
     path = sample.get("audio_path") or ""
     if not path or not os.path.exists(path):
         return None
-    text = (sample.get("formatted_lyrics") or sample.get("lyrics")
-            or sample.get("raw_lyrics") or "")
+    text = lyrics_source(sample)
     if not text.strip():
         return None
     root, _ext = os.path.splitext(path)

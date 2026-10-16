@@ -46,4 +46,18 @@ def validate_manifest(dataset):
         bpm = s.get("bpm")
         if bpm and not (0 < bpm <= 300):
             issues.append(f"sample {i} BPM out of range: {bpm}")
+        # A row the trainer cannot resolve: no filename AND no audio_path. Inside
+        # the app that is exactly what a virtual placeholder looks like
+        # (``virtual: True``, no audio on disk) and it is legitimate there — the
+        # gap audit and the captioner use those rows. An EXPORT strips the
+        # ``virtual`` key (see ``EXPORT_DROPPED_FIELDS``), so a placeholder that
+        # ever reached a manifest is invisible as a placeholder and visible only
+        # as an anonymous row. Validating a project file therefore stays quiet,
+        # while a manifest that leaked a placeholder gets called out.
+        if (not s.get("virtual")
+                and not (s.get("filename") or "").strip()
+                and not (s.get("audio_path") or "").strip()):
+            issues.append(
+                f"sample {i} has no filename or audio_path (unusable by the trainer)"
+            )
     return issues

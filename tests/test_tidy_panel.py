@@ -210,7 +210,7 @@ def test_a_track_that_needs_no_tidying_is_skipped(manager, tmp_path):
     """Nothing to change means no snapshot, no backup, and a zero count."""
     from ui.tidy_panel import apply_tidy
 
-    samples = _load(manager, [_track("a.mp3", "[Chorus]\nClean text")], tmp_path)
+    _load(manager, [_track("a.mp3", "[Chorus]\nClean text")], tmp_path)
     changed = apply_tidy(manager, "selected")
     assert changed == 0
 
@@ -339,6 +339,80 @@ def test_apply_tidy_to_keeps_the_first_raw_lyrics():
     sample["raw_lyrics"] = "truly original"
     _apply_tidy_to(sample, "tidied")
     assert sample["raw_lyrics"] == "truly original"
+
+
+# ---------------------------------------------------------------------------
+# WHICH copy of the words a pass starts from (formatted -> lyrics -> raw)
+# ---------------------------------------------------------------------------
+
+def test_tidy_reads_the_current_text_not_the_raw_snapshot(manager, tmp_path):
+    """The defect this pins: an edit made AFTER a tidy used to be discarded.
+
+    ``raw_lyrics`` is the pre-tidy snapshot, written once by the first pass that
+    changes a track. A pass that reads it FIRST recomputes from words the user
+    has already replaced and writes the result over the newer text — so a Studio
+    edit, an inspector edit or an accepted transcription followed by a tidy from
+    this panel was silently reverted. The order is declared once, in
+    ``modules.dataset_schema.lyrics_source``.
+    """
+    from ui.tidy_panel import apply_tidy
+
+    sample = _track("a.mp3", '"first version"')
+    _load(manager, [sample], tmp_path)
+    assert apply_tidy(manager, "selected") == 1
+    assert sample["formatted_lyrics"] == "First version"
+    assert sample["raw_lyrics"] == '"first version"'
+
+    # The Studio edits the track. Its write-back sets both live fields, exactly
+    # as ``ui/lyrics_studio`` does.
+    sample["formatted_lyrics"] = '"second version"'
+    sample["lyrics"] = '"second version"'
+
+    assert apply_tidy(manager, "selected") == 1
+    assert sample["formatted_lyrics"] == "Second version"
+    # The snapshot still holds the ORIGINAL: neither run moved it forward.
+    assert sample["raw_lyrics"] == '"first version"'
+
+
+def test_a_raw_only_track_is_still_tidied(manager, tmp_path):
+    """The last tier of the read order is not decoration.
+
+    A freshly transcribed track has only ``raw_lyrics``; nothing has formatted it
+    yet. Dropping that tier — or reordering it out of reach — would leave those
+    tracks silently untidied, which is why the change is a reorder and not a
+    removal.
+    """
+    from ui.tidy_panel import apply_tidy
+
+    sample = new_sample(filename="asr.mp3")
+    sample["raw_lyrics"] = '"asr line"'
+    _load(manager, [sample], tmp_path)
+
+    assert apply_tidy(manager, "selected") == 1
+    assert sample["formatted_lyrics"] == "Asr line"
+    assert sample["lyrics"] == "Asr line"
+    assert sample["raw_lyrics"] == '"asr line"'
+
+
+def test_the_dataset_wide_scope_reads_the_current_text_too(manager, tmp_path, monkeypatch):
+    """The same order under the whole-dataset button, since that is the scope
+    that rewrites the most tracks per click."""
+    from PySide6.QtWidgets import QMessageBox
+
+    import ui.tidy_panel as tp
+
+    samples = _load(manager, [
+        _track("a.mp3", '"one version"'),
+        _track("b.mp3", "[Chorus]\\nClean"),
+    ], tmp_path)
+    samples[0]["raw_lyrics"] = '"stale original"'
+    samples[0]["formatted_lyrics"] = '"edited since"'
+    samples[0]["lyrics"] = '"edited since"'
+    monkeypatch.setattr(tp.QMessageBox, "exec", lambda self: QMessageBox.Yes)
+
+    assert tp.apply_tidy(manager, "dataset") == 1
+    assert samples[0]["formatted_lyrics"] == "Edited since"
+    assert samples[0]["raw_lyrics"] == '"stale original"'
 
 
 def test_a_missing_audio_path_does_not_break_the_tidy(manager, tmp_path):

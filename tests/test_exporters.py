@@ -1,8 +1,10 @@
 """Exporter output: the file a training run actually reads."""
 import json
+from pathlib import Path
 
 import pytest
 
+from modules.dataset_schema import normalize_dataset
 from modules.exporters import export_csv, export_json, export_jsonl, split_dataset
 
 
@@ -130,6 +132,38 @@ class TestVirtualTracksNeverExport:
         assert len(ds["samples"]) == 2
         assert len(for_export(ds["samples"])) == 1
 
+    def test_the_worker_says_how_many_placeholders_it_skipped(self, qapp, tmp_path):
+        """The drop is deliberate, so it must not look like data loss.
+
+        A user who counted 12 tracks in the app and then counted 11 rows in
+        ``dataset.json`` has no way to tell a filter from a bug unless the export
+        reports it. The completion message is the surface the dialog shows.
+        """
+        from workers.export import ExportWorker
+
+        worker = ExportWorker(self._dataset(), {"dest_dir": str(tmp_path), "json": True})
+        messages = []
+        worker.finished_ok.connect(messages.append)
+        worker.run()
+
+        assert len(messages) == 1
+        assert "JSON" in messages[0]
+        assert "1 virtual placeholder(s) excluded" in messages[0]
+
+    def test_a_dataset_without_placeholders_gets_no_note(self, qapp, tmp_path):
+        """The note has to mean something: no placeholders, nothing said."""
+        from modules.dataset_schema import new_dataset, new_sample
+        from workers.export import ExportWorker
+
+        ds = new_dataset(name="plain")
+        ds["samples"] = [new_sample(filename="real.wav", audio_path="./real.wav")]
+        worker = ExportWorker(ds, {"dest_dir": str(tmp_path), "json": True})
+        messages = []
+        worker.finished_ok.connect(messages.append)
+        worker.run()
+
+        assert messages == ["JSON"]
+
 
 class TestOtherExporters:
     def test_jsonl_writes_one_object_per_line(self, dataset, tmp_path):
@@ -157,3 +191,119 @@ class TestOtherExporters:
         samples = dataset["samples"] * 5
         train, val = split_dataset(samples, val_ratio=0.2, seed=1)
         assert len(train) + len(val) == len(samples)
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class TestOfficialManifestRoundTrip:
+    """The owner's own ACE-Step 1.5XL manifest, exported back character-for-character.
+
+    The fixture is the owner's paste, verbatim, under ``tests/fixtures/``. Loading
+    it as the app's in-memory dataset and exporting it must reproduce that file
+    exactly — field order, nesting, value types — apart from ``num_samples``. The
+    paste reads ``num_samples: 2`` beside a single ``samples`` entry, and both the
+    export and the trainer count the array, so 2 becomes 1. Nothing else may move:
+    a renamed or retyped field here is a training run that silently ignores it.
+    """
+
+    @staticmethod
+    def _golden():
+        return (FIXTURES / "official_acestep_1_5xl.json").read_text(encoding="utf-8")
+
+    def test_the_fixture_is_the_official_shape(self):
+        # A guard on the guard: if the fixture stops carrying all seven metadata
+        # keys and all seventeen sample keys, the comparison below proves less
+        # than it claims.
+        doc = json.loads(self._golden())
+        assert set(doc["metadata"]) == {
+            "name", "custom_tag", "tag_position", "created_at", "num_samples",
+            "all_instrumental", "genre_ratio",
+        }
+        assert set(doc["samples"][0]) == {
+            "id", "audio_path", "filename", "caption", "genre", "lyrics",
+            "raw_lyrics", "formatted_lyrics", "bpm", "keyscale", "timesignature",
+            "duration", "language", "is_instrumental", "custom_tag", "labeled",
+            "prompt_override",
+        }
+
+    def test_export_reproduces_the_official_file(self, tmp_path):
+        golden = self._golden()
+        out = tmp_path / "dataset.json"
+
+        export_json(normalize_dataset(json.loads(golden)), str(out))
+
+        written = out.read_text(encoding="utf-8")
+        # The one permitted difference, plus the trailing newline the paste has
+        # and ``json.dump`` does not write.
+        expected = golden.replace('"num_samples": 2', '"num_samples": 1').rstrip("\n")
+        assert written.rstrip("\n") == expected
+
+
+class TestProjectFileVersusTrainingManifest:
+    """The two documents differ on purpose, and the difference is pinned here.
+
+    ``save_dataset`` writes ``self.dataset`` as it stands: internal bookkeeping
+    (``structural_segments``, ``spatial_tokens``, ``stem_paths``, ``chunk_paths``,
+    the legacy ``instrumental_mode``) and ``virtual`` placeholders included,
+    because the app needs all of it back on the next load. The training manifest
+    is the EXPORT, and it carries neither. Stripping the internal keys from the
+    saved file would break the app; exporting them would hand the trainer a row it
+    cannot resolve. What must not happen is the difference being invisible, so it
+    is asserted rather than described.
+    """
+
+    INTERNAL_SAMPLE_KEYS = ("virtual", "locked", "structural_segments",
+                            "spatial_tokens", "stem_paths", "chunk_paths")
+
+    def _app_shaped(self):
+        from modules.dataset_schema import new_dataset, new_sample
+
+        ds = new_dataset(name="project_file")
+        real = new_sample(filename="real.wav", audio_path="./real.wav",
+                          genre="Rock", caption="real")
+        real["structural_segments"] = [{"label": "intro"}]
+        real["stem_paths"] = {"vocals": "./stems/real_vocals.wav"}
+        real["chunk_paths"] = ["./chunks/real_01.wav"]
+        ds["samples"] = [real, new_sample(filename="virtual_01_doom.wav",
+                                          genre="Doom", virtual=True)]
+        return ds
+
+    def test_the_export_carries_no_internal_key_and_no_placeholder(self, tmp_path):
+        out = tmp_path / "dataset.json"
+        export_json(self._app_shaped(), str(out))
+        doc = json.loads(out.read_text(encoding="utf-8"))
+
+        assert len(doc["samples"]) == 1
+        for key in self.INTERNAL_SAMPLE_KEYS:
+            assert key not in doc["samples"][0]
+        assert "instrumental_mode" not in doc["metadata"]
+        # Counted the way the trainer counts: the rows it can resolve, not the
+        # rows the project file holds.
+        assert doc["metadata"]["num_samples"] == 1
+
+    def test_a_saved_project_file_reloads_with_its_internal_keys(self, tmp_path):
+        """The other half of the contract — and why the fix is NOT "strip them".
+
+        The app's own file is what the DSP stages, the stem features and the gap
+        audit read back, so the internal keys have to survive the round trip. The
+        serialize step is the one ``save_dataset`` uses (``json.dumps`` of the live
+        dataset) and the reload is ``normalize_dataset`` — the function every load
+        path puts a parsed document through, so a build that stripped these fields
+        "to match the manifest" is caught here rather than by a broken dataset at
+        runtime.
+        """
+        ds = self._app_shaped()
+        path = tmp_path / "dataset.json"
+        path.write_text(json.dumps(ds, indent=2), encoding="utf-8")
+
+        reloaded = normalize_dataset(json.loads(path.read_text(encoding="utf-8")))
+
+        s = reloaded["samples"][0]
+        assert s["stem_paths"] == {"vocals": "./stems/real_vocals.wav"}
+        assert s["structural_segments"] == [{"label": "intro"}]
+        assert s["chunk_paths"] == ["./chunks/real_01.wav"]
+        assert reloaded["samples"][1]["virtual"] is True
+        # The project file counts its own rows; the manifest counts the rows the
+        # trainer can use. Both counts are correct for their own document.
+        assert reloaded["metadata"]["num_samples"] == 2

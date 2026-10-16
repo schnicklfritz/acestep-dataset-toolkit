@@ -34,6 +34,23 @@ class TestAllLyricsBlock:
         parsed = parse_all_lyrics_block(build_all_lyrics_block(dataset["samples"]))
         assert parsed["song_b.wav"] == ""
 
+    def test_the_block_shows_the_current_text_not_the_raw_snapshot(self, dataset):
+        """``raw_lyrics`` is the pre-tidy snapshot, not the text to display.
+
+        The block used to read it first, so it showed words older than the ones in
+        the track table beside it — and saving the block back wrote those older
+        words over the current ones. The read order now lives in
+        ``modules.dataset_schema.lyrics_source``.
+        """
+        sample = dataset["samples"][0]
+        sample["raw_lyrics"] = "[verse]\nold raw words"
+        sample["formatted_lyrics"] = "[Verse]\ncurrent words"
+
+        block = build_all_lyrics_block(dataset["samples"])
+
+        assert "current words" in block
+        assert "old raw words" not in block
+
     def test_markers_survive_a_tidy(self, dataset):
         # Regression: the punctuation stripper used to eat the trailing "----",
         # which silently broke write-back.

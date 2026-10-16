@@ -17,6 +17,7 @@ from workers.export import ExportWorker
 from workers.tag_creator import TagCreatorWorker
 from modules.dataset_schema import (
     derive_instrumental_mode,
+    lyrics_source,
     new_sample,
     normalize_dataset,
 )
@@ -1204,7 +1205,7 @@ class DatasetManager(QMainWindow):
                 "Select a track in the Dataset Studio tab to preview it here."
             )
             return
-        source = s.get("raw_lyrics") or s.get("formatted_lyrics") or s.get("lyrics") or ""
+        source = lyrics_source(s)
         if not source.strip():
             self.lyrics_before.setPlainText("")
             self.lyrics_after.setPlainText("")
@@ -1260,7 +1261,7 @@ class DatasetManager(QMainWindow):
 
         self.record_snapshot()
         for s in targets:
-            source = s.get("raw_lyrics") or s.get("formatted_lyrics") or s.get("lyrics") or ""
+            source = lyrics_source(s)
             if not source.strip():
                 continue
             if not replace and (s.get("formatted_lyrics") or "").strip():
@@ -1270,6 +1271,9 @@ class DatasetManager(QMainWindow):
             if new_text == source:
                 continue
             # Preserve the pre-tidy text so a re-run is idempotent and reversible.
+            # ``source`` is the CURRENT text (formatted first), so what is kept
+            # here is what the user actually had -- not the text from before some
+            # earlier pass, which is the trap ``raw_lyrics``-first fell into.
             if not s.get("raw_lyrics"):
                 s["raw_lyrics"] = source
             s["formatted_lyrics"] = new_text
@@ -1460,10 +1464,7 @@ class DatasetManager(QMainWindow):
                 QMessageBox.warning(self, "No Tracks", "Add audio tracks first.")
             return
         self.lyrics_all_edit.setPlainText(build_all_lyrics_block(samples))
-        with_lyrics = sum(
-            1 for s in samples
-            if (s.get("raw_lyrics") or s.get("formatted_lyrics") or s.get("lyrics") or "").strip()
-        )
+        with_lyrics = sum(1 for s in samples if lyrics_source(s).strip())
         if not silent:
             self.status_label.setText(
                 f"Loaded {len(samples)} track(s) into the lyrics block "
@@ -3277,10 +3278,19 @@ class DatasetManager(QMainWindow):
         self.on_table_selection_changed()
 
     def open_export_dialog(self):
+        from modules import exporters
+
         samples = self.dataset.get("samples", [])
         if not samples:
             QMessageBox.information(self, "Export", "The dataset is empty — add tracks first.")
             return
+        # Virtual placeholders are real rows in the project file but never leave
+        # as data (``exporters.for_export`` is the single filter, applied in the
+        # worker to every format). Count them here so the number the user is
+        # shown is the number that will be written — otherwise "12 tracks ready"
+        # against 11 exported rows looks like silent data loss.
+        exportable = exporters.for_export(samples)
+        excluded = len(samples) - len(exportable)
 
         dialog = QDialog(self)
         dialog.setWindowTitle("📦 Export / Split Dataset")
@@ -3319,7 +3329,11 @@ class DatasetManager(QMainWindow):
         dest_row.addWidget(browse)
         lay.addLayout(dest_row)
 
-        self.exp_status = QLabel(f"{len(samples)} tracks ready to export.")
+        self.exp_status = QLabel(
+            f"{len(exportable)} track(s) ready to export."
+            + (f" {excluded} virtual placeholder(s) will be skipped (not training data)."
+               if excluded else "")
+        )
         self.exp_status.setProperty("muted", True)
         lay.addWidget(self.exp_status)
 

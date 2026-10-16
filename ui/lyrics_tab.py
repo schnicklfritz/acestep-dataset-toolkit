@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from modules.dataset_schema import lyrics_source
 from modules.lyrics_normalizer import (
     DEFAULT_CASE_FIXED,
     DEFAULT_CONTRACTIONS,
@@ -332,10 +333,17 @@ TRACK_MARKER = "---- {name} ----"
 
 
 def build_all_lyrics_block(samples):
-    """Render every track's lyrics into one editable block."""
+    """Render every track's lyrics into one editable block.
+
+    Reads through ``lyrics_source`` (formatted -> lyrics -> raw) so the block
+    shows the CURRENT text. This function used to read ``raw_lyrics`` first,
+    which is the pre-FIRST-tidy snapshot: the block would show older words than
+    the track table beside it, and saving the block back would write those older
+    words over the current ones.
+    """
     parts = []
     for s in samples:
-        text = s.get("raw_lyrics") or s.get("formatted_lyrics") or s.get("lyrics") or ""
+        text = lyrics_source(s)
         parts.append(TRACK_MARKER.format(name=s.get("filename", "?")))
         parts.append(text.rstrip())
         parts.append("")

@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "name": "my_dataset",
+    "custom_tag": "mytrigger",
+    "tag_position": "prepend",
+    "created_at": "2026-02-12T00:28:25.419505",
+    "num_samples": 2,
+    "all_instrumental": false,
+    "genre_ratio": 90
+  },
+  "samples": [
+    {
+      "id": "00edb2c3",
+      "audio_path": "./songs/track1.mp3",
+      "filename": "track1.mp3",
+      "caption": "An energetic rock track with electric guitar and driving drums",
+      "genre": "Rock",
+      "lyrics": "[Verse 1]\nRising up from the ashes tonight\n[Chorus]\nWe're on fire, burning bright",
+      "raw_lyrics": "",
+      "formatted_lyrics": "[Verse 1]\nRising up...",
+      "bpm": 140,
+      "keyscale": "E minor",
+      "timesignature": "4",
+      "duration": 180,
+      "language": "en",
+      "is_instrumental": false,
+      "custom_tag": "mytrigger",
+      "labeled": true,
+      "prompt_override": null
+    }
+  ]
+}

@@ -208,6 +208,38 @@ def test_tidy_this_text_obeys_the_ticks_on_screen(manager):
         win.close()
 
 
+def test_the_dataset_pass_reads_the_current_text_not_the_raw_snapshot(manager):
+    """``apply_lyrics_tidy`` reads the CURRENT lyrics, not ``raw_lyrics`` first.
+
+    This is the second implementation of the tidy pass — the Lyrics tab's Apply
+    button and the Studio's "Apply to dataset" both call it — and it carried the
+    same defect as the panel's: ``raw_lyrics`` is the pre-tidy snapshot, written
+    once by the first pass that changes a track, so reading it FIRST recomputed
+    from superseded words and wrote the result over whatever had been edited
+    since. An edit followed by a dataset tidy was silently reverted.
+    """
+    from modules.dataset_schema import new_dataset, new_sample
+
+    manager.dataset = new_dataset(name="readorder")
+    sample = new_sample(
+        id="aaa111", filename="a.mp3", audio_path="./songs/a.mp3",
+        lyrics='"edited since"', formatted_lyrics='"edited since"',
+    )
+    sample["raw_lyrics"] = '"stale original"'
+    manager.dataset["samples"] = [sample]
+    manager.refresh_table()
+    manager.table.selectRow(0)
+    manager.on_table_selection_changed()
+    manager.lyrics_replace_check.setChecked(True)
+
+    manager.apply_lyrics_tidy(SCOPE_CHOICES[1])
+
+    assert sample["formatted_lyrics"] == "Edited since"
+    assert sample["lyrics"] == "Edited since"
+    # The snapshot keeps the ORIGINAL it started with, untouched by this pass.
+    assert sample["raw_lyrics"] == '"stale original"'
+
+
 def test_apply_to_dataset_passes_the_panels_scope(manager, monkeypatch):
     """The scope the user picked in the Studio, not the Tools tab's leftover."""
     win = _studio(manager)

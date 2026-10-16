@@ -279,12 +279,19 @@ def test_an_auto_save_is_undoable_and_holds_the_old_text(qapp, manager):
 
 
 def test_a_save_preserves_the_original_as_raw_lyrics(qapp, manager):
-    """``raw_lyrics`` is what the tidy pass starts from, so the auto-save must
-    put the PRE-edit text there — not the text it is saving."""
+    """``raw_lyrics`` is the snapshot of the text BEFORE this edit, so the
+    auto-save must put the PRE-edit text there — not the text it is saving.
+
+    Note what ``raw_lyrics`` is NOT: it is not what a later pass reads. The tidy
+    reads the CURRENT text and only falls back to this field when a track has
+    nothing else (``modules.dataset_schema.lyrics_source``), which is what makes
+    an edit like this one survive a subsequent tidy.
+    """
     sample = _load(manager, [_track("a.mp3", "one")])
     manager.lyrics_text.setPlainText("two")
     _settle(qapp, manager)
     assert sample["raw_lyrics"] == "one"
+    assert sample["formatted_lyrics"] == "two"
 
 
 def test_an_unchanged_field_does_not_create_a_snapshot(qapp, manager):

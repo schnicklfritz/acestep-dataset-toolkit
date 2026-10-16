@@ -28,6 +28,12 @@ METADATA_DEFAULTS = {
     "custom_tag": "",
     "tag_position": "prepend",      # prepend | append | none
     "created_at": "",               # ISO-8601, filled on first save of a new dataset
+    # Count of ``samples`` in THIS document. The app's project file counts every
+    # row it holds, virtual placeholders included (they are legitimate in-app —
+    # the gap audit and the captioner use them). A training manifest counts only
+    # the rows the trainer can actually resolve, because ``for_export`` drops the
+    # placeholders first. So the two documents legitimately disagree; do not
+    # "fix" one to match the other.
     "num_samples": 0,
     "all_instrumental": False,      # every track is instrumental
     "genre_ratio": 0,               # 0-100: % of tracks using genre-style prompts
@@ -74,6 +80,46 @@ SAMPLE_DEFAULTS = {
     "stem_paths": {},
     "chunk_paths": [],
 }
+
+
+# ---------------------------------------------------------------------------
+# The three lyric fields — which one a reader starts from
+# ---------------------------------------------------------------------------
+def lyrics_source(sample):
+    """The text a reader starts from: ``formatted_lyrics`` -> ``lyrics`` -> ``raw_lyrics``.
+
+    The three fields are NOT interchangeable, and this order is the contract:
+
+    ``formatted_lyrics``  the ``[Section]``-tagged block — what the training
+                          loader reads, and what every writer in the app updates
+                          (the tidy pass, the Studio's ``apply_target``, the
+                          inline editor, a transcription accept, the assistant's
+                          set-lyrics). It is the CURRENT text, so it is first.
+    ``lyrics``            lyrics as given / edited by hand. The same writers keep
+                          it in step, and an older import may have populated only
+                          this field.
+    ``raw_lyrics``        the PRE-formatting source (e.g. straight from ASR). The
+                          app also keeps the pre-tidy text here: it is written
+                          ONCE, by whichever pass first changed the words, so it
+                          is the OLDEST copy a track has.
+
+    WHY ``raw_lyrics`` IS LAST, NOT FIRST
+    -------------------------------------
+    Reading ``raw_lyrics`` first — as the tidy pass and the all-lyrics block both
+    used to — means a later tidy recomputes from the original and overwrites every
+    edit made since, so a Studio edit followed by a Tools-tab tidy was silently
+    reverted. Idempotency, the reason given for that order, does not require it:
+    ``normalize_lyrics`` is already idempotent, and the pre-tidy text survives in
+    ``raw_lyrics`` regardless, which is what makes the run reversible. Raw is now
+    reached only when it is the sole text a track has — the fresh-ASR import —
+    which is exactly what the last tier is for.
+
+    One helper rather than five copies: the tidy pass, the dataset-wide apply, the
+    all-lyrics block and the lyric sidecar all went their own way before this
+    existed, and two of the five disagreed with the other three.
+    """
+    return (sample.get("formatted_lyrics") or sample.get("lyrics")
+            or sample.get("raw_lyrics") or "")
 
 
 

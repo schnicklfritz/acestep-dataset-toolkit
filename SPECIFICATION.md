@@ -97,8 +97,10 @@ quality threshold; it validates manifest structure instead.
 * **Archival Backup Management**:
   * Original un-normalized files are moved to `project_backups/originals/`.
   * The dataset manifest seamlessly points to the normalized files.
-  * Includes an **"A/B Compare to Original"** toggle and a **"Revert to Original"** restore button.
   * Option to compress `project_backups/` into a `.zip` archive for space management.
+  * Restoring an original is a manual copy back from `project_backups/originals/`. The
+    per-track **"A/B Compare to Original"** toggle and **"Revert to Original"** button
+    were removed from the Inspector; the backup folder is the retained safety net.
 
 ---
 

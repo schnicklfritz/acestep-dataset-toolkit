@@ -18,7 +18,7 @@ class ExportWorker(QThread):
 
     def run(self):
         try:
-            samples = self.dataset.get("samples", [])
+            all_samples = self.dataset.get("samples", [])
             dest = self.options.get("dest_dir", "")
             Path(dest).mkdir(parents=True, exist_ok=True)
             done = []
@@ -33,7 +33,7 @@ class ExportWorker(QThread):
             # alone would still leak through CSV, JSONL, sidecars and the
             # train/val folders. The rule itself lives in
             # ``modules.exporters.for_export`` so it can be tested on its own.
-            samples = exporters.for_export(samples)
+            samples = exporters.for_export(all_samples)
 
             if self.options.get("json"):
                 exporters.export_json(self.dataset, Path(dest) / "dataset.json")
@@ -57,6 +57,13 @@ class ExportWorker(QThread):
                 )
                 done.append(f"train/val ({counts['train']}/{counts['val']})")
 
-            self.finished_ok.emit(", ".join(done) if done else "nothing selected")
+            # Say what was dropped. The exclusion is deliberate, but a user who
+            # counted the tracks in the app and then counted the exported rows
+            # reads the difference as data loss unless it is stated.
+            skipped = len(all_samples) - len(samples)
+            summary = ", ".join(done) if done else "nothing selected"
+            if skipped:
+                summary += f" — {skipped} virtual placeholder(s) excluded"
+            self.finished_ok.emit(summary)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))

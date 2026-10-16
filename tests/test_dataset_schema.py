@@ -12,12 +12,53 @@ from modules.dataset_schema import (
     EXPORT_FIELD_MAP,
     METADATA_DEFAULTS,
     SAMPLE_DEFAULTS,
+    lyrics_source,
     normalize_dataset,
     new_dataset,
     new_sample,
     to_export_dataset,
     to_export_sample,
 )
+
+
+class TestLyricsSource:
+    """The read order for the three lyric fields: formatted -> lyrics -> raw.
+
+    Declared once, here, because five call sites used to keep their own copy and
+    two of them read ``raw_lyrics`` first. ``raw_lyrics`` is the snapshot from
+    BEFORE the first pass that changed a track, so reading it first made a later
+    pass recompute from superseded words and overwrite whatever had been edited
+    since.
+    """
+
+    def test_formatted_lyrics_wins(self):
+        s = new_sample(formatted_lyrics="[Chorus]\nnew", lyrics="new",
+                       raw_lyrics="old raw")
+        assert lyrics_source(s) == "[Chorus]\nnew"
+
+    def test_lyrics_is_the_second_tier(self):
+        # An import that only ever populated ``lyrics`` (or a field the Studio
+        # has not written back yet) is still readable.
+        s = new_sample(lyrics="only here", raw_lyrics="old raw")
+        assert lyrics_source(s) == "only here"
+
+    def test_raw_lyrics_is_the_last_tier(self):
+        # The fresh-ASR case: nothing has formatted the track yet.
+        s = new_sample(raw_lyrics="straight from asr")
+        assert lyrics_source(s) == "straight from asr"
+
+    def test_a_track_with_nothing_returns_an_empty_string(self):
+        assert lyrics_source(new_sample()) == ""
+
+    def test_blank_tiers_do_not_shadow_later_ones(self):
+        # An empty string is "no text", not "the text": a track whose lyrics were
+        # cleared still falls through to its snapshot.
+        s = new_sample(formatted_lyrics="", lyrics="", raw_lyrics="asr")
+        assert lyrics_source(s) == "asr"
+
+    def test_it_never_returns_none(self):
+        # Callers do ``.strip()`` on the result straight away.
+        assert lyrics_source({}) == ""
 
 
 class TestExportFieldNames:
