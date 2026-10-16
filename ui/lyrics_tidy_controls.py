@@ -99,16 +99,30 @@ def build_rule_checkboxes(manager, form):
     """Create the four checkboxes ON ``manager``, as ``lyrics_tab`` has always done.
 
     Kept here so the labels and tooltips have a single source: the tab passes its
-    ``QFormLayout`` and gets back the widgets, already named and defaulted.
+    ``QFormLayout`` and gets back the widgets already laid out and defaulted.
+
+    The four assignments at the end are written out longhand on purpose. The loop
+    above cannot name the attributes it sets (``spec["attr"]`` is a computed
+    string), and ``tests/test_dangling_attributes.py`` — the guard written after
+    the ``run_ai_btn`` bug, where a removed widget left ``self.run_ai_btn``
+    references behind — only sees a ``setattr`` whose name is a string LITERAL.
+    It caught this: with only the loop, ``_lyrics_options()``'s reads of
+    ``self.lyrics_punct_check`` and friends looked dangling. An ALLOWLIST entry
+    would have blinded the guard for exactly the bug it exists to catch, so the
+    names are spelled out here instead.
     """
     boxes = {}
     for spec in RULE_SPECS:
         box = QCheckBox(spec["label"])
         box.setToolTip(spec["tip"])
         box.setChecked(spec["default"])
-        setattr(manager, spec["attr"], box)
         form.addRow("", box)
         boxes[spec["key"]] = box
+
+    manager.lyrics_ing_check = boxes["ing_to_in"]
+    manager.lyrics_tags_check = boxes["do_capitalize_tags"]
+    manager.lyrics_lines_check = boxes["do_capitalize_lines"]
+    manager.lyrics_punct_check = boxes["do_strip_punctuation"]
     return boxes
 
 
