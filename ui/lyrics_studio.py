@@ -59,8 +59,9 @@ same module the main and Tools windows use, so there is exactly one
 implementation of both.
 """
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -80,6 +81,7 @@ from ui.lyrics_keyboard_mode import (
     word_under_or_before,
     words_cursor,
 )
+from ui.lyrics_tidy_controls import TidyRulesPanel
 
 # Spec item 4, in the owner's own words: "double clicking a word capitalizes it
 # by default, to enter keyboard mode, press enter". Kept verbatim in meaning --
@@ -104,6 +106,11 @@ MINIMUM_SIZE = (560, 420)
 # settings.json key for this window's saved geometry. The z-order preference is
 # stored by the chrome under ``<key>_z``. One key per window, like ui_dock_state.
 GEOMETRY_KEY = "lyrics_studio_geometry"
+
+# settings.json key for the keyboard-mode checkbox. Persisted because OFF is a
+# deliberate choice ("Enter must add a new line here") and coming back ON at the
+# next launch would silently re-take that key.
+KEYBOARD_MODE_KEY = "lyrics_studio_keyboard_mode"
 
 
 def apply_target(sample, text, target):
@@ -359,7 +366,20 @@ class LyricsStudioWindow(QDialog):
         self.mode_label = QLabel("")
         self.mode_label.setProperty("muted", True)
         self.mode_label.setWordWrap(True)
-        lay.addWidget(self.mode_label)
+        # The mode's ON/OFF control, in the same row as its state line: the mode
+        # used to be installed unconditionally with no way to switch it off, so a
+        # bare Enter that capitalizes instead of adding a newline could not be
+        # returned to normal typing from anywhere in the UI.
+        self.keyboard_check = QCheckBox("\u2328 Keyboard mode")
+        self.keyboard_check.setToolTip(
+            "ON: Enter walks the words (the arrow keys move, Enter capitalizes, "
+            "Esc finishes). OFF: Enter adds a new line, as in the inline lyrics "
+            "field. The setting is remembered."
+        )
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(self.keyboard_check)
+        mode_row.addWidget(self.mode_label, 1)
+        lay.addLayout(mode_row)
         # Stored on ``self`` rather than handed to the layout alone: PySide6
         # frees a QObject whose last reference goes away, and a freed object
         # takes its event filter with it — keyboard mode would then silently
@@ -367,6 +387,15 @@ class LyricsStudioWindow(QDialog):
         # geometry. Parenting (inside KeyboardMode) is the second half of that
         # belt-and-braces.
         self.keyboard_mode = KeyboardMode(self.text, self.mode_label)
+
+        # The checkbox is what turns it on and off, and the persisted preference
+        # is applied BEFORE its signal is connected (so this is not a user
+        # event); the manager persists ``config`` when the app closes, which is
+        # how the window chrome's geometry is remembered too.
+        if not self._keyboard_mode_wanted():
+            self.keyboard_mode.set_enabled(False)
+        self.keyboard_check.setChecked(self.keyboard_mode.enabled)
+        self.keyboard_check.toggled.connect(self.on_keyboard_mode_toggled)
 
         # ---- diff -----------------------------------------------------------
         # The caption, the report and its debounce are a module now
@@ -391,6 +420,17 @@ class LyricsStudioWindow(QDialog):
         self.report_label.setWordWrap(True)
         lay.addWidget(self.report_label)
 
+        # ---- tidy rules ------------------------------------------------------
+        # Directly above the tools row, NOT inside a scroll area: the whole point
+        # of this panel is that the rules "Tidy" applies are visible while you
+        # read the line they will change. It is a second VIEW of the Lyrics tab's
+        # checkboxes (see ui/lyrics_tidy_controls) -- ticking a box here ticks
+        # the tab's box, so ``manager._lyrics_options()`` still has one source.
+        self.tidy_panel = TidyRulesPanel(
+            manager, with_scope=True, on_apply=self.apply_tidy_to_dataset
+        )
+        lay.addWidget(self.tidy_panel)
+
 
         # ---- tools row ------------------------------------------------------
         row = QHBoxLayout()
@@ -404,11 +444,11 @@ class LyricsStudioWindow(QDialog):
         self.undo_btn.setToolTip("Undo the last edit in the editor.")
         self.redo_btn = QPushButton("↷ Redo")
         self.redo_btn.setToolTip("Redo the last undone edit.")
-        self.tidy_btn = QPushButton("✨ Tidy")
+        self.tidy_btn = QPushButton("✨ Tidy this text")
         self.tidy_btn.setToolTip(
-            "Apply the Lyrics tab's tidy rules to this text. The rules live in "
-            "one place — see the summary below — so the tab and this window "
-            "cannot drift."
+            "Apply the tidy rules to the text in this editor — the same rules "
+            "the Tick boxes above show, which are also the Lyrics tab's. Nothing "
+            "is written to the track until you add it."
         )
         self.track_btn = QPushButton("↺ Use the track's lyrics")
         self.track_btn.setToolTip(
@@ -434,6 +474,15 @@ class LyricsStudioWindow(QDialog):
         self.warn_label.setWordWrap(True)
         self.warn_label.setProperty("health", "warn")
         actions.addWidget(self.warn_label, 1)
+        # Quick Save: one click, no dialog, nothing closed — the write-back plus
+        # the dataset file, which is what "save my work" means in a window you
+        # keep open beside the table. It is here (not only on Ctrl+S) because a
+        # shortcut nobody knows about is not an affordance.
+        self.quicksave_btn = QPushButton("⚡ Quick Save")
+        self.quicksave_btn.setToolTip(
+            "Write the editor into the track's lyrics and save the dataset file. "
+            "No dialogs, and the window stays open. Ctrl+S does the same."
+        )
         self.close_btn = QPushButton("Close")
         self.close_btn.setToolTip("Close without writing anything to the track.")
         self.pick_btn = QPushButton("▾")
@@ -446,6 +495,7 @@ class LyricsStudioWindow(QDialog):
             "Hold the target picker open with the ▾ button to send it to the "
             "caption instead, or to both."
         )
+        actions.addWidget(self.quicksave_btn)
         actions.addWidget(self.close_btn)
         actions.addWidget(self.pick_btn)
         actions.addWidget(self.add_btn)
@@ -466,6 +516,11 @@ class LyricsStudioWindow(QDialog):
         # the destination these wrappers keep that bool out of ``target``.
         self.pick_btn.clicked.connect(self.choose_target_then_export)
         self.add_btn.clicked.connect(self.add_to_lyrics)
+        self.quicksave_btn.clicked.connect(self.quick_save)
+        # Ctrl+S is scoped to this window (Qt's default WindowShortcut context),
+        # so it cannot shadow the main window's own Save while that has focus.
+        self.save_shortcut = QShortcut(QKeySequence.Save, self)
+        self.save_shortcut.activated.connect(self.quick_save)
 
         # Live diff, debounced: a diff on every keystroke of a 60-line song is
         # wasted work, and the panel is there to be read, not to keep up with
@@ -573,7 +628,10 @@ class LyricsStudioWindow(QDialog):
             QMessageBox.information(self, "Nothing to tidy", "The editor is empty.")
             return
         try:
-            opts = self.manager._lyrics_options() if self.manager else {}
+            # The visible rule panel is the reader, and it delegates to
+            # ``manager._lyrics_options()`` -- so the ticks the user can see are
+            # the rules this applies, still from ONE options implementation.
+            opts = self.tidy_panel.options() if self.manager else {}
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Tidy unavailable", str(e))
             return
@@ -590,6 +648,101 @@ class LyricsStudioWindow(QDialog):
             f"{report['tags']} tag(s) capitalized. "
             "Nothing is saved until you use Add to Lyrics."
         )
+
+    def apply_tidy_to_dataset(self):
+        """Run the visible rules over the tracks in scope, and save.
+
+        The rules and the scope are the ones ON SCREEN -- the panel above, whose
+        ticks are the Lyrics tab's -- so this is the same pass the tab's Apply
+        button runs, reachable from where the lyrics are being read. The manager
+        owns the pass (snapshot, gate, table refresh, contraction-table
+        re-fill); this only supplies the scope the user picked here.
+        """
+        manager = self.manager
+        apply_tidy = getattr(manager, "apply_lyrics_tidy", None)
+        if not callable(apply_tidy):
+            QMessageBox.warning(
+                self, "Not available",
+                "This needs a dataset window (the tidy pass is the main "
+                "window's, so its undo history stays in one place).",
+            )
+            return
+        scope = self.tidy_panel.scope_text()
+        apply_tidy(scope=scope)
+        # AFTER refresh_diff: that call rewrites ``report_label`` with the diff
+        # summary, so a line set before it would never be seen -- the button
+        # would look like it did nothing.
+        self.refresh_diff()
+        self.report_label.setText(
+            f"Applied the ticked tidy rules to: {scope}. "
+            "Undo with Ctrl+Z on the main window."
+        )
+
+    def quick_save(self):
+        """\u26a1 Quick Save / Ctrl+S: the write-back and the file, without dialogs.
+
+        The same two steps as "Add to Lyrics" -- ``write_back`` takes the undo
+        snapshot first, so this is not a destructive shortcut -- minus the
+        overwrite prompt and minus the closing. The Studio is one of the app's
+        real windows and stays open beside the table, so "paste, tidy, keep
+        going" should not need a modal confirm every time.
+
+        ``manager.save_dataset`` prompts with Save-As only when the dataset has
+        never been written, which is the one case where a quicksave cannot be
+        silent. Nothing here ever blanks a track: an empty editor saves the file
+        and leaves the track's lyrics alone.
+        """
+        manager = self.manager
+        if manager is None:
+            return
+        sample = self._selected_track()
+        text = self.text.toPlainText().strip()
+
+        if sample is None or not text:
+            saved = self._persist_dataset()
+            if saved is None:
+                self.report_label.setText(
+                    "Nothing to save: no track is selected and this manager has "
+                    "no dataset writer."
+                )
+                return
+            if not saved:
+                self.report_label.setText("Not saved \u2014 the save was cancelled.")
+                return
+            # A blank editor is not written to a track: "save" must never empty
+            # a song's lyrics as a side effect of walking away from the window.
+            self.report_label.setText(
+                "Saved the dataset file."
+                + ("" if text else " The editor is empty, so the track's lyrics "
+                                   "were left as they are.")
+            )
+            return
+
+        saved = self.write_back(LYRICS_TARGET)
+        name = sample.get("filename", "")
+        self.refresh_diff()
+        if saved is False:
+            self.warn_label.setText(
+                "Written to the track in memory, but the dataset file was NOT "
+                "saved (cancelled or failed). Use File \u25b8 Save Dataset."
+            )
+            return
+        dataset_name = ""
+        path = getattr(manager, "current_dataset_path", None)
+        if path:
+            from pathlib import Path
+
+            dataset_name = f" and to {Path(path).name}"
+        self.warn_label.setText("")
+        self.report_label.setText(
+            f"Saved '{name}' to its lyrics{dataset_name}."
+            + ("" if saved else " (No dataset writer on this window.)")
+        )
+        if hasattr(manager, "status_label"):
+            manager.status_label.setText(
+                f"Quick-saved lyrics for '{name}'"
+                + (" \u2014 dataset saved." if saved else " (in memory only).")
+            )
 
 
     # ---- diff + seeding -------------------------------------------------
@@ -756,6 +909,31 @@ class LyricsStudioWindow(QDialog):
             # Escape or the close box means STAY, never "discard".
             return False
         return True
+
+    # ---- keyboard mode --------------------------------------------------
+    def _keyboard_mode_wanted(self):
+        """The saved preference for keyboard mode, default ON.
+
+        Read defensively: a stand-in manager (tests, tooling) has no ``config``,
+        and the mode's pre-toggle behaviour -- installed and idle -- is what a
+        window with no settings should come up in.
+        """
+        config = getattr(self.manager, "config", None)
+        if isinstance(config, dict):
+            return bool(config.get(KEYBOARD_MODE_KEY, True))
+        return True
+
+    def on_keyboard_mode_toggled(self, flag):
+        """Switch keyboard mode on/off from the checkbox, and remember it."""
+        self.keyboard_mode.set_enabled(flag)
+        config = getattr(self.manager, "config", None)
+        if isinstance(config, dict):
+            config[KEYBOARD_MODE_KEY] = bool(flag)
+        self.report_label.setText(
+            "Keyboard mode ON \u2014 press Enter to walk the words."
+            if flag else
+            "Keyboard mode OFF \u2014 Enter adds a new line again."
+        )
 
     def refresh_diff(self):
         """Show editor vs. track, plus a summary of the tidy rules in effect.

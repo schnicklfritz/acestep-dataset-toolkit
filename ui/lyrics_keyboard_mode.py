@@ -224,6 +224,10 @@ MODE_ACTIVE_TEXT = (
     "⌨ Keyboard mode — ←/→ word · ↑/↓ line · Enter capitalize · Esc to finish"
 )
 MODE_EMPTY_TEXT = "⌨ Nothing to walk: there are no words to capitalize here."
+# Shown when the mode is switched OFF from the Studio's checkbox. It names the
+# control, because the state that confused the owner was a mode that looked
+# present (its hint line was on screen) while its keys did nothing.
+MODE_OFF_TEXT = "⌨ Keyboard mode is OFF — tick “Keyboard mode” to walk words with Enter"
 
 # A bare modifier press is a preparation, not an edit, so it must not end the
 # mode: pressing Shift on the way to Shift+Enter would otherwise drop the mode
@@ -272,6 +276,7 @@ class KeyboardMode(QObject):
     _label = None
     _active = False
     _span = None
+    _enabled = True
 
     def __init__(self, widget, label=None, parent=None):
         super().__init__(parent if parent is not None else widget)
@@ -284,12 +289,55 @@ class KeyboardMode(QObject):
         self._label = label
         self._active = False
         self._span = None
-        widget.installEventFilter(self)
-        if self._view is not None:
-            self._view.installEventFilter(self)
+        # ON by default: the mode is what the window's hint line already tells
+        # the user to press Enter for. The toggle exists because a bare Enter
+        # that capitalizes instead of inserting a newline is exactly the sort of
+        # intercept a user needs to be able to turn OFF from a visible control,
+        # and there was none: the filter was installed unconditionally.
+        self._enabled = True
+        self._install_filters()
         self._set_label(MODE_IDLE_TEXT)
 
     # ---- state ----------------------------------------------------------
+    @property
+    def enabled(self):
+        """True when this mode answers keys at all."""
+        return self._enabled
+
+    def set_enabled(self, flag):
+        """Turn the whole mode on or off, filters included.
+
+        OFF removes the event filters rather than merely ignoring keys, so a
+        disabled mode cannot eat ``Enter``: the editor gets its newline back and
+        behaves exactly as it does in the Track Inspector, where this filter is
+        never installed. The label says which state it is in either way, because
+        a mode that looks present while pressing nothing was the report.
+        """
+        flag = bool(flag)
+        if flag == self._enabled:
+            self._set_label(MODE_IDLE_TEXT if flag else MODE_OFF_TEXT)
+            return
+        self._enabled = flag
+        if flag:
+            self._install_filters()
+            self._set_label(MODE_IDLE_TEXT)
+        else:
+            self.deactivate()          # clears the highlight, quietens the label
+            self._remove_filters()
+            self._set_label(MODE_OFF_TEXT)
+
+    def _install_filters(self):
+        if self._widget is not None:
+            self._widget.installEventFilter(self)
+        if self._view is not None:
+            self._view.installEventFilter(self)
+
+    def _remove_filters(self):
+        if self._widget is not None:
+            self._widget.removeEventFilter(self)
+        if self._view is not None:
+            self._view.removeEventFilter(self)
+
     @property
     def active(self):
         """True while the walk is running."""
@@ -318,6 +366,11 @@ class KeyboardMode(QObject):
 
     def handle_key(self, event):
         """True when the key belonged to the mode and must not reach the widget."""
+        if not self._enabled:
+            # Belt and braces: removing the filter should mean this is never
+            # reached, but a filter can still be delivered while Qt tears an
+            # object down, and a disabled mode must never swallow a key.
+            return False
         key = event.key()
         mods = event.modifiers()
         if key in _MODIFIER_KEYS:
@@ -356,6 +409,8 @@ class KeyboardMode(QObject):
     # ---- actions --------------------------------------------------------
     def activate(self):
         """Start the walk. Returns False when there is nothing to walk."""
+        if not self._enabled:
+            return False
         text = self._widget.toPlainText()
         cursor = self._widget.textCursor()
         span = None

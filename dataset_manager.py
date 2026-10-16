@@ -886,23 +886,17 @@ class DatasetManager(QMainWindow):
         self.inst_check.stateChanged.connect(self.on_inst_edited)
         form.addRow(self.inst_check)
 
-        verify_row = QHBoxLayout()
-        self.bpm_verify_btn = QPushButton("🔗 Verify BPM Online")
-        self.bpm_verify_btn.clicked.connect(self.open_online_bpm_check)
-        self.key_verify_btn = QPushButton("🔗 Verify Key Online")
-        self.key_verify_btn.clicked.connect(self.open_online_key_check)
-        verify_row.addWidget(self.bpm_verify_btn)
-        verify_row.addWidget(self.key_verify_btn)
-        form.addRow(verify_row)
-
-        ab_row = QHBoxLayout()
-        self.ab_compare_btn = QPushButton("🎧 A/B Compare Original")
-        self.ab_compare_btn.clicked.connect(self.ab_compare_playback)
-        self.fallback_btn = QPushButton("⏮ Revert to Original Audio")
-        self.fallback_btn.clicked.connect(self.fallback_to_original)
-        ab_row.addWidget(self.ab_compare_btn)
-        ab_row.addWidget(self.fallback_btn)
-        form.addRow(ab_row)
+        # Four buttons stood here: "Verify BPM Online" / "Verify Key Online"
+        # (they opened songbpm.com and tunebat.com for the filename), "A/B
+        # Compare Original" and "Revert to Original Audio". The owner does not
+        # use them, so they and their handlers are gone -- the online ones
+        # because a web lookup of a track name is not verification of a measured
+        # value, and the A/B pair because the comparison and the revert both just
+        # reported paths in a message box rather than doing either thing (the
+        # normalize-done dialog already names the backup folder).
+        # ``self.original_backups`` is deliberately KEPT: it is the record of what
+        # each normalize wrote where, and dropping the record because its buttons
+        # went away would delete information rather than a control.
 
         insp_layout.addLayout(form)
         # Registered last so Expand hides the whole lower half in one pass:
@@ -980,7 +974,11 @@ class DatasetManager(QMainWindow):
         build_lyrics_panel(self, parent)
 
         self.lyrics_preview_btn.clicked.connect(self.preview_lyrics_tidy)
-        self.lyrics_apply_btn.clicked.connect(self.apply_lyrics_tidy)
+        # ``clicked`` emits a bool and ``apply_lyrics_tidy`` now takes an optional
+        # ``scope`` (the Lyrics Studio passes the scope ITS picker shows), so the
+        # connection is wrapped: without this the button's False would arrive as
+        # the scope and the pass would have no tracks to match.
+        self.lyrics_apply_btn.clicked.connect(lambda: self.apply_lyrics_tidy())
         self.lyrics_manual_edit_btn.clicked.connect(self.open_lyrics_editor)
         self.lyrics_capitalizer_btn.clicked.connect(self.open_lyric_capitalizer)
         self.lyrics_add_row_btn.clicked.connect(self._lyrics_add_contract_row)
@@ -1165,10 +1163,17 @@ class DatasetManager(QMainWindow):
             "do_strip_punctuation": self.lyrics_punct_check.isChecked(),
         }
 
-    def _lyrics_scope_samples(self):
-        """Tracks the tidy pass should touch, per the scope combo."""
+    def _lyrics_scope_samples(self, scope=None):
+        """Tracks the tidy pass should touch, per the scope combo.
+
+        ``scope`` overrides the combo. The Lyrics Studio passes the scope its own
+        always-visible picker is showing, so a dataset-wide tidy started from the
+        studio rewrites the tracks the user named THERE rather than whatever the
+        Tools tab's combo happened to be left on.
+        """
         samples = self.dataset.get("samples", [])
-        scope = self.lyrics_scope_combo.currentText()
+        if scope is None:
+            scope = self.lyrics_scope_combo.currentText()
         if scope.startswith("Selected"):
             s = self.get_selected_sample()
             return [s] if s else []
@@ -1225,11 +1230,22 @@ class DatasetManager(QMainWindow):
             f"{report['tags']} tag(s) capitalized"
         )
 
-    def apply_lyrics_tidy(self):
-        """Rewrite lyrics on the tracks in scope (undoable)."""
+    def apply_lyrics_tidy(self, scope=None):
+        """Rewrite lyrics on the tracks in scope (undoable).
+
+        ``scope`` comes from the Lyrics Studio's own scope picker when the pass is
+        started there; ``None`` means the Lyrics tab's combo, which is what its
+        own Apply button passes. One implementation either way, so the two
+        surfaces cannot tidy differently.
+        """
         from modules.lyrics_normalizer import normalize_lyrics
 
-        targets = self._lyrics_scope_samples()
+        if not isinstance(scope, str):
+            # A bool from a ``clicked`` connection, or anything else that is not a
+            # scope name, means "use the combo": a non-string would otherwise be
+            # handed to ``startswith`` and raise deep inside the pass.
+            scope = None
+        targets = self._lyrics_scope_samples(scope)
         if not targets:
             QMessageBox.warning(self, "Nothing To Tidy", "No tracks match the selected scope.")
             return
@@ -4304,20 +4320,6 @@ class DatasetManager(QMainWindow):
         if url:
             QDesktopServices.openUrl(QUrl(url))
 
-    def open_online_bpm_check(self):
-        s = self.get_selected_sample()
-        if s:
-            name = Path(s.get("filename", "")).stem
-            url = f"https://songbpm.com/@search?q={QUrl.toPercentEncoding(name)}"
-            QDesktopServices.openUrl(QUrl(url))
-
-    def open_online_key_check(self):
-        s = self.get_selected_sample()
-        if s:
-            name = Path(s.get("filename", "")).stem
-            url = f"https://tunebat.com/Search?q={QUrl.toPercentEncoding(name)}"
-            QDesktopServices.openUrl(QUrl(url))
-
     def show_all_tracks(self):
         self.filter_exceptions_only = False
         self.refresh_table()
@@ -5368,35 +5370,6 @@ class DatasetManager(QMainWindow):
             self.radio_no_inst.setChecked(True)
         else:
             self.radio_mixed.setChecked(True)
-
-    def ab_compare_playback(self):
-        s = self.get_selected_sample()
-        if s:
-            sid = s.get("id", "")
-            orig_backup = self.original_backups.get(sid, s.get("audio_path", ""))
-            curr_path = s.get("audio_path", "")
-            QMessageBox.information(
-                self, "🎧 A/B Audio Comparison",
-                f"Track: {s.get('filename', '')}\n\n"
-                f"Active Audio:\n{curr_path}\n\n"
-                f"Original Un-normalized Backup:\n{orig_backup}\n\n"
-                "(Use system media player to audit waveforms side-by-side.)"
-            )
-
-    def fallback_to_original(self):
-        s = self.get_selected_sample()
-        if s:
-            sid = s.get("id", "")
-            orig_backup = self.original_backups.get(sid)
-            if orig_backup and os.path.exists(orig_backup):
-                self.record_snapshot()
-                s["audio_path"] = orig_backup
-                s["filename"] = Path(orig_backup).name
-                self.refresh_table()
-                self.on_table_selection_changed()
-                QMessageBox.information(self, "Reverted", f"Reverted {s['filename']} to original audio source.")
-            else:
-                QMessageBox.warning(self, "No Backup", "Original audio backup not found for this track.")
 
     def toggle_bypass(self):
         self.bypass_warnings = self.bypass_btn.isChecked()

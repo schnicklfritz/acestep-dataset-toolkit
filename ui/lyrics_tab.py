@@ -34,6 +34,7 @@ from modules.lyrics_normalizer import (
     DEFAULT_ING_EXCEPTIONS,
     add_case_twins,
 )
+from ui.lyrics_tidy_controls import build_rule_checkboxes
 
 # Always-visible warning about why this tool exists.
 APOSTROPHE_WARNING = (
@@ -148,34 +149,12 @@ def build_lyrics_tab(manager, parent):
     opts = QGroupBox("Tidy Options")
     o_form = QFormLayout(opts)
 
-    manager.lyrics_ing_check = QCheckBox("Shorten -ing to -in  (running \u2192 runnin)")
-    manager.lyrics_ing_check.setToolTip(
-        "Singer-dependent: Ozzy Osbourne enunciates '-ing', many singers do not. "
-        "Off by default; turn it on to match how the track is actually sung."
-    )
-    o_form.addRow("", manager.lyrics_ing_check)
-
-    manager.lyrics_tags_check = QCheckBox("Capitalize structure tags  ([verse] \u2192 [Verse])")
-    manager.lyrics_tags_check.setChecked(True)
-    o_form.addRow("", manager.lyrics_tags_check)
-
-    manager.lyrics_lines_check = QCheckBox("Capitalize the first word of each line  (rising \u2192 Rising)")
-    manager.lyrics_lines_check.setChecked(True)
-    manager.lyrics_lines_check.setToolTip(
-        "Lyric lines are normally written as sentences, so a lowercase start "
-        "reads as a typo in a training caption. Only the first character is "
-        "touched — the rest of the line keeps its case, so an ALL-CAPS line and "
-        "words like iPhone/eBay are left alone."
-    )
-    o_form.addRow("", manager.lyrics_lines_check)
-
-    manager.lyrics_punct_check = QCheckBox('Strip trailing punctuation  (except " and ))')
-    manager.lyrics_punct_check.setChecked(True)
-    manager.lyrics_punct_check.setToolTip(
-        "Removes . , ! ? ; : - … from the end of each lyric line. A closing "
-        'quote " or paren ) is preserved.'
-    )
-    o_form.addRow("", manager.lyrics_punct_check)
+    # The four rules are declared in ``ui/lyrics_tidy_controls.py`` and built
+    # from there, so the Lyrics Studio's always-visible rule panel and this tab
+    # cannot describe the same rule with different wording. The widgets are still
+    # stored on the manager under the same names -- they ARE the app's tidy state,
+    # read by ``_lyrics_options()``.
+    manager.lyrics_rule_boxes = build_rule_checkboxes(manager, o_form)
 
     manager.lyrics_replace_check = QCheckBox("Replace existing lyrics (otherwise fill blanks only)")
     manager.lyrics_replace_check.setChecked(True)

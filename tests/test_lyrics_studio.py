@@ -16,7 +16,10 @@ What is pinned, and why each is easy to lose in a refactor:
   in. A read-only pane would look harmless and silently break it — the diff box
   below IS read-only, and the two must not be confused.
 * **The tidy rules are the Lyrics tab's.** The window does not own a second copy
-  of the options or the contraction table; it calls ``manager._lyrics_options()``.
+  of the options or the contraction table. It shows them in an always-visible
+  panel (``ui/lyrics_tidy_controls``) that drives — and follows — the tab's own
+  checkboxes, and the tidy button reads ``manager._lyrics_options()`` through that
+  panel, so there is still one options implementation.
 * **The export target.** ``formatted_lyrics`` is what the training export reads;
   a write that only filled ``lyrics`` would look right in the app and ship
   unmarked lyrics to training.
@@ -969,4 +972,144 @@ def test_reopening_the_same_track_does_not_discard_typing(qapp):
     )
 
     window.close()
+
+
+
+# ---------------------------------------------------------------------------
+# Quick Save: the write-back and the file, with no dialog in the way
+# ---------------------------------------------------------------------------
+
+def test_quick_save_writes_the_track_and_the_dataset(qapp, monkeypatch):
+    """The owner asked for a save that does not mean leaving the window.
+
+    Pinned: the text reaches ``formatted_lyrics`` (what the export reads) and
+    ``lyrics``, the write is UNDOABLE (``record_snapshot`` runs first, exactly as
+    the Add button does), and the dataset file is written -- so a quicksave is
+    not a memory-only gesture that a crash would take with it.
+    """
+    manager, sample, win = _window(qapp, lyrics="old words")
+    saves = []
+    monkeypatch.setattr(
+        manager, "save_dataset", lambda path=None: (saves.append(path), True)[1],
+        raising=False,
+    )
+    win.text.setPlainText("new words")
+    win.quicksave_btn.click()
+
+    assert sample["formatted_lyrics"] == "new words"
+    assert sample["lyrics"] == "new words"
+    assert manager.snapshots == 1, "a quicksave that cannot be undone is a trap"
+    assert saves == [None], "the dataset file was not written"
+    assert win.warn_label.text() == ""          # nothing went wrong
+    win.close()
+
+
+def test_quick_save_with_an_empty_editor_never_blanks_a_track(qapp, monkeypatch):
+    """An empty editor must not be a way to erase a song's lyrics.
+
+    The editor is empty whenever the user has not typed yet, so treating "save"
+    as a write-back would wipe the track on an idle click.
+    """
+    manager, sample, win = _window(qapp, lyrics="keep me")
+    monkeypatch.setattr(manager, "save_dataset", lambda path=None: True, raising=False)
+    win.text.setPlainText("")
+    win.quicksave_btn.click()
+
+    assert sample["formatted_lyrics"] == "keep me"
+    assert manager.snapshots == 0
+    win.close()
+
+
+def test_quick_save_says_so_when_the_file_was_not_written(qapp, monkeypatch):
+    """A save that failed must not look like a save that worked."""
+    manager, sample, win = _window(qapp, lyrics="old words")
+    monkeypatch.setattr(manager, "save_dataset", lambda path=None: False, raising=False)
+    win.text.setPlainText("new words")
+    win.quicksave_btn.click()
+
+    assert sample["formatted_lyrics"] == "new words"      # in memory
+    assert "NOT" in win.warn_label.text()                 # and said so
+    win.close()
+
+
+def test_ctrl_s_is_wired_to_quick_save(qapp):
+    """The shortcut nobody could guess is at least real."""
+    manager, sample, win = _window(qapp, lyrics="a b")
+    assert win.save_shortcut.key().toString() == "Ctrl+S"
+    win.close()
+
+
+# ---------------------------------------------------------------------------
+# Keyboard mode can be switched OFF (and back on)
+# ---------------------------------------------------------------------------
+
+def test_keyboard_mode_can_be_switched_off_and_enter_types_again(qapp):
+    """The mode used to be installed unconditionally, with no way to stop it.
+
+    OFF is not a flag the filter consults: the filters are REMOVED, so bare
+    ``Enter`` inserts a newline again -- the behaviour of the inline lyrics
+    field, where this filter is never installed. The label says which state it
+    is in, because a mode that looks present while eating keys was the report.
+    """
+    manager, sample, win = _window(qapp, lyrics="dog cat")
+    win.show()
+    win.text.setFocus()
+    qapp.processEvents()
+    assert win.keyboard_check.isChecked() is True
+    assert win.keyboard_mode.enabled is True
+
+    win.keyboard_check.setChecked(False)
+    assert win.keyboard_mode.enabled is False
+    assert "OFF" in win.mode_label.text()
+
+    win.text.setPlainText("line one")
+    cursor = win.text.textCursor()
+    cursor.movePosition(QTextCursor.End)
+    win.text.setTextCursor(cursor)
+    QTest.keyClick(win.text, Qt.Key_Return, Qt.NoModifier)
+    assert win.text.toPlainText() == "line one\n", "Enter did not insert a newline"
+    assert win.keyboard_mode.active is False
+    win.close()
+
+
+def test_switching_keyboard_mode_back_on_restores_the_walk(qapp):
+    """The other direction, measured on the same Enter key."""
+    manager, sample, win = _window(qapp, lyrics="dog cat")
+    win.show()
+    win.text.setFocus()
+    qapp.processEvents()
+
+    win.keyboard_check.setChecked(False)
+    win.keyboard_check.setChecked(True)
+    assert win.keyboard_mode.enabled is True
+    QTest.keyClick(win.text, Qt.Key_Return, Qt.NoModifier)
+    assert win.keyboard_mode.active is True
+    assert win.text.textCursor().hasSelection()
+    win.close()
+
+
+def test_the_keyboard_mode_choice_is_remembered(qapp):
+    """OFF is a deliberate choice; coming back ON at the next launch would
+    silently re-take the Enter key the user just reclaimed from the mode."""
+    manager, sample, win = _window(qapp, lyrics="dog cat")
+    manager.config = {}
+    win.keyboard_check.setChecked(False)
+    assert manager.config[ls.KEYBOARD_MODE_KEY] is False
+    win.keyboard_check.setChecked(True)
+    assert manager.config[ls.KEYBOARD_MODE_KEY] is True
+    win.close()
+
+
+def test_a_saved_off_preference_comes_up_off(qapp):
+    """The stored setting is applied before the checkbox is connected, so
+    building the window is not itself a user event."""
+    sample = _track("dog cat")
+    manager = _Manager(sample)
+    manager.config = {ls.KEYBOARD_MODE_KEY: False}
+    win = LyricsStudioWindow(manager, sample)
+    try:
+        assert win.keyboard_check.isChecked() is False
+        assert win.keyboard_mode.enabled is False
+    finally:
+        win.close()
 
