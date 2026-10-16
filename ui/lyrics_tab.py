@@ -209,15 +209,17 @@ def build_lyrics_tab(manager, parent):
     manager.lyrics_report_label.setWordWrap(True)
     p_layout.addWidget(manager.lyrics_report_label)
 
-    # Diff view: the simplest way to see exactly what changed.
-    diff_label = QLabel("<b>Changes (diff)</b> — <span style='color:#c33'>− old</span> / "
-                        "<span style='color:#3a3'>+ new</span>")
-    p_layout.addWidget(diff_label)
-    manager.lyrics_diff = QTextEdit()
-    manager.lyrics_diff.setReadOnly(True)
-    manager.lyrics_diff.setMinimumHeight(120)
-    manager.lyrics_diff.setStyleSheet("font-family: monospace;")
-    p_layout.addWidget(manager.lyrics_diff)
+    # The "Changes (diff)" QTextEdit that used to sit here is GONE, and the
+    # absence is deliberate. It was a THIRD view of the same rewrite -- before |
+    # after already showed it side by side -- and it was not minimizable, which
+    # the owner's spec requires (`.agent_notes.md`, "The Lyrics Studio spec",
+    # item 1). The diff now lives in exactly one place: the pane in the Lyrics
+    # Studio, which is collapsible and remembers that choice. Two diffs meant two
+    # things to keep in step and no way to hide either.
+    #
+    # ``unified_diff`` / ``diff_pairs`` stay in this module: the Studio's pane
+    # imports ``unified_diff`` from here (``ui/lyrics_diff.py``), and
+    # ``tests/test_lyrics_block.py`` pins both by name.
 
     preview_row = QHBoxLayout()
     manager.lyrics_preview_btn = QPushButton("🔍 Preview")

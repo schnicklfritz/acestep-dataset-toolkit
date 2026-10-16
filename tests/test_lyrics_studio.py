@@ -609,6 +609,125 @@ def test_the_editor_absorbs_extra_height(qapp):
     assert win.layout().stretch(win.layout().indexOf(win.diff)) == 2
 
 
+def test_collapsing_the_diff_keeps_it_in_the_layout(qapp):
+    """Collapsing must HIDE the report, never remove it from the layout.
+
+    ``indexOf`` returns -1 for a widget that is no longer in the layout, so a
+    collapse implemented by removing the widget would take the stretch below with
+    it and quietly change how the window spends its extra height. Hiding keeps
+    the slot: the editor absorbs the space, and both the index and the stretch
+    still resolve.
+    """
+    _m, _s, win = _window(qapp, "one")
+    # Shown, because isVisible() is False for any child of a window that was never
+    # shown — without this every visibility assertion here would pass vacuously.
+    win.show()
+    qapp.processEvents()
+
+    win.diff_pane.set_minimized(True)
+    qapp.processEvents()
+
+    assert win.diff.isVisible() is False
+    index = win.layout().indexOf(win.diff)
+    assert index != -1, "the collapsed report was removed from the layout"
+    assert win.layout().stretch(index) == 2
+    # The caption is the only way back, so it must still be on screen.
+    assert win.diff_pane.header.isVisible() is True
+
+    win.diff_pane.set_minimized(False)
+    qapp.processEvents()
+    assert win.diff.isVisible() is True
+
+
+# ---------------------------------------------------------------------------
+# The transport (spec items 7 and 8): at the top, seeded from the one song
+# ---------------------------------------------------------------------------
+
+def test_the_player_sits_at_the_top_of_the_window(qapp):
+    """Spec item 7: the waveform player is the FIRST thing in the layout.
+
+    ``indexOf`` rather than a screenshot: ``0`` is the whole claim, and it is the
+    one an accidental "add it after the hint" breaks. The menu bar does not
+    appear as a layout item (``QLayout.setMenuBar`` handles it separately), so 0
+    really is the player.
+    """
+    _m, _s, win = _window(qapp, "")
+    assert win.layout().indexOf(win.player) == 0
+
+
+def test_the_player_does_not_take_the_editors_stretch(qapp):
+    """Adding the player must not renumber the editor's stretch factors.
+
+    The window spends its extra height by stretch, so a widget added with a
+    default stretch of 0 must not have taken a share of it.
+    """
+    _m, _s, win = _window(qapp, "")
+    assert win.layout().stretch(win.layout().indexOf(win.text)) == 1
+    assert win.layout().stretch(win.layout().indexOf(win.diff)) == 2
+    assert win.layout().stretch(win.layout().indexOf(win.player)) == 0
+
+
+def _sample_with_audio(path, lyrics=""):
+    """A track dict shaped like the dataset's, with an audio path."""
+    return {"filename": "a.mp3", "caption": "", "lyrics": lyrics,
+            "formatted_lyrics": lyrics, "audio_path": path}
+
+
+def test_the_transport_is_seeded_with_the_tracks_audio(qapp, wav_file):
+    """One seeding path, so the waveform cannot show another song's shape."""
+    path = wav_file("song.wav", seconds=0.2)
+    _m, _s, win = _window(qapp, "", sample=_sample_with_audio(path))
+
+    assert win.player._path == path
+
+
+def test_a_track_without_audio_leaves_the_player_empty(qapp):
+    """Most datasets are lyrics-only; an absent path is not an error."""
+    _m, _s, win = _window(qapp, "")
+
+    assert win.player._path == ""
+    assert win.player.waveform.min_buckets is None
+
+
+def test_dropping_the_selection_empties_the_player(qapp, wav_file):
+    """The transport must not keep the track the window let go of."""
+    path = wav_file("song.wav", seconds=0.2)
+    _m, _s, win = _window(qapp, "", sample=_sample_with_audio(path))
+    assert win.player._path == path
+
+    win.on_manager_selection_changed(None)
+
+    assert win.player._path == ""
+
+
+def test_the_transport_keys_are_claimed_on_the_window(qapp):
+    """On the WINDOW, not on the editor: ``d`` stays a letter while typing."""
+    _m, _s, win = _window(qapp, "hello")
+
+    assert win.player._key_window is win
+
+
+def test_typing_a_transport_key_in_the_editor_does_not_transport(qapp):
+    """The end-to-end form of the key table's guard, through the real window."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    _m, _s, win = _window(qapp, "hello")
+    win.show()
+    qapp.processEvents()
+    win.text.setFocus()
+    qapp.processEvents()
+    # Asserted, not assumed: with no focus at all this would pass for free.
+    assert QApplication.focusWidget() is win.text
+
+    QApplication.sendEvent(
+        win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key_D, Qt.NoModifier)
+    )
+
+    assert win.player.play_btn.text() == "▶ d"
+
+
 
 # ---------------------------------------------------------------------------
 # The diff is against the track
@@ -771,23 +890,83 @@ def test_the_entry_points_still_exist_and_open_the_studio():
         )
 
 
-def test_open_lyrics_studio_is_modal_and_returns_the_dialog_result(qapp, monkeypatch):
-    """The merged window stays modal, like the two it replaced.
+def test_open_lyrics_studio_returns_an_independent_window(qapp):
+    """The studio is a REAL window now, not a modal ``exec()``.
 
-    ``exec()`` is what keeps the table from moving under a half-written song.
-    Driven here without a real event loop by intercepting ``exec``.
+    It has to behave like the main and Tools windows: a framed top-level window
+    with minimize/maximize, no modality, and the shared chrome attached. What
+    comes back is the WINDOW, because there is no nested event loop any more to
+    return a result from.
     """
     manager = _Manager(_track("hello"))
-    seen = {}
+    window = ls.open_lyrics_studio(manager)
 
-    def fake_exec(self):
-        seen["title"] = self.windowTitle()
-        seen["editor"] = self.text.toPlainText()
-        return 0
+    assert isinstance(window, LyricsStudioWindow)
+    # Modality is gone: a modal studio blocks the table, which is exactly what
+    # the owner asked to stop.
+    assert not window.isModal()
+    # ``Qt.Window`` is what gives it its own taskbar entry and native frame.
+    assert window.windowFlags() & Qt.Window
+    assert window.windowFlags() & Qt.WindowMinimizeButtonHint
+    assert window.windowFlags() & Qt.WindowMaximizeButtonHint
 
-    monkeypatch.setattr(LyricsStudioWindow, "exec", fake_exec)
-    result = ls.open_lyrics_studio(manager)
-    assert result == 0
-    assert "a.mp3" in seen["title"]
-    assert seen["editor"] == "hello"
+    # The shared chrome is attached and hosted in a menu bar, so this window has
+    # the same always-on-top/bottom controls as the other two real windows.
+    assert window.chrome is not None
+    labels = [a.text() for a in window.chrome.menu().actions() if a.text()]
+    assert "Always on top" in labels
+    assert "Always on bottom" in labels
+
+    # It opened on the selected track's lyrics.
+    assert "a.mp3" in window.windowTitle()
+    assert window.text.toPlainText() == "hello"
+
+    window.close()
+
+
+def test_reopening_reuses_and_retargets_the_one_window(qapp):
+    """Reopening must not stack a second studio on a second track.
+
+    The window is cached on the manager, so a second open re-aims that one window
+    -- reloading the editor included, since leaving the previous track's words in
+    place is how they end up written onto the wrong song.
+    """
+    manager = _Manager(_track("first song"))
+    first = ls.open_lyrics_studio(manager)
+    assert first.text.toPlainText() == "first song"
+
+    other = _track("second song")
+    other["filename"] = "b.mp3"
+    second = ls.open_lyrics_studio(manager, other)
+
+    assert second is first, "a second studio window was created"
+    assert "b.mp3" in second.windowTitle()
+    assert second.text.toPlainText() == "second song"
+
+    second.close()
+
+
+def test_reopening_the_same_track_does_not_discard_typing(qapp):
+    """Re-opening the SAME track must not throw away unsaved words.
+
+    Now that the Inspector has a button for this, it is easy to press twice --
+    and the second press arrives while the editor holds text the user has typed
+    but not yet written back. Re-targeting re-loads from the track, so without a
+    guard that press silently reverts their work.
+    """
+    manager = _Manager(_track("stored words"))
+    window = ls.open_lyrics_studio(manager)
+    assert window.text.toPlainText() == "stored words"
+
+    # Typed but not yet written back to the track.
+    window.text.setPlainText("half-written new words")
+
+    again = ls.open_lyrics_studio(manager, manager.get_selected_sample())
+
+    assert again is window
+    assert window.text.toPlainText() == "half-written new words", (
+        "re-opening the same track reloaded the editor and lost the typing"
+    )
+
+    window.close()
 

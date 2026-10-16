@@ -59,7 +59,7 @@ from widgets import WaveformWidget, ScatterPlotWidget
 from workers.advanced import AdvancedDatasetOrchestratorWorker
 from workers.dsp_normalizer import DspNormalizerWorker
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QLabel, QLineEdit, QTextEdit, QFileDialog,
@@ -844,140 +844,25 @@ class DatasetManager(QMainWindow):
         insp_layout.addWidget(self.caption_text)
 
         # ---- Lyrics field: live, debounced auto-save -------------------------
-        # There used to be a "Commit Lyrics" button here: the field was locked
-        # until "Edit mode" was ticked, and the write only happened on the
-        # explicit Commit. That gate has been removed — it made one extra click
-        # out of every edit and left unsaved text on screen if it was forgotten.
-        # The field now behaves like a text editor should: type, and it saves.
-        # What replaces the button's safety is not a smaller button but four
-        # guarantees, all of them stronger than "you pressed Commit":
-        #   * the write is debounced (400 ms after you stop typing), so a session
-        #     of keystrokes is one edit, not one per character;
-        #   * it snapshots BEFORE the write, so Ctrl+Z (or the Undo button) puts
-        #     the previous lyrics back;
-        #   * each song is backed up to <dataset>/_Backup/songs/ once, before the
-        #     first change, so the original survives even a crash;
-        #   * it refuses to write when the field no longer matches the selection,
-        #     which is the one way an auto-save could hit the wrong track.
-        lyrics_head = QHBoxLayout()
-        lyrics_head.addWidget(QLabel("<b>Formatted Lyrics / Vocal Markers:</b>"))
-        # Text-size steppers, one notch per click. They replace the old
-        # "🔠 Capitalize mode" checkbox 1:1 — that switch is gone because
-        # double-click now always marks a word shouted (see ui/lyrics_studio),
-        # so the space it occupied is free for the control users actually asked
-        # for here: making the lyrics readable at a glance. They are a coarse
-        # adjustment of the SAME ``lyrics_font_size`` key the Settings row and the
-        # numeric "Size:" spinbox own; ``ui.appearance_panel.sync_font_size_controls``
-        # keeps every copy showing one number, so there is still one source of
-        # truth. The header is never hidden by "⤢ Expand" (the Expand checkbox
-        # itself lives here), so both the value and the steppers stay reachable in
-        # the mode where the text is biggest.
-        from ui.themes import LYRICS_FONT_SIZE_MAX
-
-        self.lyrics_text_smaller_btn = QPushButton("A−")
-        self.lyrics_text_smaller_btn.setToolTip("Make the lyrics text smaller.")
-        self.lyrics_text_smaller_btn.setFixedWidth(30)
-        self.lyrics_text_smaller_btn.clicked.connect(
-            lambda: self.on_lyrics_font_step(-1))
-        self.lyrics_text_larger_btn = QPushButton("A+")
-        self.lyrics_text_larger_btn.setToolTip(
-            "Make the lyrics text larger — up to "
-            f"{LYRICS_FONT_SIZE_MAX} px, then the text wraps in this box. "
-            "\"⤢ Expand\" gives it more height to wrap into."
-        )
-        self.lyrics_text_larger_btn.setFixedWidth(30)
-        self.lyrics_text_larger_btn.clicked.connect(
-            lambda: self.on_lyrics_font_step(1))
-        self.lyrics_expand_check = QCheckBox("⤢ Expand")
-        self.lyrics_expand_check.setToolTip(
-            "Grow the field to most of the inspector and hide the fields below it."
-        )
-        from ui.themes import FONT_REGION_LYRICS, FONT_REGION_PROPERTY
-        lyrics_head.addStretch()
-        lyrics_head.addWidget(QLabel("Size:"))
-        lyrics_head.addWidget(self.lyrics_text_smaller_btn)
-        lyrics_head.addWidget(self.lyrics_text_larger_btn)
-        lyrics_head.addWidget(self.lyrics_expand_check)
-        insp_layout.addLayout(lyrics_head)
-
-        from ui.lyrics_studio import LyricTextEdit
-
-        self.lyrics_text = LyricTextEdit()
-        # Puts the field under build_stylesheet()'s lyrics-size rule, so it can
-        # grow independently of the rest of the app. Not QWidget.setFont(): the
-        # app stylesheet overrides a per-widget font on every theme re-apply
-        # (measured — see ui/themes.FONT_REGION_PROPERTY).
-        self.lyrics_text.setProperty(FONT_REGION_PROPERTY, FONT_REGION_LYRICS)
-        self.lyrics_text.setPlaceholderText("[Intro]\n[Verse 1]\nLyrics...\n[Chorus]...")
-        # Always editable, and the write is debounced rather than gated behind a
-        # Commit button (see the header comment above). ``textChanged`` only
-        # restarts the timer; ``_flush_lyrics_edit`` does the actual write after
-        # the user stops typing.
-        self.lyrics_text.setReadOnly(False)
-        self.lyrics_text.textChanged.connect(self.on_lyrics_edited)
-        insp_layout.addWidget(self.lyrics_text)
-
-        # Everything under the lyrics field, so "Expand" can hide it. The
-        # widgets stay parented and alive — they are only hidden — which keeps
-        # the existing references valid.
+        # The whole surface — the Studio button, the size steppers, the field, the
+        # save status and the debounced auto-save that writes it — lives in
+        # ui/lyrics_inspector.py. It was ~135 lines inline here, and the owner's
+        # rule is that new UI is a module (this file is at its 7,390-line budget).
+        # The four guarantees the removed Commit button used to buy — a debounced
+        # write, a snapshot taken before it, one backup per song, and a refusal to
+        # write when the selection has moved — are documented there, next to the
+        # code that keeps them. Everything it builds is still assigned onto
+        # ``self`` by name, so no other call site had to change.
+        #
+        # ``_lyrics_lower_widgets`` is created HERE rather than in that module: the
+        # list also holds the CAPTION widgets, so "Expand" hides the caption block
+        # too and is an inspector-layout concern (see on_lyrics_expand_toggled).
+        # The widgets stay parented and alive when hidden — only visibility
+        # changes — which keeps the existing references valid.
         self._lyrics_lower_widgets = []
-        # Which track the field is showing, so an auto-save cannot write the text
-        # of one track onto another after the selection moves.
-        self._lyrics_selected_filename = None
-        # True only while ``_load_lyrics_into_field`` is refilling the box. The
-        # load suppresses the signal too, but a repaint can still flush a queued
-        # timer; this flag makes the debounced write a no-op during a load no
-        # matter how it was reached.
-        self._suppress_lyrics_save = False
-        # The debounced auto-save. Single-shot and restarted on every keystroke,
-        # so it fires once, 400 ms after typing stops. 400 ms is deliberately
-        # longer than the 220 ms used for the Lyrics Studio preview
-        # (ui/lyrics_studio.py): that one only repaints, this one snapshots the
-        # undo stack and writes the dataset, so it should not fire mid-burst.
-        self._lyrics_save_timer = QTimer(self)
-        self._lyrics_save_timer.setSingleShot(True)
-        self._lyrics_save_timer.setInterval(400)
-        self._lyrics_save_timer.timeout.connect(self._flush_lyrics_edit)
+        from ui.lyrics_inspector import build_lyrics_surface
 
-        lyrics_actions = QHBoxLayout()
-        # The Commit button is gone; so is the old "Revert" that discarded an
-        # uncommitted buffer, because a live-save field has no buffer to discard.
-        # What is left is a reload — put the dataset's saved copy back in the
-        # field, which is the one gesture the auto-save cannot express (Ctrl+Z
-        # steps back one edit, not all of them).
-        self.lyrics_save_status = QLabel("")
-        self.lyrics_save_status.setProperty("muted", True)
-        self.lyrics_save_status.setToolTip(
-            "Lyrics save automatically, 400 ms after you stop typing. Every save "
-            "is undoable (Ctrl+Z) and the pre-edit copy of each song is kept in "
-            "<dataset>/_Backup/songs/."
-        )
-        self.lyrics_discard_btn = QPushButton("↺ Revert to saved")
-        self.lyrics_discard_btn.setToolTip(
-            "Reload this track's saved lyrics from the dataset, discarding the "
-            "text in the field."
-        )
-        self.lyrics_discard_btn.clicked.connect(self.on_lyrics_revert)
-        lyrics_actions.addWidget(self.lyrics_save_status)
-        lyrics_actions.addStretch()
-        lyrics_actions.addWidget(self.lyrics_discard_btn)
-        # Placed after the stretch so it is the rightmost control on this row.
-        # "Expand" hides ``_lyrics_lower_widgets`` and this row is not in that
-        # list, so the size control stays available while the field is tall.
-        from ui.appearance_panel import build_font_size_spin
-        from ui.themes import LYRICS_FONT_SIZE_MAX
-
-        self.lyrics_font_spin_inline = build_font_size_spin(
-            "Text size for the lyrics fields. Auto matches the rest of the app; "
-            "raise it to make this box easier to read at a distance.",
-            self.config.get("lyrics_font_size"),
-            maximum=LYRICS_FONT_SIZE_MAX,
-        )
-        self.lyrics_font_spin_inline.setFixedWidth(84)
-        self.lyrics_font_spin_inline.valueChanged.connect(self.on_lyrics_font_size_changed)
-        lyrics_actions.addWidget(QLabel("Size:"))
-        lyrics_actions.addWidget(self.lyrics_font_spin_inline)
-        insp_layout.addLayout(lyrics_actions)
+        build_lyrics_surface(self, insp_layout)
 
         form = QFormLayout()
 
@@ -1326,9 +1211,10 @@ class DatasetManager(QMainWindow):
         self.lyrics_before.setPlainText(source)
         self.lyrics_after.setPlainText(new_text)
 
-        # Diff view: line-level changes, so you can scan what the tidy did.
-        from ui.lyrics_tab import unified_diff
-        self.lyrics_diff.setPlainText(unified_diff(source, new_text) or "(no changes)")
+        # The "Changes (diff)" box that used to be filled right here is gone --
+        # see ``ui/lyrics_tab.py``, where the widget was built and where the
+        # removal is explained. Before | after already shows the rewrite, and the
+        # one diff the owner asked for (minimizable) is the Lyrics Studio's.
 
         self.lyrics_report_label.setText(
             f"{s.get('filename', '?')} — {report['lines_changed']} line(s) changed | "
@@ -4952,6 +4838,18 @@ class DatasetManager(QMainWindow):
             self.track_tag_input.blockSignals(False)
             self.inst_check.blockSignals(False)
 
+        # The Lyrics Studio is a second, NON-MODAL window: it can be open while
+        # the selected row changes here, and it can write lyrics. Leaving it
+        # aimed at the previously selected track is how one song's lyrics land on
+        # another, so it is told about every change -- including "nothing is
+        # selected". The studio decides what to do: it asks before it would drop
+        # text that has not been added to a track, and ignores this entirely while
+        # it is the one writing (its write-back comes through this same handler).
+        # See ``ui/lyrics_studio.LyricsStudioWindow.on_manager_selection_changed``.
+        studio = getattr(self, "_lyrics_studio_window", None)
+        if studio is not None:
+            studio.on_manager_selection_changed(s)
+
     def _load_track_preview(self, sample):
         path = sample.get("audio_path", "") if sample else ""
         valid = bool(path) and os.path.exists(path)
@@ -5194,26 +5092,11 @@ class DatasetManager(QMainWindow):
     def _revert_lyrics_field(self):
         """Put the field back to the selected track's saved lyrics.
 
-        Called when the token-limit notice is dismissed, so a declined gate
-        leaves no half-typed text that a later keystroke could flush.
+        Called when the token-limit notice is dismissed, so a declined gate leaves
+        no half-typed text that a later keystroke could flush. See
+        ``ui.lyrics_inspector.LyricsSurface.revert``.
         """
-        sample = self.get_selected_sample()
-        text = ""
-        if sample:
-            text = sample.get("formatted_lyrics", sample.get("lyrics", "")) or ""
-        if self._lyrics_save_timer.isActive():
-            self._lyrics_save_timer.stop()
-        self._suppress_lyrics_save = True
-        try:
-            self.lyrics_text.blockSignals(True)
-            self.lyrics_text.setPlainText(text)
-            self.lyrics_text.blockSignals(False)
-        finally:
-            self._suppress_lyrics_save = False
-        self.lyrics_save_status.setText(
-            "Not saved — the token-limit notice was closed."
-        )
-        self.update_lyric_limit_label()
+        return self._lyrics_field.revert()
 
     def _mark_lyric_over_limit(self, row, sample):
         """Tint a table row red when its lyrics exceed the training cap.
@@ -5308,192 +5191,99 @@ class DatasetManager(QMainWindow):
         if panel_label is not None:
             panel_label.setText(html)
 
+    # ---- Lyrics surface: behaviour lives in ui/lyrics_inspector.py ----------
+    # Everything below is a one-line delegate. The names stay on the manager
+    # because that is what every call site, signal connection and test already
+    # uses; the widgets and the save state are assigned onto ``self`` by
+    # ``build_lyrics_surface``, so no other code had to change. The reasoning
+    # behind each -- the 400 ms debounce, the selection guard, the snapshot and
+    # the one-per-session backup -- is documented in that module.
+
     def on_lyrics_edited(self):
         """Restart the auto-save clock. Does NOT write the dataset.
 
-        Writing on every keystroke would snapshot the undo stack (and back up
-        the song) once per character, which is the bug the old Commit button was
-        added to fix. Instead each change just re-arms the single-shot timer;
-        400 ms after the typing stops, ``_flush_lyrics_edit`` writes once.
-
-        The signals are still suppressed while the field is being refilled by
-        ``_load_lyrics_into_field``, so loading a track never counts as an edit.
+        See ``ui.lyrics_inspector.LyricsSurface.on_edited`` for why the write is
+        debounced rather than immediate.
         """
-        if self._suppress_lyrics_save:
-            return
-        # Gate the first edit behind the token-limit notice. Declining restores
-        # the track's saved text instead of leaving an unflushed buffer that a
-        # later keystroke could write.
-        if not self._lyrics_gate_open():
-            self._revert_lyrics_field()
-            return
-        self.update_lyric_limit_label()
-        if self._lyrics_save_timer.isActive():
-            self._lyrics_save_timer.stop()
-        self._lyrics_save_timer.start()
-        self.lyrics_save_status.setText("Unsaved changes…")
+        return self._lyrics_field.on_edited()
 
     def _flush_lyrics_edit(self):
         """Write the field to its track. The debounced half of ``on_lyrics_edited``.
 
-        Four guards, in order, all of them cheap and all of them load-bearing:
-
-        1. **No dataset write while a selection change is in flight.** The table
-           re-selecting a track refills this field; a timer that survived that
-           would write the OLD track's text onto the NEW one.
-        2. **The field must still belong to the selected track.** Recorded at
-           load time in ``_lyrics_selected_filename``. If they disagree, drop the
-           pending write rather than pick a winner — the user's text is still on
-           screen, and re-selecting the original track re-arms and saves it.
-        3. **Nothing to do if the text is unchanged.** Selecting a track and
-           clicking away must not create a snapshot, a backup, or a dirty flag.
-        4. **Snapshot before the write**, so Ctrl+Z restores the old lyrics, and
-           back the song up once, before the first change of the session.
+        The four guards -- no write mid-selection-change, the field must still
+        belong to the selected track, nothing to do if unchanged, snapshot before
+        the write -- are in ``ui.lyrics_inspector.LyricsSurface.flush``, next to
+        the code that enforces them.
         """
-        if self._suppress_lyrics_save:
-            return
-        sample = self.get_selected_sample()
-        if not sample:
-            self.lyrics_save_status.setText("No track selected — not saved.")
-            return
-        current = sample.get("filename")
-        if (self._lyrics_selected_filename is not None
-                and current != self._lyrics_selected_filename):
-            # The selection moved on. Refuse, exactly as Commit used to.
-            self.lyrics_save_status.setText(
-                f"Not saved — this is '{self._lyrics_selected_filename}', but "
-                f"'{current}' is selected."
-            )
-            return
-        text = self.lyrics_text.toPlainText()
-        previous = sample.get("formatted_lyrics") or ""
-        if text == previous:
-            self.lyrics_save_status.setText("Saved")
-            return
-        self._backup_song_once(sample)
-        self.record_snapshot()
-        sample["formatted_lyrics"] = text
-        sample["lyrics"] = text
-        # The table caches each track's token count for the red "over limit"
-        # mark; this edit invalidates it so the next refresh_table recomputes.
-        sample.pop("_lyric_tokens", None)
-        # Preserve what was there BEFORE this edit, once. ``raw_lyrics`` is the
-        # pre-tidy text the Lyrics tab tidies from, so filling it with the old
-        # value (not the new one) is what keeps a tidy pass re-runnable and the
-        # original recoverable after an auto-save has already overwritten it.
-        if not sample.get("raw_lyrics") and previous:
-            sample["raw_lyrics"] = previous
-        self._write_lyrics_sidecar_for(sample)
-        self.lyrics_save_status.setText("Saved ✓")
-        self.update_lyric_limit_label()
+        return self._lyrics_field.flush()
 
     def _write_lyrics_sidecar_for(self, sample):
         """Write ``<stem>_lyrics.txt`` beside the track's audio, if it has one."""
-        from ui.tidy_panel import _write_lyrics_sidecar
-
-        return _write_lyrics_sidecar(self, sample)
+        return self._lyrics_field.write_sidecar(sample)
 
     def on_lyrics_font_size_changed(self, value):
         """Apply the lyrics size chosen by the field's own Size control.
 
-        The label on that control is "Size:"; it writes the SAME config key the
-        Settings "Lyrics size" row owns, so there is one setting and no second
-        source of truth. Re-applying the theme is what moves the text — the size
-        reaches the field through the stylesheet, not through setFont.
+        See ``ui.lyrics_inspector.LyricsSurface.font_size_changed``. The label on
+        that control is "Size:"; it writes the SAME config key the Settings
+        "Lyrics size" row owns, so there is one setting and no second source of
+        truth.
         """
-        from ui.appearance_panel import set_appearance
-
-        set_appearance(self, "lyrics_font_size", value)
+        return self._lyrics_field.font_size_changed(value)
 
     def on_lyrics_font_step(self, delta):
         """Nudge the lyrics size one notch (the A−/A+ buttons on the header).
 
-        They step the SAME ``lyrics_font_size`` key the numeric "Size:" readout
-        and the Settings "Lyrics size" row own — the value is written through
-        ``set_appearance``, which re-applies the theme and re-syncs every copy,
-        so the buttons cannot disagree with the spinner beside them. Two details
-        that would otherwise make the buttons feel broken:
-
-        * The starting point is the size the field is ACTUALLY using, not the raw
-          stored value. While the setting is Auto the stored value is 0, so
-          stepping from it would try to set 1 px; Auto means "inherit the app
-          size", so the first press starts from that inherited size (13 -> 14).
-        * The clamp uses the lyrics ceiling, ``LYRICS_FONT_SIZE_MAX``, so the
-          buttons reach the whole range the spinner offers instead of stopping
-          at the app-wide 32.
+        See ``ui.lyrics_inspector.LyricsSurface.step_font``. They step the SAME
+        ``lyrics_font_size`` key the numeric "Size:" readout and the Settings
+        "Lyrics size" row own, so the buttons cannot disagree with the spinner
+        beside them.
         """
-        from ui.appearance_panel import set_appearance
-        from ui.themes import FONT_SIZE_MIN, LYRICS_FONT_SIZE_MAX, resolve_font_sizes
-
-        base, lyrics = resolve_font_sizes(self.config)
-        current = lyrics or base
-        value = max(FONT_SIZE_MIN, min(LYRICS_FONT_SIZE_MAX, current + delta))
-        set_appearance(self, "lyrics_font_size", value)
+        return self._lyrics_field.step_font(delta)
 
     def on_lyrics_expand_toggled(self, checked):
         """Grow the field to most of the inspector and hide what is below it.
 
-        No second window: the field already lives inside a scroll area, so
-        giving it height and hiding its neighbours is all "expanding" needs.
+        No second window: the field already lives inside a scroll area, so giving
+        it height and hiding its neighbours is all "expanding" needs.
+
+        The height is the lyrics surface's business (``set_expanded``); the list of
+        widgets to hide is NOT, because ``_lyrics_lower_widgets`` also holds the
+        caption block -- so that half stays here, in the file that owns the
+        inspector's layout.
         """
-        self.lyrics_text.setMinimumHeight(520 if checked else 170)
+        self._lyrics_field.set_expanded(checked)
         for w in self._lyrics_lower_widgets:
             self._set_layout_item_visible(w, not checked)
 
-    @staticmethod
-    def _set_layout_item_visible(item, visible):
+    def _set_layout_item_visible(self, item, visible):
         """Hide/show a widget, a layout, or a plain layout object.
 
-        ``QLayout`` has no ``setVisible``, so a nested layout is hidden by
-        hiding the widgets it owns.
+        Delegates to ``ui.lyrics_inspector.set_layout_item_visible``: ``QLayout``
+        has no ``setVisible``, so a nested layout is hidden by hiding the widgets
+        it owns.
         """
-        if hasattr(item, "setVisible"):
-            item.setVisible(visible)
-        elif hasattr(item, "count"):
-            for i in range(item.count()):
-                sub = item.itemAt(i)
-                if sub is None:
-                    continue
-                inner = sub.widget() or sub.layout()
-                if inner is not None:
-                    DatasetManager._set_layout_item_visible(inner, visible)
+        from ui.lyrics_inspector import set_layout_item_visible
+
+        return set_layout_item_visible(item, visible)
 
     def _load_lyrics_into_field(self):
         """Refill the field from the selected track, with signals suppressed.
 
-        The save timer is stopped and a suppression flag set for the duration:
-        without them, the ``setPlainText`` below would arm the debounced write
-        and 400 ms later "save" the text we are loading — harmless-looking, but
-        it would snapshot the undo stack on every mere selection change.
+        See ``ui.lyrics_inspector.LyricsSurface.load_from_selection``: the timer is
+        stopped and a suppression flag set for the duration, so filling the box
+        cannot itself count as an edit.
         """
-        if self._lyrics_save_timer.isActive():
-            self._lyrics_save_timer.stop()
-        s = self.get_selected_sample()
-        text = ""
-        if s:
-            text = s.get("formatted_lyrics", s.get("lyrics", "")) or ""
-            self._lyrics_selected_filename = s.get("filename")
-        else:
-            self._lyrics_selected_filename = None
-        self._suppress_lyrics_save = True
-        try:
-            self.lyrics_text.blockSignals(True)
-            self.lyrics_text.setPlainText(text)
-            self.lyrics_text.blockSignals(False)
-        finally:
-            self._suppress_lyrics_save = False
-        self.lyrics_save_status.setText("Saved" if text else "")
-        self.update_lyric_limit_label()
+        return self._lyrics_field.load_from_selection()
 
     def on_lyrics_revert(self):
         """Discard the field's text and reload the track's saved lyrics.
 
         Everything is already committed by the time this runs — the auto-save
-        writes 400 ms after each pause — so this only refreshes the field, it
-        does not undo anything. To undo a save, use Ctrl+Z.
+        writes 400 ms after each pause — so this only refreshes the field, it does
+        not undo anything. To undo a save, use Ctrl+Z.
         """
-        self._load_lyrics_into_field()
-        self.status_label.setText("Lyrics reloaded from the selected track.")
+        return self._lyrics_field.reload()
 
     def on_track_tag_edited(self, text):
         s = self.get_selected_sample()
