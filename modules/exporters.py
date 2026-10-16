@@ -4,7 +4,8 @@ Formats:
   * ACE-Step JSON   — the manifest itself
   * CSV             — flat table (id, filename, genre, bpm, key, duration, caption…)
   * JSONL           — one sample object per line
-  * Sidecar .txt    — a caption file per track (Kohya/ComfyUI convention)
+  * Sidecar         — a ``<stem>.caption.txt`` file per track (see
+    ``export_sidecar_captions`` for why it is not a bare ``<stem>.txt``)
   * Train/Val folders — ``train/`` + ``val/`` with audio copies, caption
     sidecars, and a ``manifest.json`` — ready to hand to a training run.
 """
@@ -85,10 +86,19 @@ def export_jsonl(samples, path):
 
 
 def export_sidecar_captions(samples, dest_dir):
-    """Write ``<stem>.txt`` next to the track (or in ``dest_dir`` when copying).
+    """Write ``<stem>.caption.txt`` next to the track (or in ``dest_dir``).
 
     The text is the sample's caption, falling back to its tag.
     Returns the number written.
+
+    The name is ``.caption.txt`` and deliberately NOT a bare ``<stem>.txt``.
+    ACE-Step reads a bare ``<stem>.txt`` as **lyrics**, not as a caption, and a
+    lyrics file present for a track also forces ``is_instrumental=false``
+    (``acestep/training/dataset_builder_modules/scan.py:66-68``, and the lyric
+    lookup at ``audio_io.py:72-85``). The caption is read only from
+    ``<stem>.caption.txt`` (``audio_io.py:30-38``). A caption written to
+    ``<stem>.txt`` therefore arrives as the LYRIC string and its real caption is
+    silently dropped, so the sample trains on lyrics it never had.
     """
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +109,7 @@ def export_sidecar_captions(samples, dest_dir):
             continue
         text = (s.get("caption") or "").strip() or (s.get("custom_tag") or "").strip()
         stem = Path(audio).stem
-        (dest_dir / f"{stem}.txt").write_text(text, encoding="utf-8")
+        (dest_dir / f"{stem}.caption.txt").write_text(text, encoding="utf-8")
         written += 1
     return written
 
@@ -119,7 +129,9 @@ def export_folders(samples, dest_dir, val_ratio=0.2, seed=42, stratify=True):
             fname = Path(audio).name
             shutil.copy2(audio, out / fname)
             cap = (s.get("caption") or "").strip() or (s.get("custom_tag") or "").strip()
-            (out / f"{Path(audio).stem}.txt").write_text(cap, encoding="utf-8")
+            # ``.caption.txt``, not ``.txt``: a bare ``<stem>.txt`` is read by
+            # ACE-Step as lyrics (see ``export_sidecar_captions``).
+            (out / f"{Path(audio).stem}.caption.txt").write_text(cap, encoding="utf-8")
             manifest.append({
                 "split": split_name,
                 "filename": fname,

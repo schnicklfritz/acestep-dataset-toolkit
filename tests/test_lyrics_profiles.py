@@ -27,8 +27,10 @@ class TestMergeRules:
     """master (always on) + profile: profile wins, master-only entries survive."""
 
     def test_profile_overrides_master(self):
-        c, _ = merge_rules({"you're": "your"}, {"you're": "yore"})
-        assert c["you're"] == "yore"
+        # Sample values are deliberate non-words: a fixture should not model a
+        # respelling that collides with an English word (.clinerules).
+        c, _ = merge_rules({"you're": "yoor"}, {"you're": "yurr"})
+        assert c["you're"] == "yurr"
 
     def test_master_only_entries_still_apply(self):
         c, _ = merge_rules({"she'll": "sheel"}, {"gonna": "gunna"})
@@ -97,9 +99,11 @@ class TestProfileStorage:
 
 class TestDefaultTable:
     def test_master_defaults_are_available(self):
+        # Values are respellings, NOT English words (.clinerules RESPELLING
+        # RULE): "aisle"/"heel" were collisions and are gone for good.
         assert DEFAULT_CONTRACTIONS["she'll"] == "sheel"
-        assert DEFAULT_CONTRACTIONS["i'll"] == "aisle"
-        assert DEFAULT_CONTRACTIONS["he'll"] == "heel"
+        assert DEFAULT_CONTRACTIONS["i'll"] == "eyel"
+        assert DEFAULT_CONTRACTIONS["he'll"] == "h-eel"
 
 
 class TestCaseFixed:

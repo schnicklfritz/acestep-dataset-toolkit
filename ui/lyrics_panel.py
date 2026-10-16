@@ -94,22 +94,6 @@ def _budget_line(manager):
     return label
 
 
-def _open_studio(manager):
-    """Open the editor window, preferring the manager's own entry point.
-
-    ``manager.open_lyrics_editor`` is the established seam (it is what the
-    Lyrics tab's button called, and what ``.agent_notes`` pins by name), so it
-    wins when it exists. The lazy import is the fallback for a manager built by
-    a test or by tooling that has no handler.
-    """
-    opener = getattr(manager, "open_lyrics_editor", None)
-    if callable(opener):
-        return opener()
-    from ui.lyrics_studio import open_lyrics_studio
-
-    return open_lyrics_studio(manager)
-
-
 def _open_limits(manager):
     """Open the token-cap explanation dialog (``ui.lyric_limit_notice``)."""
     from ui.lyric_limit_notice import acknowledge_lyrics_limit
@@ -170,11 +154,23 @@ def _studio_page(manager, parent):
     lay.addWidget(manager.lyrics_panel_summary)
 
     row = QHBoxLayout()
-    manager.lyrics_panel_studio_btn = QPushButton("🔠 Open Lyrics Studio…")
-    manager.lyrics_panel_studio_btn.setToolTip(
-        "Edit the selected track's lyrics: paste, double-click a word to mark "
-        "it shouted, review the diff against the track, then write it back."
-    )
+    # Built by ui/lyrics_studio.studio_button, the ONE factory for "open the
+    # Studio" buttons: the opener rule ("prefer manager.open_lyrics_editor, else
+    # lazily import open_lyrics_studio") lives with the window, so this button
+    # and the Track Inspector's cannot drift into opening different windows. Only
+    # the wording differs, and the factory takes it as an argument. ``attr`` keeps
+    # the historical name the tests and panel handlers read back.
+    from ui.lyrics_studio import studio_button
+
+    row.addWidget(studio_button(
+        manager,
+        label="🔠 Open Lyrics Studio…",
+        tooltip=(
+            "Edit the selected track's lyrics: paste, double-click a word to mark "
+            "it shouted, review the diff against the track, then write it back."
+        ),
+        attr="lyrics_panel_studio_btn",
+    ))
     manager.lyrics_panel_limits_btn = QPushButton("ℹ Token limits…")
     manager.lyrics_panel_limits_btn.setToolTip(
         "How many tokens ACE-Step keeps for lyrics (512 training / 2048 "
@@ -188,8 +184,8 @@ def _studio_page(manager, parent):
 
     lay.addStretch()
 
-    manager.lyrics_panel_studio_btn.clicked.connect(
-        lambda: _open_studio(manager))
+    # No connect for the studio button: studio_button wires its own click to the
+    # single opener rule. Only the limits dialog is this module's business.
     manager.lyrics_panel_limits_btn.clicked.connect(
         lambda: _open_limits(manager))
 

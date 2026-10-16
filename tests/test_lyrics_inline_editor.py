@@ -177,6 +177,25 @@ def test_the_field_is_editable_with_no_mode_switch(manager):
     assert manager.lyrics_text.isReadOnly() is False
 
 
+def test_the_inspector_offers_the_studio_as_the_main_way_in(manager, monkeypatch):
+    """The Studio is the main way to change lyrics, so the Inspector needs a
+    prominent way in — routed through ``open_lyrics_editor``, the same seam the
+    Lyrics panel and the toolbar use. A second, private opener is how the two
+    would drift into opening different windows.
+
+    The field above it stays for quick edits; this pins the way in, not a
+    replacement for the field (``test_the_field_is_editable_with_no_mode_switch``
+    pins that separately).
+    """
+    _load(manager, [_track("a.mp3", "one")])
+    assert manager.open_studio_btn.text() == "🎼 Open in Lyrics Studio"
+
+    calls = []
+    monkeypatch.setattr(manager, "open_lyrics_editor", lambda: calls.append(1))
+    manager.open_studio_btn.click()
+    assert calls == [1], "the Inspector button does not open the Lyrics Studio"
+
+
 def test_the_field_shows_the_selected_track(manager):
     _load(manager, [_track("a.mp3", "[Verse]\nONE two")])
     assert manager.lyrics_text.toPlainText() == "[Verse]\nONE two"

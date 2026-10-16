@@ -19,7 +19,7 @@ from modules.lyrics_normalizer import (
     strip_trailing_punctuation,
 )
 
-TABLE = {"she'll": "sheel", "he'll": "heel", "can't": "cant"}
+TABLE = {"she'll": "sheel", "he'll": "h-eel", "can't": "kaant"}
 
 
 class TestCaseHandling:
@@ -38,7 +38,10 @@ class TestCaseHandling:
         assert apply_contractions(word, TABLE) == word
 
     def test_matches_whole_words_only(self):
-        # "cant" inside "cannot"/"cantata" must not be rewritten oddly
+        # The replacement must not be injected into a longer token: with
+        # can't -> kaant, "kaantata" is left alone - and a source word that
+        # merely CONTAINS a table value is never rewritten.
+        assert apply_contractions("kaantata", TABLE) == "kaantata"
         assert apply_contractions("cantata", TABLE) == "cantata"
 
     def test_longest_key_wins(self):
@@ -206,7 +209,7 @@ class TestNormalizeLyricsReport:
         _, rep = normalize_lyrics("She'll run, can't stop!", contractions=TABLE)
         pairs = dict(rep["word_changes"])
         assert pairs["She'll"] == "Sheel"
-        assert pairs["can't"] == "cant"
+        assert pairs["can't"] == "kaant"
 
     def test_separator_markers_are_protected(self):
         # The all-lyrics block depends on these surviving a tidy.
@@ -223,6 +226,53 @@ class TestNormalizeLyricsReport:
     def test_default_contraction_table_is_populated(self):
         for key in ("she'll", "he'll", "i'll", "can't", "don't"):
             assert key in DEFAULT_CONTRACTIONS
+
+
+class TestRespellingRule:
+    """A respelling must never land on a real English word (.clinerules).
+
+    A homophone collision re-creates the exact ambiguity the respelling exists
+    to remove - "i'll" -> "aisle" can be read as the noun. These are the
+    collisions that were found and fixed; if a value is ever "simplified" back
+    to one of them, this fails.
+    """
+
+    # Resolved collisions, plus the near-misses rejected while fixing them
+    # ("kant" and "yore" are themselves dictionary words - verified against
+    # /usr/share/cracklib/cracklib-small). Do NOT add a word here that is not
+    # actually in a dictionary: values like "weel" and "hool" are non-words
+    # and are deliberately in use.
+    ENGLISH_WORD_COLLISIONS = frozenset({
+        "aisle", "heel", "idle", "cause", "shell", "your", "yore",
+        "lets", "wont", "cant", "kant", "bout", "round", "til", "em",
+        "eyed",
+    })
+
+    def test_no_default_value_is_an_english_word(self):
+        bad = {
+            key: value
+            for key, value in DEFAULT_CONTRACTIONS.items()
+            if value.lower().strip("-") in self.ENGLISH_WORD_COLLISIONS
+        }
+        assert bad == {}, f"respelling collides with a real English word: {bad}"
+
+    @pytest.mark.parametrize("key,wrong", [
+        ("i'll", "aisle"),
+        ("he'll", "heel"),
+        ("it'll", "idle"),
+        ("can't", "cant"),
+        ("won't", "wont"),
+        ("you're", "your"),
+        ("let's", "lets"),
+        ("'cause", "cause"),
+        ("'bout", "bout"),
+        ("'round", "round"),
+        ("'til", "til"),
+        ("'em", "em"),
+    ])
+    def test_the_resolved_collisions_are_not_reintroduced(self, key, wrong):
+        assert key in DEFAULT_CONTRACTIONS
+        assert DEFAULT_CONTRACTIONS[key] != wrong
 
 
 class TestQuoteStripping:

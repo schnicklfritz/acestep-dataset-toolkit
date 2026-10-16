@@ -297,7 +297,7 @@ def test_lyrics_are_written_beside_the_audio(manager, tmp_path, wav_file):
 
 
 def test_the_sidecar_never_takes_the_caption_filename(manager, tmp_path, wav_file):
-    """``<stem>.txt`` belongs to the caption exporter
+    """``<stem>.caption.txt`` belongs to the caption exporter
     (``modules.exporters.export_sidecar_captions``). Writing lyrics there would
     silently overwrite the caption on the next export — so the lyrics file must
     be a DIFFERENT name, and the caption file must be left alone."""

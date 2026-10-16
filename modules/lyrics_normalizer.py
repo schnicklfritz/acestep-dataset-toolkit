@@ -28,6 +28,9 @@ import re
 # Editable in the 🎤 Lyrics tab; this is the shipped default.
 # NOTE on 'll: the vowel is matched to the host word rather than a generic
 # "'ll" removal, which is what produces "shell" from "she'll".
+# RESPELLING RULE (see .clinerules): a value must NEVER be an English word -
+# a collision re-creates the ambiguity the respelling exists to remove.
+# Verify a candidate before adding it:  grep -qx "<word>" /usr/share/dict/words
 DEFAULT_CONTRACTIONS = {
     # --- 'll : vowel-matched, the she'll / he'll / I'll problem ---------
     "she'll": "sheel",
@@ -42,10 +45,12 @@ DEFAULT_CONTRACTIONS = {
     "that'll": "thatel",
     "there'll": "there-ill",
     "who'll": "hool",
-    # --- n't : keeps the syllable count / rhythm (cant, dont, wont) -----
-    "can't": "cant",
+    # --- n't : keeps the syllable count / rhythm (kaant, dont, woant) --
+    # 'cant' and 'wont' are English words, so the vowel is doubled to keep the
+    # respelling off them (RESPELLING RULE). 'dont' is not a word and is safe.
+    "can't": "kaant",
     "don't": "dont",
-    "won't": "wont",
+    "won't": "woant",
     "isn't": "isnt",
     "aren't": "arent",
     "wasn't": "wasnt",
@@ -63,19 +68,19 @@ DEFAULT_CONTRACTIONS = {
     # --- 're / 've / 'd / 'm -------------------------------------------
     "we're": "weer",
     "they're": "theyre",
-    "you're": "your",
+    "you're": "yoor",
     "we've": "weev",
     "i've": "ive",
     "you've": "youve",
     "they've": "theyve",
     "i'm": "eyem",
-    "let's": "lets",
+    "let's": "letz",
     # --- leading apostrophes (more often sung as one word) --------------
     "'cause": "kuz",
-    "'bout": "bout",
-    "'til": "til",
-    "'round": "round",
-    "'em": "em",
+    "'bout": "bowt",
+    "'til": "tihl",
+    "'round": "rownd",
+    "'em": "emm",
 }
 
 # ---------------------------------------------------------------------------

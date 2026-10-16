@@ -12,7 +12,7 @@ from ui.lyrics_tab import (
     unified_diff,
 )
 
-TABLE = {"she'll": "sheel", "can't": "cant"}
+TABLE = {"she'll": "sheel", "can't": "kaant"}
 
 
 class TestAllLyricsBlock:

@@ -121,10 +121,16 @@ def _write_lyrics_sidecar(manager, sample):
     """Write this track's lyrics next to its audio as ``<stem>_lyrics.txt``.
 
     Underscored deliberately: ``modules.exporters.export_sidecar_captions``
-    already owns ``<stem>.txt`` for the caption, so a bare ``<stem>.txt`` here
-    would be silently overwritten on the next caption export. Silently skipped
-    when the track has no audio path on disk — a tidy must not fail because the
-    file moved.
+    owns ``<stem>.caption.txt`` for the caption, so a bare ``<stem>.txt`` here
+    would be read by ACE-Step as LYRICS and silently overwrite the lyric slot on
+    the next caption export. Silently skipped when the track has no audio path on
+    disk — a tidy must not fail because the file moved.
+
+    Note for the reader: ACE-Step reads lyrics from ``<stem>.lyrics.txt`` or a
+    bare ``<stem>.txt`` (``acestep/training/dataset_builder_modules/
+    audio_io.py:72-85``). ``<stem>_lyrics.txt`` matches NEITHER, so this file is
+    a reviewable artefact beside the track, not a training input — rename it to
+    ``<stem>.lyrics.txt`` if it is meant to be ingested.
     """
     import os
 

@@ -12,7 +12,7 @@ This is not a validation list. It does not gate training annotations and it
 must never be used to decide what belongs in a caption bracket or a lyric
 bracket. A trained LoKR records what *varies* between its tracks, so a term
 that appears in every track is dead weight there no matter how often it
-appears here — see ``docs/Comprehensive_LoKR_Dataset_Annotation_Guide.txt``
+appears here — see ``docs/Comprehensive_LoRA_LoKR_Dataset_Annotation_Guide_updated.md``
 §1 (the Omission Principle).
 
 File formats
