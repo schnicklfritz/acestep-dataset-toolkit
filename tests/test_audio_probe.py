@@ -7,10 +7,14 @@ Two things read as "the column is missing" and neither is a missing column:
     blank for every track the app added itself.
 
 These tests pin the display format (``m:ss``), the blank-Time default (4/4 is
-shown, never written), and the probe's refusal to invent a length.
+shown, never written), the probe's refusal to invent a length, and the ORDER of
+the probe chain: the in-process header read first, then ``soxi``, then
+``ffprobe``. The order is asserted, not just assumed, because it is what keeps a
+bulk import from paying two forks per track.
 """
 from __future__ import annotations
 
+import shlex
 import wave
 
 import pytest
@@ -110,3 +114,90 @@ def test_backfill_fills_only_blank_durations(tmp_path):
 def test_backfill_tolerates_a_dataset_with_no_samples():
     assert backfill_durations({}) == 0
     assert backfill_durations({"samples": None}) == 0
+
+
+# ---------------------------------------------------------------------------
+# The probe chain: soundfile -> soxi -> ffprobe
+# ---------------------------------------------------------------------------
+
+def _isolated_bin(tmp_path, monkeypatch):
+    """An empty ``PATH`` holding only the fake tools a test installs.
+
+    ``PATH`` is replaced rather than extended so the real ``soxi``/``ffprobe``
+    this machine happens to have can never answer a test that meant to exercise
+    a fake -- and so "tool not installed" is testable at all.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return bin_dir
+
+
+def _fake_tool(bin_dir, name, *lines):
+    path = bin_dir / name
+    path.write_text("#!/bin/sh\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_the_header_read_is_asked_before_any_subprocess(tmp_path, monkeypatch):
+    """A readable wav must not fork: that is what keeps a bulk import quick.
+
+    The fakes leave a marker file when invoked, so a chain that merely *looks*
+    right but shells out first fails here instead of in the UI.
+    """
+    bin_dir = _isolated_bin(tmp_path, monkeypatch)
+    soxi_marker = tmp_path / "soxi-ran"
+    ffprobe_marker = tmp_path / "ffprobe-ran"
+    _fake_tool(bin_dir, "soxi", f"touch {shlex.quote(str(soxi_marker))}", "echo 999")
+    _fake_tool(bin_dir, "ffprobe", f"touch {shlex.quote(str(ffprobe_marker))}",
+               "echo '{}'")
+
+    wav = _write_wav(tmp_path / "song.wav", 2.0)
+    assert audio_duration_seconds(wav) == pytest.approx(2.0, abs=0.01)
+    assert not soxi_marker.exists()
+    assert not ffprobe_marker.exists()
+
+
+def test_soxi_measures_what_the_header_read_cannot(tmp_path, monkeypatch):
+    """sox opens containers libsndfile cannot; its bare float is the answer."""
+    bin_dir = _isolated_bin(tmp_path, monkeypatch)
+    _fake_tool(bin_dir, "soxi", "echo 180.600000")
+    junk = tmp_path / "song.m4a"
+    junk.write_bytes(b"not audio for libsndfile")
+
+    assert audio_duration_seconds(junk) == pytest.approx(180.6)
+    # The field is whole seconds, as the documented example shows (``180``).
+    assert duration_seconds_rounded(junk) == 181
+
+
+def test_a_failing_soxi_falls_through_to_ffprobe(tmp_path, monkeypatch):
+    """soxi exits non-zero and writes to stderr for a file it cannot open."""
+    bin_dir = _isolated_bin(tmp_path, monkeypatch)
+    _fake_tool(bin_dir, "soxi", "echo 'soxi FAIL formats: no handler' >&2", "exit 1")
+    _fake_tool(bin_dir, "ffprobe", 'printf \'{"format": {"duration": "95.5"}}\'')
+
+    junk = tmp_path / "song.m4a"
+    junk.write_bytes(b"not audio for libsndfile")
+    assert audio_duration_seconds(junk) == pytest.approx(95.5)
+
+
+def test_unparseable_soxi_output_is_unknown_not_a_crash(tmp_path, monkeypatch):
+    """``float("N/A")`` must not escape as an exception during a dataset load."""
+    bin_dir = _isolated_bin(tmp_path, monkeypatch)
+    _fake_tool(bin_dir, "soxi", "echo N/A")
+    junk = tmp_path / "song.m4a"
+    junk.write_bytes(b"not audio for libsndfile")
+
+    assert audio_duration_seconds(junk) == 0.0
+    assert duration_seconds_rounded(junk) == 0
+
+
+def test_a_missing_file_is_unknown_even_with_soxi_installed(tmp_path, monkeypatch):
+    """The real soxi is on this machine; a nonexistent path must still be 0."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv("PATH", str(bin_dir))
+    _fake_tool(bin_dir, "soxi", 'echo "soxi FAIL formats: can\'t open" >&2', "exit 1")
+
+    assert audio_duration_seconds(tmp_path / "gone.wav") == 0.0

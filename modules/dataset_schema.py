@@ -186,6 +186,12 @@ EXPORT_SAMPLE_FIELDS = (
     "prompt_override",
 )
 
+# The meter ACE-Step's documented example carries when a sample has none. See
+# ``export_timesignature``: this substitutes at EXPORT TIME ONLY. The stored
+# field stays blank so the project file never claims a meter the user did not
+# choose, and the table keeps showing ``ui.track_table.DEFAULT_TIMESIGNATURE``.
+EXPORT_DEFAULT_TIMESIGNATURE = "4"
+
 # Metadata keys ACE-Step does not read. ``instrumental_mode`` is the toolkit's
 # legacy key; ``all_instrumental`` carries the same fact in the canonical shape.
 EXPORT_METADATA_DROPPED = ("instrumental_mode",)
@@ -205,10 +211,39 @@ def _canonical_filename(sample):
     return os.path.basename(name)
 
 
+def export_timesignature(value):
+    """The ``timesignature`` a manifest carries for one stored value.
+
+    OWNER'S DECISION (2026-10-18): the project file keeps ``""`` when nobody has
+    said otherwise -- the app never invents a meter and never fills the field
+    behind the user's back -- but the trainer-facing manifest needs the key
+    populated, because ACE-Step's documented example (and our own
+    ``tests/fixtures/official_acestep_1_5xl.json``) reads ``"4"``. So the
+    translation happens HERE, at the export boundary, and nowhere else:
+
+      * blank            -> ``"4"``   (the display default, written on export)
+      * ``"4/4"``        -> ``"4"``   (our own readable form of the same meter)
+      * anything typed   -> verbatim
+
+    The last rule is deliberate. Only the value the app itself demonstrates is
+    translated; a pasted ``3/4`` stays ``3/4`` rather than guessing that
+    ACE-Step wants a bare numerator, and collapsing ``6/8`` to ``"6"`` would
+    train a false fact. ``ui/track_table.py`` still SHOWS ``4/4`` for a blank
+    cell (``DEFAULT_TIMESIGNATURE`` is display-only), so the table and the
+    manifest differ by design: this is the one place the difference is made.
+    """
+    text = (value or "").strip()
+    if not text:
+        return EXPORT_DEFAULT_TIMESIGNATURE
+    if text == "4/4":
+        return EXPORT_DEFAULT_TIMESIGNATURE
+    return text
+
+
 def to_export_sample(sample):
     """Convert one internal sample dict into ACE-Step 1.5 training JSON.
 
-    A pass-through with three jobs:
+    A pass-through with four jobs:
 
     * ``EXPORT_DROPPED_FIELDS`` never reaches training.
     * ``audio_path``, ``filename``, ``is_instrumental``, ``duration`` and
@@ -217,6 +252,8 @@ def to_export_sample(sample):
       ``is_instrumental`` True) and its string comparison
       (``preprocess_prompt.py:47-52``) see the intended value rather than a
       default.
+    * ``timesignature`` is always present too, translated by
+      ``export_timesignature`` -- blank becomes ``"4"`` on the way out only.
     * ``prompt_override`` is normalised to ``None`` unless it is one of the two
       strings ACE-Step compares against. It is NOT a boolean and must never be
       coerced into one: an earlier revision emitted ``True``, and the trainer
@@ -224,6 +261,13 @@ def to_export_sample(sample):
     """
     out = {}
     for key in EXPORT_SAMPLE_FIELDS:
+        if key == "timesignature":
+            # Emitted inside the loop rather than in the block below so that a
+            # legacy sample LACKING the key still gets it in ACE-Step's
+            # documented position instead of appended after ``prompt_override``
+            # (``test_canonical_sample_key_order_is_preserved`` pins the order).
+            out[key] = export_timesignature(sample.get(key))
+            continue
         if key not in sample:
             continue
         out[EXPORT_FIELD_MAP.get(key, key)] = sample[key]

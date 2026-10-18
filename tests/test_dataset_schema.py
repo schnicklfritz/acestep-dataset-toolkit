@@ -9,9 +9,11 @@ mapping comment in ``modules/dataset_schema.py`` for the file:line evidence.
 import pytest
 
 from modules.dataset_schema import (
+    EXPORT_DEFAULT_TIMESIGNATURE,
     EXPORT_FIELD_MAP,
     METADATA_DEFAULTS,
     SAMPLE_DEFAULTS,
+    export_timesignature,
     lyrics_source,
     normalize_dataset,
     new_dataset,
@@ -134,6 +136,54 @@ class TestExportFieldNames:
     def test_mapping_table_is_identity(self):
         # Kept as a seam; nothing needs renaming against ACE-Step 1.5.
         assert EXPORT_FIELD_MAP == {}
+
+
+class TestExportTimesignature:
+    """Blank in the project file, populated in the manifest -- export-time only.
+
+    The owner's requirement: the stored field stays ``""`` unless a human fills
+    it, but the trainer-facing JSON must carry the documented value (``"4"``;
+    ``tests/fixtures/official_acestep_1_5xl.json`` reads exactly that). The
+    translation therefore lives at the export boundary and nowhere else, and
+    the table keeps showing ``4/4`` for a blank cell.
+    """
+
+    def test_a_blank_meter_is_written_as_the_documented_default(self):
+        assert EXPORT_DEFAULT_TIMESIGNATURE == "4"
+        assert to_export_sample(new_sample())["timesignature"] == "4"
+
+    def test_the_stored_sample_is_not_rewritten(self):
+        s = new_sample()
+        assert s["timesignature"] == ""
+        to_export_sample(s)
+        assert s["timesignature"] == "", "export must not mutate the project data"
+
+    @pytest.mark.parametrize("blank", [None, "", "   "])
+    def test_every_blank_form_is_the_default(self, blank):
+        assert export_timesignature(blank) == "4"
+
+    def test_the_display_form_is_translated(self):
+        assert to_export_sample(new_sample(timesignature="4/4"))["timesignature"] == "4"
+
+    @pytest.mark.parametrize("typed", ["3/4", "6/8", "5/4", "7/8", "12/8"])
+    def test_a_typed_meter_passes_through_verbatim(self, typed):
+        # Deliberate: only the value the app itself demonstrates is translated.
+        # Collapsing 6/8 to "6" would train a false fact.
+        assert to_export_sample(new_sample(timesignature=typed))["timesignature"] == typed
+
+    def test_a_sample_without_the_key_still_gets_it_in_position(self):
+        s = new_sample()
+        del s["timesignature"]
+        out = to_export_sample(s)
+        assert out["timesignature"] == "4"
+        keys = list(out)
+        assert keys[keys.index("keyscale") + 1] == "timesignature"
+        assert keys[keys.index("timesignature") + 1] == "duration"
+
+    def test_the_load_path_does_not_fill_it(self):
+        # normalize_dataset backfills MISSING keys; it must leave the value blank.
+        ds = normalize_dataset({"metadata": {}, "samples": [{"id": "x", "filename": "x.mp3"}]})
+        assert ds["samples"][0]["timesignature"] == ""
 
 
 class TestExportMetadataBlock:

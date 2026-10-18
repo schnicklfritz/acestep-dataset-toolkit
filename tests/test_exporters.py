@@ -196,6 +196,40 @@ class TestOtherExporters:
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+class TestManifestTimesignature:
+    """Blank in the project file, ``"4"`` in the manifest, ``""`` in the sidecar.
+
+    Two artifacts, two consumers, deliberately different values: the manifest is
+    the training file whose documented example reads ``"4"`` (see
+    ``dataset_schema.export_timesignature``), while the per-track sidecar is read
+    by ACE-Step's ``scan.py``, where a blank correctly means "no value"
+    (pinned by ``test_blank_fields_are_empty_strings_not_null`` below).
+    """
+
+    @staticmethod
+    def _dataset():
+        return normalize_dataset({
+            "metadata": {"name": "d"},
+            "samples": [
+                {"id": "a", "filename": "a.mp3", "timesignature": ""},
+                {"id": "b", "filename": "b.mp3", "timesignature": "6/8"},
+            ],
+        })
+
+    def test_export_json_populates_a_blank_meter(self, tmp_path):
+        out = tmp_path / "dataset.json"
+        export_json(self._dataset(), str(out))
+        samples = json.loads(out.read_text(encoding="utf-8"))["samples"]
+        assert samples[0]["timesignature"] == "4"
+        assert samples[1]["timesignature"] == "6/8"
+
+    def test_export_jsonl_matches_json(self, tmp_path):
+        out = tmp_path / "dataset.jsonl"
+        export_jsonl(self._dataset()["samples"], str(out))
+        first = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+        assert first["timesignature"] == "4"
+
+
 class TestOfficialManifestRoundTrip:
     """The owner's own ACE-Step 1.5XL manifest, exported back character-for-character.
 

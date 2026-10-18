@@ -2,10 +2,18 @@
 
 ``soundfile`` already ships with the app (``modules/lead_vocals.py`` uses it),
 and ``sf.info`` reads the container HEADER only -- it does not decode -- so
-probing a folder of tracks is cheap. ``ffprobe`` is the fallback for the
-containers libsndfile cannot open (some ``.m4a``/AAC files), and it is optional:
-the app already requires ffmpeg for caption staging, but a machine without it
-must still be able to measure a wav.
+probing a folder of tracks is cheap. ``soxi -D`` is the second opinion (sox
+opens a few containers libsndfile does not, and answers with one bare number),
+and ``ffprobe`` is the last resort for what neither can open (some ``.m4a``/AAC
+files). Both are optional: the app already requires ffmpeg for caption staging,
+but a machine with neither tool must still be able to measure a wav.
+
+WHY THE PROCESS-BASED PROBES SIT *AFTER* ``soundfile``
+-----------------------------------------------------
+``sf.info`` needs no fork. Importing a folder of a few hundred tracks runs the
+probe once per file, and spawning two subprocesses per track is the difference
+between an instant add and a visible pause -- so the in-process header read is
+asked first and the external tools only see files it could not read.
 
 A file that cannot be read returns ``0.0``. The table renders that as a blank
 cell; the probe never guesses a length.
@@ -15,6 +23,29 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+
+
+def _soxi_seconds(path):
+    """``soxi -D``: the length sox reports, in seconds, or ``0.0``.
+
+    soxi prints a single bare float (``180.000000``), so there is no output to
+    parse beyond ``float()``. It exits non-zero and writes to stderr for a file
+    it cannot open -- including a missing one -- which is the same "cannot
+    measure" case as everything else here, not an error to raise.
+    """
+    soxi = shutil.which("soxi")
+    if not soxi:
+        return 0.0
+    try:
+        result = subprocess.run(
+            [soxi, "-D", str(path)],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode != 0:
+            return 0.0
+        return max(0.0, float((result.stdout or "").strip() or 0.0))
+    except Exception:                                        # noqa: BLE001
+        return 0.0
 
 
 def audio_duration_seconds(path):
@@ -29,6 +60,10 @@ def audio_duration_seconds(path):
         return float(info.frames) / samplerate
     except Exception:                                        # noqa: BLE001
         pass
+
+    by_sox = _soxi_seconds(path)
+    if by_sox > 0:
+        return by_sox
 
     probe = shutil.which("ffprobe")
     if not probe:
