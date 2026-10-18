@@ -107,6 +107,16 @@ contradicting itself.
   (training cap — inference allows 2048) or the tail is silently dropped. Word-level echoes are
   cheap; numbered markers are not.
 
+> **The 5Hz LM sees the same lyrics with the same ids.** The optional 5Hz LM
+> (`acestep-5Hz-lm-{0.6B,1.7B,4B}`) is a *second, independent* consumer of lyric text: it
+> receives them inside its chat template (`acestep/llm_inference.py` → `# Lyric\n{lyrics}`,
+> `:1705`) and tokenizes the result with its own checkpoint tokenizer (`:612`, `:1008`). That
+> tokenizer's base vocabulary, merge list, pre-tokenizer and normaliser are identical to the text
+> encoder's, so every id and count above is unchanged on that path. The 4B checkpoint differs
+> only by a 65,535-entry `<|audio_code_N|>` block appended at ids 151669–217203 (217,204 ids
+> total) and a different chat template; no added token contains a parenthesis. Whichever LM size
+> is active, `(` is id 7 and `)` is id 8.
+
 > **NOT documented upstream:** the official docs state *that* parentheses produce background
 > vocals (`docs/en/Tutorial.md:540-548`, example `We rise together (together)`; restated in
 > `docs/en/ace_step_musicians_guide.md:331-335` and

@@ -1,8 +1,7 @@
 """Caption tab builder for DatasetManager.
 
-Extracted from the ⚙ Settings tab (backend, prompt, limits) plus the Dataset
-Studio inspector (caption/lyrics editors) so captioning has one coherent home
-and the Studio regains its width.
+Extracted from the ⚙ Settings tab (backend, prompt, limits) plus the caption and
+lyrics editors, so captioning has one coherent home.
 
 Follows the ui/settings_tab.py pattern: one function, ``build_caption_tab``,
 which builds widgets directly onto ``manager`` and stores them as

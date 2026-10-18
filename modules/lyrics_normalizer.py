@@ -362,6 +362,55 @@ def strip_quotes(text):
     return text
 
 
+# Marks the "Punctuation" tidy rule removes. What is NOT here is the
+# rule, not an oversight:
+#   '  -- never stripped directly. ``strip_punctuation`` runs the CONTRACTION
+#         TABLE first, because ``don't`` must become ``dont`` and ``can't`` must
+#         become ``kaant``; a blind apostrophe delete produces ``cant``, a
+#         different English word. Only leftovers (``sun's``) are dropped.
+#   -  -- a hyphen is a RESPELLING device in this app (``h-eel``, ``eye-d``,
+#         ``there-ill``). Deleting it would change the sound the singer is told
+#         to make, so it survives on purpose.
+#   [ ] -- structure tags; ``_apply_outside_brackets`` holds them out anyway.
+PUNCTUATION_CHARS = (
+    ".,!?;:\"'(){}<>/\\|@#$%^&*_+=~`"
+    "\u201c\u201d\u201e\u201f\u00ab\u00bb\u2018\u2019\u2026\u2022"
+)
+
+# Marks that stand for a PAUSE become a space instead of vanishing, so
+# ``hello\u2014world`` does not weld into ``helloworld``.
+_PUNCTUATION_AS_SPACE = "\u2013\u2014(){}"
+
+
+def strip_punctuation(text, contractions=None, case_fixed=None):
+    """Expand contractions, then remove punctuation, outside bracket tags.
+
+    The ORDER is the contract, and it is not cosmetic. ``don't`` has to reach
+    ``dont`` through ``apply_contractions`` -- the one table that decides how a
+    contraction is spelt so it still SOUNDS the same (``can't`` -> ``kaant``) --
+    before any apostrophe is dropped. Stripping first would produce ``cant``,
+    which is a different word, exactly what the respelling rule exists to avoid.
+
+    Structure tags are left untouched (``[Rock 'n' Roll]`` keeps its marks): they
+    are instructions to the trainer, not lyrics. Whitespace left behind by a
+    removed mark is collapsed and each line is right-stripped.
+    """
+    table = DEFAULT_CONTRACTIONS if contractions is None else contractions
+    fixed = DEFAULT_CASE_FIXED if case_fixed is None else case_fixed
+    text = apply_contractions(text, table, fixed)
+    text = strip_all_apostrophes(text)
+    text = strip_quotes(text)
+
+    def _drop(segment):
+        for ch in _PUNCTUATION_AS_SPACE:
+            segment = segment.replace(ch, " ")
+        segment = "".join(ch for ch in segment if ch not in PUNCTUATION_CHARS)
+        return re.sub(r"[ \t]{2,}", " ", segment)
+
+    text = _apply_outside_brackets(text, _drop)
+    return "\n".join(line.rstrip() for line in text.split("\n"))
+
+
 def trim_tag_modifiers(text):
     """Cut the `` - modifier`` tail out of a structure tag.
 

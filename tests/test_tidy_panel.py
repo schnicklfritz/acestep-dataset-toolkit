@@ -350,8 +350,8 @@ def test_tidy_reads_the_current_text_not_the_raw_snapshot(manager, tmp_path):
 
     ``raw_lyrics`` is the pre-tidy snapshot, written once by the first pass that
     changes a track. A pass that reads it FIRST recomputes from words the user
-    has already replaced and writes the result over the newer text — so a Studio
-    edit, an inspector edit or an accepted transcription followed by a tidy from
+    has already replaced and writes the result over the newer text — so an
+    inspector edit or an accepted transcription followed by a tidy from
     this panel was silently reverted. The order is declared once, in
     ``modules.dataset_schema.lyrics_source``.
     """
@@ -363,8 +363,8 @@ def test_tidy_reads_the_current_text_not_the_raw_snapshot(manager, tmp_path):
     assert sample["formatted_lyrics"] == "First version"
     assert sample["raw_lyrics"] == '"first version"'
 
-    # The Studio edits the track. Its write-back sets both live fields, exactly
-    # as ``ui/lyrics_studio`` does.
+    # An edit in the main-page lyrics field sets both live fields, exactly as
+    # ``ui/lyrics_inspector.LyricsSurface.flush`` does.
     sample["formatted_lyrics"] = '"second version"'
     sample["lyrics"] = '"second version"'
 

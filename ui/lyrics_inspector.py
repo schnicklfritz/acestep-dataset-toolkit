@@ -7,7 +7,7 @@ budget. The behaviour did not change: the subsystem moved, and every name the
 tests and the rest of the manager reach for is still an attribute ON THE MANAGER,
 because :func:`build_lyrics_surface` assigns them there rather than keeping them
 private to a class. That is the convention ``ui/lyrics_panel.py`` already uses
-(``manager.lyrics_panel_studio_btn``), and it is why the extraction needed no shim
+(``manager.lyrics_panel_summary``), and it is why the extraction needed no shim
 layer and changed no call site.
 
 The four guarantees this surface owes the user
@@ -28,9 +28,8 @@ guarantees that are all stronger than "you pressed Commit":
 4. **Nothing happens if the text is unchanged**, so selecting a track and clicking
    away creates no snapshot, no backup and no dirty flag.
 
-The debounce is 400 ms, deliberately longer than the 220 ms the Lyrics Studio uses
-for its preview (``ui.lyrics_studio``): that one only repaints, this one snapshots
-the undo stack and writes the dataset, so it must not fire mid-burst.
+The debounce is 400 ms: every save snapshots the undo stack and writes the
+dataset, so it must not fire mid-burst.
 
 State lives on the MANAGER, not in a class here
 -----------------------------------------------
@@ -40,23 +39,30 @@ no property wrapping them. ``tests/test_lyrics_inline_editor.py`` reads all thre
 by name; the manager is their single writer either way, so a property would buy
 nothing and cost a layer.
 
-What deliberately did NOT move
-------------------------------
-``manager._lyrics_lower_widgets`` and ``manager.on_lyrics_expand_toggled`` stay in
-``dataset_manager``: that list also holds the CAPTION widgets, so "Expand" hides
+What stays in the manager
+-------------------------
+``manager._lyrics_hidden_on_expand`` and ``manager.on_lyrics_expand_toggled`` stay in
+``dataset_manager``: that list also holds the caption widgets, so "Expand" hides
 the caption block too and is an inspector-layout concern, not a lyrics one. The
-handler delegates only the field's height (:meth:`LyricsSurface.set_expanded`).
+handler delegates only the field's height and fill (:meth:`LyricsSurface.set_expanded`).
 ``manager._lyrics_gate_open`` and ``manager.update_lyric_limit_label`` stay as
-well -- the token-limit gate is shared with both Studio openers, and the limit
-label is shared with the Lyrics panel and the caption.
+well -- the token-limit gate guards the field, and the limit label is shared with
+the Lyrics panel and the caption.
 """
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton
+from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QSizePolicy,
+)
 
-# The debounce for the auto-save. Deliberately longer than the 220 ms the Lyrics
-# Studio uses for its live preview: that one only repaints, this one snapshots the
-# undo stack and writes the dataset, so it should not fire mid-burst.
+# The debounce for the auto-save: every save snapshots the undo stack and writes
+# the dataset, so it should not fire mid-burst.
 SAVE_DEBOUNCE_MS = 400
 
 # The field's height when "Expand" is ticked / unticked.
@@ -83,6 +89,164 @@ def set_layout_item_visible(item, visible):
                 set_layout_item_visible(inner, visible)
 
 
+# The two apostrophes a lyric line can carry: ASCII and the typographic one a
+# pasted caption often uses. Both split a word in Qt's eyes.
+APOSTROPHES = "'\u2019"
+
+
+def join_apostrophes(text, start, end):
+    """Widen ``[start, end)`` across apostrophes that sit *inside* a word.
+
+    Qt splits ``don't`` into three words (``don``, ``'``, ``t``) and
+    ``o'clock`` into two, so a double-click would act on a fragment. An
+    apostrophe joins only when there is an alphanumeric character on BOTH sides,
+    which is what keeps a trailing one (``believin'``) and a quoted one
+    (``rock 'n' roll``) left alone.
+    """
+    while (
+        end + 1 < len(text)
+        and text[end] in APOSTROPHES
+        and text[end + 1].isalnum()
+    ):
+        end += 1
+        while end < len(text) and text[end].isalnum():
+            end += 1
+    while (
+        start >= 2
+        and text[start - 1] in APOSTROPHES
+        and text[start - 2].isalnum()
+    ):
+        start -= 1
+        while start > 0 and text[start - 1].isalnum():
+            start -= 1
+    return start, end
+
+
+def words_cursor(doc, start, end):
+    """A cursor selecting ``[start, end)``, widened to a full contraction."""
+    start, end = join_apostrophes(doc.toPlainText(), start, end)
+    cursor = QTextCursor(doc)
+    cursor.setPosition(start)
+    cursor.setPosition(end, QTextCursor.KeepAnchor)
+    return cursor
+
+
+def word_under_or_before(cursor):
+    """The word at ``cursor``, or the one it sits immediately after.
+
+    ``QTextCursor.WordUnderCursor`` answers "the word this position is IN",
+    which is the wrong question once the position sits one past a word's last
+    letter. Qt also treats a trailing ``-``/``.``/``,``/``"``/``?``/``!`` as a
+    word of its own, so at position 3 of ``dog.`` it returns ``'.'`` — and
+    ``'.'.upper() == '.'``, which is how a double-click on ``dog.`` came to do
+    nothing at all while ``dog dog`` worked. The fallback probes
+    ``position - 1`` and accepts the first selection that actually contains an
+    alphanumeric character, widened to a whole contraction.
+
+    Returns ``None`` when neither position yields a word. That is a blank line,
+    a lone ``'``, or punctuation clicked directly, and all three must stay a
+    no-op rather than reaching for a neighbouring word.
+    """
+    doc = cursor.document()
+    pos = cursor.position()
+    for probe in (pos, pos - 1):
+        if probe < 0:
+            continue
+        candidate = QTextCursor(doc)
+        candidate.setPosition(probe)
+        candidate.select(QTextCursor.WordUnderCursor)
+        if any(ch.isalnum() for ch in candidate.selectedText()):
+            start = candidate.selectionStart()
+            end = candidate.selectionEnd()
+            return words_cursor(doc, start, end)
+    return None
+
+
+class LyricTextEdit(QPlainTextEdit):
+    """The lyrics field, with the shouted-word gesture wired in.
+
+    **Double-click a word to UPPERCASE it** (the belting / shouted delivery
+    mark); double-click it again to undo. There is no mode switch and no second
+    host: this is the field on the main page, and the gesture is defined once
+    here.
+
+    ``Tab`` is always Qt's focus key, never a literal tab. In a real host there
+    is a focusable sibling, so Tab moves focus instead of inserting whitespace.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.Monospace)
+        font.setPointSize(13)
+        self.setFont(font)
+        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.setTabChangesFocus(True)
+        self.setPlaceholderText("Open a .txt / .lrc file, or paste lyrics here…")
+
+    # ---- gestures -------------------------------------------------------
+    def toggle_case(self, cursor):
+        """UPPERCASE the cursor's selection, or lowercase it if already upper."""
+        if not cursor.hasSelection():
+            return
+        text = cursor.selectedText()
+        if not text.strip():
+            return
+        new_text = text.lower() if text.isupper() else text.upper()
+        start = cursor.selectionStart()
+        cursor.beginEditBlock()
+        cursor.insertText(new_text)
+        cursor.endEditBlock()
+        # Keep the same word selected so repeated toggles work on one word.
+        again = QTextCursor(self.document())
+        again.setPosition(start)
+        again.setPosition(start + len(new_text), QTextCursor.KeepAnchor)
+        self.setTextCursor(again)
+
+    def toggle_word_at_cursor(self):
+        """UPPERCASE the word under the cursor, or the one it sits after.
+
+        The double-click path arrives here with Qt's own ``dog`` selection
+        already in place (``mouseDoubleClickEvent`` calls ``super()`` first), so
+        that selection is the answer and is used as-is. Re-deriving the word from
+        the cursor's position instead is what made ``dog.`` unclickable: the
+        double-click leaves the position *after* the word, where
+        ``WordUnderCursor`` finds the ``.``.
+        """
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            # Qt's selection is the answer — but for a contraction it hands over
+            # only a fragment (``don`` of ``don't``), so widen it to the whole
+            # word before toggling. A punctuation-only selection is left exactly
+            # as Qt gave it: uppercasing it is a no-op, which is the intended
+            # behaviour for a click on the mark itself.
+            if any(ch.isalnum() for ch in cursor.selectedText()):
+                cursor = words_cursor(
+                    self.document(), cursor.selectionStart(), cursor.selectionEnd()
+                )
+            self.toggle_case(cursor)
+            return
+        word = word_under_or_before(cursor)
+        if word is not None:
+            self.toggle_case(word)
+
+    # ---- events ---------------------------------------------------------
+    def mouseDoubleClickEvent(self, event):
+        # Let the base class do the word selection, then toggle it. Doing it
+        # here (not on a timer) keeps the selection and the toggle atomic.
+        super().mouseDoubleClickEvent(event)
+        self.toggle_word_at_cursor()
+
+    # ---- file helpers ---------------------------------------------------
+    def load_file(self, path):
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            self.setPlainText(fh.read())
+
+    def save_file(self, path):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self.toPlainText().strip())
+
+
 def build_lyrics_surface(manager, insp_layout):
     """Build the lyrics field, its header, its status row and its auto-save.
 
@@ -92,25 +256,17 @@ def build_lyrics_surface(manager, insp_layout):
     ``manager._lyrics_field``), which the manager's methods delegate to.
     """
     from ui.appearance_panel import build_font_size_spin
-    from ui.lyrics_studio import LyricTextEdit, studio_button
     from ui.themes import (
         FONT_REGION_LYRICS,
         FONT_REGION_PROPERTY,
         LYRICS_FONT_SIZE_MAX,
     )
 
-    # The way in to the Lyrics Studio, above the field. The button is built by
-    # ui.lyrics_studio because THAT module owns the window and the single
-    # "prefer manager.open_lyrics_editor" opener, so the Inspector, the Lyrics tab
-    # and the toolbar cannot drift into opening three different windows. The field
-    # below still works for quick edits -- this is additive.
-    insp_layout.addWidget(studio_button(manager))
-
     lyrics_head = QHBoxLayout()
     lyrics_head.addWidget(QLabel("<b>Formatted Lyrics / Vocal Markers:</b>"))
     # Text-size steppers, one notch per click. They replace the old "Capitalize
     # mode" checkbox 1:1 -- that switch is gone because double-click now always
-    # marks a word shouted (see ui/lyrics_studio), so the space it occupied is
+    # marks a word shouted (see LyricTextEdit above), so the space it occupied is
     # free for the control users actually asked for here: making the lyrics
     # readable at a glance. They are a coarse adjustment of the SAME
     # ``lyrics_font_size`` key the Settings row and the numeric "Size:" spinbox
@@ -197,7 +353,7 @@ def build_lyrics_surface(manager, insp_layout):
     lyrics_actions.addStretch()
     lyrics_actions.addWidget(manager.lyrics_discard_btn)
     # Placed after the stretch so it is the rightmost control on this row.
-    # "Expand" hides ``_lyrics_lower_widgets`` and this row is not in that list,
+    # "Expand" hides ``_lyrics_hidden_on_expand`` and this row is not in that list,
     # so the size control stays available while the field is tall.
     manager.lyrics_font_spin_inline = build_font_size_spin(
         "Text size for the lyrics fields. Auto matches the rest of the app; "
@@ -419,16 +575,49 @@ class LyricsSurface:
         set_appearance(self.manager, "lyrics_font_size", value)
 
     def set_expanded(self, checked):
-        """Give the field most of the inspector, or put it back.
+        """Let the field take the inspector's height, or put it back.
 
-        Only the height: hiding the fields BELOW the box is the manager's
-        ``on_lyrics_expand_toggled``, because ``_lyrics_lower_widgets`` also holds
-        the caption widgets and so is inspector-layout state, not lyrics state.
-        No second window either — the field already lives inside a scroll area, so
+        Hiding the widgets that sit above the field is the manager's
+        ``on_lyrics_expand_toggled``: that list holds the CAPTION block, the
+        health line and the lock bar, so it is inspector-layout state, not
+        lyrics state. What is left here is the field itself:
+
+        * **checked** — growing policy plus the tall minimum, so the field fills
+          the space the caption and the fields below used to occupy and its first
+          line lands at the TOP of the inspector, directly under the waveform's
+          column chrome. The inspector is scrolled to the top for the same
+          reason: a stale scroll offset would leave the field looking unmoved.
+        * **unchecked** — the normal height and policy, so the caption and the
+          metadata fields come back exactly as they were.
+
+        No second window: the field already lives inside a scroll area, so
         giving it height and hiding its neighbours is all "expanding" needs.
         """
-        self.manager.lyrics_text.setMinimumHeight(
-            EXPANDED_HEIGHT if checked else COLLAPSED_HEIGHT)
+        field = self.manager.lyrics_text
+        if checked:
+            field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            field.setMinimumHeight(EXPANDED_HEIGHT)
+        else:
+            field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            field.setMinimumHeight(COLLAPSED_HEIGHT)
+        self._scroll_inspector_to_top()
+
+    def _scroll_inspector_to_top(self):
+        """Put the inspector's scroll area back at the top.
+
+        The lyrics field and the caption live in the same scroll area. After
+        Expand hides the caption, keeping the previous scroll offset would leave
+        the field visually where it was, defeating "move up to just under the
+        waveform". Climbing to the nearest ``QScrollArea`` keeps this module from
+        needing a reference the manager would have to hold.
+        """
+        from PySide6.QtWidgets import QScrollArea
+
+        parent = self.manager.lyrics_text.parentWidget()
+        while parent is not None and not isinstance(parent, QScrollArea):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.verticalScrollBar().setValue(0)
 
     # -- sidecar ------------------------------------------------------------
 

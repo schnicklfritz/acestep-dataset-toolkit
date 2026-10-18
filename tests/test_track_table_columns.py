@@ -148,12 +148,14 @@ def test_language_is_visible_by_default(manager):
     assert not manager.table.isColumnHidden(_col(manager, "Language"))
 
 
-def test_only_time_and_duration_stay_hidden_by_default(manager):
+def test_no_column_is_hidden_by_default(manager):
     from ui.shell import DEFAULT_HIDDEN_COLUMNS as SHELL_HIDDEN
 
     assert "Language" not in SHELL_HIDDEN
     # One list, re-exported — the shell must not carry a second opinion.
-    assert SHELL_HIDDEN == DEFAULT_HIDDEN_COLUMNS == ["Time", "Duration"]
+    # Nothing is hidden any more: Time and Duration are audited values, and a
+    # hidden column reads as a missing one.
+    assert SHELL_HIDDEN == DEFAULT_HIDDEN_COLUMNS == []
 
 
 def test_new_tracks_default_to_english(manager):
@@ -318,7 +320,7 @@ def test_every_value_lands_in_the_column_that_names_it(manager):
     assert got["Key"] == "C maj"
     assert got["BPM"] == "128"
     assert got["Time"] == "4/4"
-    assert got["Duration"] == "95s"
+    assert got["Duration"] == "1:35"
     # Filename stays read-only; the rest are editable inline.
     assert not (manager.table.item(0, _col(manager, "Filename")).flags() & Qt.ItemIsEditable)
     assert manager.table.item(0, _col(manager, "Tag")).flags() & Qt.ItemIsEditable

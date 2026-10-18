@@ -92,7 +92,7 @@ def lyrics_source(sample):
 
     ``formatted_lyrics``  the ``[Section]``-tagged block — what the training
                           loader reads, and what every writer in the app updates
-                          (the tidy pass, the Studio's ``apply_target``, the
+                          (the tidy pass, the ``apply_target`` bulk edit, the
                           inline editor, a transcription accept, the assistant's
                           set-lyrics). It is the CURRENT text, so it is first.
     ``lyrics``            lyrics as given / edited by hand. The same writers keep
@@ -107,7 +107,7 @@ def lyrics_source(sample):
     -------------------------------------
     Reading ``raw_lyrics`` first — as the tidy pass and the all-lyrics block both
     used to — means a later tidy recomputes from the original and overwrites every
-    edit made since, so a Studio edit followed by a Tools-tab tidy was silently
+    edit made since, so a bulk edit followed by a Tools-tab tidy was silently
     reverted. Idempotency, the reason given for that order, does not require it:
     ``normalize_lyrics`` is already idempotent, and the pre-tidy text survives in
     ``raw_lyrics`` regardless, which is what makes the run reversible. Raw is now

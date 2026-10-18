@@ -1,41 +1,20 @@
-"""Unified Lyrics panel — the one surface every lyrics tool now lives on.
+"""Unified Lyrics panel — the one surface every lyrics tool lives on.
 
-What this gathers
------------------
-Four lyrics surfaces used to be reachable from four unrelated places:
-
-* the **🎵 Lyrics tab** — ``ui.lyrics_tab.build_lyrics_tab`` — the tidy
-  options, the before/after preview, the editable contraction table and the
-  whole-dataset "All Lyrics" block;
-* the **"Lyrics Tidy — structure tags" group** — ``ui.tidy_panel`` — which
-  lived at the bottom of the *Tags & checks* page, so the three tag rules were
-  nowhere near the other lyric rules they are always used with;
-* the **token-budget line** — ``manager.lyrics_limit_label``, which sat under
-  the waveform and whose "full explanation" was only reachable from a tooltip;
-* the **Lyrics Studio window** — ``ui.lyrics_studio`` — which the Lyrics tab's
-  own two buttons (``Edit Raw Lyrics…`` and ``Lyric Capitalizer…``) opened.
-
-They are one panel now. The two tidy surfaces become the first two inner tabs,
-so the tag rules and the contraction rules are visibly the same job; the
-Studio tab carries the budget line, a plain-language summary of the rules in
-effect, and the button that opens the editor window.
-
-What this module deliberately does NOT do
------------------------------------------
-It does not reimplement anything. Every widget is built by the module that
-already owned it and every action calls the handler that already existed:
+The Lyrics page is one panel: the tidy options (``ui.lyrics_tab``), the three
+structure-tag rules (``ui.tidy_panel``) and the token-budget line under the
+waveform, with two inner tabs and a footer that states, in one line, the rules a
+tidy pass will apply.
 
 ======================  =========================================
 Inner tab               Built by / wired to
 ======================  =========================================
 Normalize & Tidy        ``ui.lyrics_tab.build_lyrics_tab``
 Structure Tags          ``ui.tidy_panel.build_tidy_panel``
-Studio                  ``ui.lyrics_studio`` + ``manager`` handlers
 ======================  =========================================
 
 That is the point: the panel is a *layout*, so the tidy logic, the tests that
-pin it and the ``manager.<name>`` attribute contract all keep working. A
-second implementation of the tidy pass is the bug this shape avoids.
+pin it and the ``manager.<name>`` attribute contract all keep working. A second
+implementation of the tidy pass is the bug this shape avoids.
 
 BUILD IT ONCE
 -------------
@@ -62,7 +41,7 @@ from PySide6.QtWidgets import (
 #: The inner tab titles, in build order. Exposed as a tuple so a test (or the
 #: manager) can name a tab instead of hardcoding an index — index-based tab
 #: lookups are how the wrong panel ends up refreshing when one is inserted.
-PANEL_TABS = ("Normalize & Tidy", "Structure Tags", "Studio")
+PANEL_TABS = ("Normalize & Tidy", "Structure Tags")
 
 
 def _budget_line(manager):
@@ -102,95 +81,22 @@ def _open_limits(manager):
 
 
 def refresh_panel_summary(manager):
-    """Rewrite the Studio tab's "rules in effect" line.
+    """Rewrite the footer's "rules in effect" line.
 
-    The line exists because the tidy options are set on a *different* inner
-    tab: without it you would have to switch tabs to find out what the Studio's
-    ✨ Tidy button is about to do.
+    The line exists because the tidy options are set on a different half of the
+    page: without it you would have to scan the tab to find out what a tidy pass
+    is about to do. ``rule_summary`` reads the same ``_lyrics_options()`` the
+    pass reads, so the two cannot drift.
     """
     label = getattr(manager, "lyrics_panel_summary", None)
     if label is None:
         return
-    from ui.lyrics_studio import rule_summary
+    from ui.lyrics_tidy_controls import rule_summary
 
     label.setText(
         "Tidy rules in effect: " + rule_summary(manager)
         + ". Change them on the “Normalize & Tidy” tab."
     )
-
-
-def _studio_page(manager, parent):
-    """The Studio tab: budget line, rule summary, editor button, cap help."""
-    page = QWidget(parent)
-    lay = QVBoxLayout(page)
-    lay.setContentsMargins(10, 8, 10, 8)
-    lay.setSpacing(10)
-
-    # The budget line, first: it is the number you check before writing a song
-    # back into a track, and it is the one thing this tab owns outright.
-    lay.addWidget(_budget_line(manager))
-
-    hint = QLabel(
-        "The editor is where a song is pasted, its shouted words are marked, and "
-        "the result is written back to the track. It opens in its own window so "
-        "a full song fits on screen."
-    )
-    hint.setProperty("muted", True)
-    hint.setWordWrap(True)
-    lay.addWidget(hint)
-
-    gesture = QLabel(
-        "<b>Double-click a word to UPPERCASE it</b> (that is the belting / "
-        "shouted delivery mark); double-click it again to undo. The same "
-        "gesture works in the Track Inspector's inline lyrics field, because "
-        "both use the one editor widget."
-    )
-    gesture.setWordWrap(True)
-    lay.addWidget(gesture)
-
-    manager.lyrics_panel_summary = QLabel("")
-    manager.lyrics_panel_summary.setProperty("muted", True)
-    manager.lyrics_panel_summary.setWordWrap(True)
-    lay.addWidget(manager.lyrics_panel_summary)
-
-    row = QHBoxLayout()
-    # Built by ui/lyrics_studio.studio_button, the ONE factory for "open the
-    # Studio" buttons: the opener rule ("prefer manager.open_lyrics_editor, else
-    # lazily import open_lyrics_studio") lives with the window, so this button
-    # and the Track Inspector's cannot drift into opening different windows. Only
-    # the wording differs, and the factory takes it as an argument. ``attr`` keeps
-    # the historical name the tests and panel handlers read back.
-    from ui.lyrics_studio import studio_button
-
-    row.addWidget(studio_button(
-        manager,
-        label="🔠 Open Lyrics Studio…",
-        tooltip=(
-            "Edit the selected track's lyrics: paste, double-click a word to mark "
-            "it shouted, review the diff against the track, then write it back."
-        ),
-        attr="lyrics_panel_studio_btn",
-    ))
-    manager.lyrics_panel_limits_btn = QPushButton("ℹ Token limits…")
-    manager.lyrics_panel_limits_btn.setToolTip(
-        "How many tokens ACE-Step keeps for lyrics (512 training / 2048 "
-        "inference) and for the caption (256), and why the counts here say "
-        "“≈” when the exact tokenizer is not installed."
-    )
-    row.addWidget(manager.lyrics_panel_studio_btn)
-    row.addWidget(manager.lyrics_panel_limits_btn)
-    row.addStretch()
-    lay.addLayout(row)
-
-    lay.addStretch()
-
-    # No connect for the studio button: studio_button wires its own click to the
-    # single opener rule. Only the limits dialog is this module's business.
-    manager.lyrics_panel_limits_btn.clicked.connect(
-        lambda: _open_limits(manager))
-
-    refresh_panel_summary(manager)
-    return page
 
 
 def build_lyrics_panel(manager, parent):
@@ -229,13 +135,38 @@ def build_lyrics_panel(manager, parent):
     tags_layout.addStretch()
     tabs.addTab(tags_page, PANEL_TABS[1])
 
-    # --- 3. Studio: budget line + the editor's entry points -----------------
-    tabs.addTab(_studio_page(manager, tabs), PANEL_TABS[2])
+    # --- Footer: what the rules will do, how many tokens that leaves --------
+    # The two numbers that matter most belong beside the rules, always in view.
+    footer = QVBoxLayout()
+    footer.setContentsMargins(10, 6, 10, 6)
+    footer.setSpacing(4)
 
-    # The summary line describes options owned by tab 0, so refresh it on every
-    # switch rather than only at build time.
-    tabs.currentChanged.connect(lambda _i: refresh_panel_summary(manager))
+    manager.lyrics_panel_summary = QLabel("")
+    manager.lyrics_panel_summary.setProperty("muted", True)
+    manager.lyrics_panel_summary.setWordWrap(True)
+    footer.addWidget(manager.lyrics_panel_summary)
+
+    footer.addWidget(_budget_line(manager))
+
+    limits_row = QHBoxLayout()
+    manager.lyrics_panel_limits_btn = QPushButton("ℹ Token limits…")
+    manager.lyrics_panel_limits_btn.setToolTip(
+        "How many tokens ACE-Step keeps for lyrics (512 training / 2048 "
+        "inference) and for the caption (256), and why the counts here say "
+        "“≈” when the exact tokenizer is not installed."
+    )
+    limits_row.addStretch()
+    limits_row.addWidget(manager.lyrics_panel_limits_btn)
+    footer.addLayout(limits_row)
+    root.addLayout(footer)
+
+    manager.lyrics_panel_limits_btn.clicked.connect(
+        lambda: _open_limits(manager))
 
     manager.lyrics_panel = panel
     manager.lyrics_panel_tabs = tabs
+    # The summary describes options owned by tab 0, so refresh it on every
+    # switch rather than only at build time.
+    tabs.currentChanged.connect(lambda _i: refresh_panel_summary(manager))
+    refresh_panel_summary(manager)
     return panel

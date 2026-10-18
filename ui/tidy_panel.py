@@ -84,7 +84,7 @@ def _tidy_one(sample, opts):
 
     Reads the CURRENT text (``lyrics_source``, i.e. ``formatted_lyrics`` first).
     It must not read ``raw_lyrics`` first any more: that field holds the text as
-    it was before the FIRST tidy, so a tidy after a Studio edit would recompute
+    it was before the FIRST tidy, so a tidy after a manual edit would recompute
     from the original words and silently discard the edit.
 
     Deliberately PURE — it computes, it does not write. The caller has to take

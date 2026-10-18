@@ -44,6 +44,17 @@ def prepare_condition(                 # acestep/models/sft/modeling_acestep_v15
 
 Both streams are passed to self.encoder(...) and returned as one (encoder_hidden_states, encoder_attention_mask) pair (same file, lines 1676-1683), which is what the diffusion transformer cross-attends to. So a lyric-bracket descriptor and a caption tag are parallel conditioning on the same generation, and the adapter receives gradient from both.
 
+**The encoding stage differs by stream**, and that difference is worth knowing before you annotate:
+
+| Stream | Inside the Qwen3-Embedding-0.6B text encoder | Then, inside ACE-Step |
+|---|---|---|
+| Caption | Full forward pass; `.last_hidden_state` (acestep/core/generation/handler/conditioning_embed.py:74) | A single linear projection, `text_projector`, and no further transformer before cross-attention (acestep/models/sft/modeling_acestep_v15_base.py:1528, 1547) |
+| Lyrics | Embedding-table lookup only — `text_encoder.embed_tokens(...)`, with every Qwen3 transformer layer bypassed (acestep/core/generation/handler/conditioning_embed.py:79; training path: acestep/training/dataset_builder_modules/preprocess_lyrics.py:24) | A linear projection to model width, then **8 bidirectional transformer layers** — `AceStepLyricEncoder` (acestep/models/sft/modeling_acestep_v15_base.py:583-603; `num_lyric_encoder_hidden_layers=8` at acestep/models/common/configuration_acestep_v15.py:173) |
+
+So the lyric stream is not left unencoded: it skips Qwen3's transformer and is contextualised instead by ACE-Step's own lyric encoder, which self-attends across the entire lyric sequence (bidirectional — `is_causal=False`, modeling_acestep_v15_base.py:678) before the DiT cross-attends to the packed result. Each stream therefore receives exactly one transformer pass, and it is a different transformer in each case. Where word knowledge lives then differs: caption semantics come from a language-pretrained Qwen3 model, while a lyric descriptor draws its meaning from the Qwen3 embedding table alone — the 8-layer lyric encoder is trained from scratch on audio and contributes contextual integration, not vocabulary.
+
+Neither encoder is adapted by training. LoKR targets are collected exclusively from the DiT decoder (`get_dit_target_modules` walks `model.decoder.named_modules()` and keeps only `q_proj`/`k_proj`/`v_proj`/`o_proj`, acestep/training/lora_injection.py:128-129), and everything else is frozen, with any `encoder`/`text_encoder` prefix explicitly excluded (lora_injection.py:136-143). The lyric encoder and the text projector both live under `encoder` (`self.encoder = AceStepConditionEncoder(...)`, modeling_acestep_v15_base.py:1621). Annotation consequence: phrasing consistency is a data-side lever — training will not repair an inconsistent descriptor convention for you.
+
 Training consequence (this guide's recommendation, not a code constraint): do not name the same feature in both streams. A descriptor written into both the caption and every lyric bracket gives the adapter two independent, always-on predictors of the same acoustic feature, so the trigger has to out-compete both and ends up as a blend instead of a clean on/off switch.
 
 The rule that governs every annotation decision (prevalence form - see 1.1 for the thresholds, because the strict "every song" wording is misleading on its own):
@@ -559,7 +570,9 @@ Two ceilings apply to the same lyric file, and they are not the same number:
 
 512 tokens is the binding constraint, so treat it as your dataset limit: a 600-token lyric file still trains, but only its first 512 tokens do, so the adapter never learns the ending (while that same file sings to the end at inference). If a song cannot fit in 512 tokens, split it into two samples instead of letting the tail be dropped.
 
-Also note what the lyric channel actually is: a bare string. Training feeds this field verbatim, with a fallback of the literal text [Instrumental] when the field is missing (acestep/training_v2/preprocess.py:262), and embeds it directly (text_encoder.embed_tokens, acestep/training/dataset_builder_modules/preprocess_lyrics.py:24) rather than running the transformer encoder over it. The "# Languages" / "# Lyric" wrapper you see in the generation UI is added at inference only (acestep/core/generation/handler/prompt_utils.py:27-29) — do not write those headers into your dataset files.
+> **Do not follow the "set your lyric truncation to 2048" advice.** It circulates in the reference notes ("Modify your training data's lyric truncation length to be consistent with this 2048 limit") and it is wrong for dataset creation. No dataset-side setting can raise the training cap, because the 512 limit is hard-coded in the preprocessor as `max_length=512, truncation=True` (`acestep/training/dataset_builder_modules/preprocess_lyrics.py:6-12`) rather than exposed as a flag. 2048 is the *inference* ceiling and nothing else. Following the advice therefore produces exactly the misalignment it claims to prevent: the adapter learns the first 512 tokens of a 2048-token file and meets the remaining three-quarters for the first time at generation.
+
+Also note what the lyric channel actually is: a bare string. Training feeds this field verbatim, with a fallback of the literal text [Instrumental] when the field is missing (acestep/training_v2/preprocess.py:262), and it reaches the model through ACE-Step's lyric encoder rather than through Qwen3's transformer: the string is embedded by table lookup (text_encoder.embed_tokens, acestep/training/dataset_builder_modules/preprocess_lyrics.py:24) and then contextualised by the 8-layer AceStepLyricEncoder (stage-by-stage detail in the wiring note at the top of the guide). The "# Languages" / "# Lyric" wrapper you see in the generation UI is added at inference only (acestep/core/generation/handler/prompt_utils.py:27-29) — do not write those headers into your dataset files.
 
 ## 5. The Relationship Between Captions and Lyrics
 
@@ -634,9 +647,9 @@ Rule: Tag the majority style explicitly. Do not let it become the default by omi
 
 ### 6.3 Novel Style Tags: You Can Invent Them
 
-You are not limited to tags the base model already knows. ACE-Step 1.5xl uses a Qwen3-based text encoder(choose the 4B model), which has broad semantic understanding from its language training. It already understands words like drunk, slurred, melancholic, breathy, etc.
+You are not limited to tags the base model already knows. ACE-Step 1.5 uses the **Qwen3-Embedding-0.6B** text encoder (acestep/core/generation/handler/init_service_loader_components.py:90) — an embedding model, not a generative LLM, and not a 4B model. Every 1.5 variant, XL included, loads this same 0.6B encoder. It already has meaningful vectors for words like drunk, slurred, melancholic, breathy.
 
-When you train a LoKR, you are not teaching the model a new word. You are teaching it an association between an existing semantic concept (the text embedding for "slurred") and specific acoustic features in your audio.
+When you train a LoKR, you are not teaching the model a new word, and you are not adapting the encoder either — the encoder is frozen and LoKR touches only the DiT decoder's attention projections (acestep/training/lora_injection.py:128-129, 136-143). What you are teaching is an association between the vector the encoder already produces for "slurred" (the text embedding for it) and specific acoustic features in your audio.
 
 #### Example: Tagging a drunk vocal style
 
@@ -685,7 +698,7 @@ The adapter learns the general characteristics of that type of solo and generate
 | Tag | Why it fails |
 |---|---|
 | [Guitar Solo - the solo from song X] | The adapter learns style features, not unique audio sequences. It cannot retrieve a specific performance. |
-| [Solo - solo_01] | Arbitrary identifiers have no semantic meaning to the text encoder. The adapter learns nothing. |
+| [Solo - solo_01] | Arbitrary identifiers carry no semantic content; the encoder returns an arbitrary, non-generalising vector for them, so any association the adapter forms with them is arbitrary too. No reusable style feature is taught. |
 
 The distinction: LoKR learns generalizable style features, not exact audio sequences. You are teaching the model how your singer's solos tend to sound, not what a specific solo was.
 
@@ -917,11 +930,17 @@ Audio constraints the preprocessor imposes, which are worth knowing before you m
 
 The relevant preprocessing flags are --preprocess, --audio-dir, --dataset-json, --tensor-output and --max-duration (acestep/training_v2/cli/args.py:318-322). Preprocessing tokenizes every caption and lyric into frozen tensors: the finished .pt file holds target_latents, attention_mask, encoder_hidden_states, encoder_attention_mask, context_latents and the metadata copy, and no training step re-reads your JSON or your .txt files afterwards (acestep/training_v2/preprocess.py:435-445). Practical consequence: fix metadata errors in the JSON and re-run preprocessing. Editing the JSON alone changes nothing about an already-preprocessed dataset.
 
+**`context_latents` is not adapter-agnostic.** The `.pt` contract above includes `context_latents`, the reference latents the DiT is conditioned on, and how they are built depends on how the preprocessing ran. In the legacy dataset builder the source is the track's own latents in `lokr` mode and silence otherwise — `context_src = target_latents if mode == "lokr" else None` (`acestep/training/dataset_builder_modules/preprocess.py:252`, passed at `:258`; `mode` is the `preprocess_mode` argument, normalised from `"lora"`/`"lokr"` at `:75-77`), and `None` resolves to the silence latent (`acestep/training/dataset_builder_modules/preprocess_context.py:12-13`). In v2 the context is always silence and the mode is never consulted (`acestep/training_v2/preprocess.py:418-423`). So a tensor set preprocessed as `lokr` and one preprocessed as `lora` are **not interchangeable** — they carry different `context_latents` — whereas anything v2 preprocesses is genuinely mode-independent. Because `preprocess_mode` is fixed at preprocessing time (`acestep/ui/gradio/interfaces/training_dataset_tab_save_preprocess.py:64`), the adapter you train afterwards cannot change it: preprocess for the adapter you intend to train.
+
+This is where the bundled upstream note needs a caveat. `docs/sidestep/Dataset Preparation.md:287` states "**Preprocessing is adapter-agnostic:** The same preprocessed tensors work for both LoRA and LoKR training. You only need to preprocess once." That is true of v2, which always writes silence, but not of the legacy builder, where `preprocess_mode` selects a different context tensor. Preprocess once only if every adapter you will train comes from the same preprocessing path and the same `preprocess_mode`.
+
 | Variant | Command Flag | When to Use |
 |---|---|---|
 | SFT | --model-variant sft | Your use case — LoKR training |
 | Base | --model-variant base | Special tasks (lego/complete/extract) |
 | Turbo | --model-variant turbo | Fast generation only — not for LoKR |
+
+> **The default is Turbo, not SFT.** `model_variant` defaults to `"turbo"` (`acestep/training_v2/configs.py:159`), so omitting the flag runs preprocessing *and* training on Turbo with no error and no warning — the variant-match rule is then satisfied consistently wrong, which is worse than a mismatch because nothing surfaces. Pass `--model-variant sft` explicitly. Full consequences in section 8.8.
 
 #### Verification Before Training (the checks that catch silent data loss)
 
@@ -935,7 +954,93 @@ The relevant preprocessing flags are --preprocess, --audio-dir, --dataset-json, 
 
 5. Tracks are within --max-duration, or were trimmed on purpose. The tail beyond the cap never enters training (preprocess_audio.py:17-19).
 
-## 8. Master Checklist for LoKR Dataset Annotation
+#### Upstream source documents (what each is for)
+
+The upstream repository's own documents cover different slices of this ground truth. This guide is written to agree with them, and the one place it deliberately does not is called out above.
+
+- `docs/en/Large_Scale_SFT_Training_Guide.md` — the official converter that turns a Muse-format JSONL corpus into an ACE-Step dataset (`convert_muse_jsonl`, `:118`, shipped as `convert_muse_to_acestep.py` and invoked at `:239`). Read it for the canonical "build a dataset from scratch" script and for the JSONL field names ACE-Step itself emits.
+- `docs/sidestep/Dataset Preparation.md` — the field-by-field dataset JSON schema and the semantics of `custom_tag`, `tag_position` and `genre_ratio`. Its "Preprocessing is adapter-agnostic" note (`:287`) is the claim qualified in the `context_latents` paragraph above: accurate for v2, not for the legacy dataset builder.
+
+## 8. How the Adapter Actually Learns: Training-Time Constraints (verified against source)
+
+Every item below was read out of the ACE-Step training code rather than inferred, and each is included because it constrains *dataset creation*: it decides what the adapter can and cannot learn from your annotations. Section 7 tells you what to write; this section tells you what happens to it afterwards.
+
+### 8.1 The conditioning is frozen at preprocessing — later edits are worth exactly nothing
+
+Preprocessing encodes the caption and the lyric once and stores both as tensors in the `.pt` file (`acestep/training_v2/preprocess.py:231-245, 265, 435-445`). No training step ever re-reads your `.caption.txt`, your `.lyrics.txt` or your dataset JSON.
+
+Consequence: a caption or lyric edit made *after* preprocessing has **zero** effect on the adapter until the preprocessor is re-run. Not a reduced effect — zero. This is also what makes the Omission Principle in section 1 a mechanism rather than a preference: because conditioning is a fixed input the adapter cannot refresh, a descriptor constant across every sample is a constant it may safely ignore, while the trigger tag is the one constant it is rewarded for retaining. Practically: settle the text, then preprocess, then train. "Tweak the caption and resume training" silently trains on the stale tensor.
+
+### 8.2 `--cfg-ratio` does not drop the caption — it drops the entire conditioning
+
+`cfg_ratio` defaults to 0.15 (`acestep/training_v2/configs.py:142`) and is applied by replacing the **fused** encoder output with the model's learned null embedding (`acestep/training_v2/fixed_lora_module.py:312-318`; the underlying mechanism in `acestep/models/turbo/modeling_acestep_v15_turbo.py:1741-1749`). Caption and lyric are packed into a single `encoder_hidden_states` tensor before that point, and `encoder_attention_mask` is left unmodified — the mask stays valid while the *content* becomes unconditional.
+
+Consequence: roughly 15% of steps are fully unconditional — no caption **and no lyrics**. There is no caption-only dropout and no lyric-only dropout anywhere in the training path. Two dataset decisions follow:
+
+1. **Lyrics are not a protected channel.** Information placed only in the lyric brackets disappears on those steps exactly as if it had been placed nowhere. Do not treat the lyric stream as a safe home for something the caption cannot say.
+2. **You cannot buy robustness by splitting information across the two streams.** Both streams share one dropout switch, so state a feature once, in the stream it actually belongs to.
+
+### 8.3 Only four projections are ever trainable
+
+Adapter targets are collected by walking the DiT decoder and keeping `q_proj`/`k_proj`/`v_proj`/`o_proj` only, with every `encoder`/`text_encoder` prefix explicitly excluded (`acestep/training/lora_injection.py:128-129, 136-143`). The same fixed list is the default on both adapter configs (`acestep/training/configs.py:25-27` for LoRA, `:52-54` for LoKR); no MLP, feed-forward or projection target appears anywhere in the injection code.
+
+Consequence: the text encoder, the lyric encoder, the `text_projector` and the VAE are frozen. An annotation convention whose vocabulary lives only in the text encoder cannot be taught, because the module that would learn it is not trainable. Phrasing consistency across your dataset therefore stays a **data-side** lever, not something training will repair.
+
+### 8.4 Adapter scale is fixed, and both adapters sit at the same scale
+
+| Adapter | Rank / dim | alpha | Effective scale (alpha/rank) | Source |
+|---|---|---|---|---|
+| LoRA | `r = 8` | 16 | 2.0 | `acestep/training/configs.py:22-23` |
+| LoKR | `linear_dim = 64` | 128 | 2.0 | `acestep/training/configs.py:45-46` |
+
+Both honour the same 2.0 scale at an 8x difference in rank, so an equal-scale LoRA run and LoKR run are not equal capacity: a "LoRA vs LoKR on the same data" comparison is really a comparison of two different adapter sizes.
+
+Also inert: `attention_type` (default `"both"`, `acestep/training_v2/configs.py:37, 75`) is declared on the config and written into the run config, but no injection or target-collection code reads it — the target set is the fixed q/k/v/o allowlist above. Setting it changes nothing.
+
+### 8.5 Two timestep regimes, and "8" does not mean the same thing in both
+
+| Trainer | Timestep sampling | Source |
+|---|---|---|
+| legacy (`acestep/training/`) | 8 discrete values from the turbo shift=3.0 schedule, sampled uniformly | `acestep/training/configs.py:84-86, 104-105`; the values at `acestep/training/trainer.py:61-69`, used at `:399` and `:1343` |
+| v2 (`acestep/training_v2/`) | continuous, logit-normal (`mu = -0.4`, `sigma = 1.0`) | `acestep/training_v2/timestep_sampling.py:20-72`; parameters at `acestep/training_v2/configs.py:145-149` |
+
+The legacy schedule is literally the turbo **inference** schedule reused for training — the source comment reads "same as inference" (`acestep/training/trainer.py:60`) and `num_inference_steps` is annotated "Fixed: turbo uses 8 steps" (`acestep/training/configs.py:105`). The two trainers therefore differ by more than sampling method: one trains on exactly the timesteps Turbo later generates with, the other samples a continuous distribution. A recipe tuned under one regime is not evidence about the other.
+
+`data_proportion` looks like a knob and is not one. Its default is 0.5 (`acestep/training_v2/configs.py:151`), but every current variant calls the sampler with `use_meanflow=False`, which forces `data_proportion = 1.0` and therefore `r = t` for the whole batch (`acestep/training_v2/timestep_sampling.py:35-37, 63-67`; call site `acestep/training_v2/fixed_lora_module.py:332`). Changing it has no effect.
+
+### 8.6 The loss is an unmasked mean over the full padded tensor
+
+The flow-matching loss is a plain elementwise MSE over the whole padded latent batch, with no `attention_mask` applied to the loss itself (`acestep/training_v2/fixed_lora_module.py:354`; the mask reaches the decoder at `:346`, but the loss never uses it).
+
+Consequence: the default `batch_size = 1` (`acestep/training/configs.py:107`) is what keeps this harmless. Raise the batch size and padding positions enter the loss, where the target is noise, so part of the adapter's capacity is spent predicting nothing. The wider the duration spread inside a batch, the larger the dilution — if you raise the batch size for speed, keep durations comparable.
+
+### 8.7 Turbo does train with CFG dropout, but a Turbo adapter cannot be CFG-steered
+
+The repeated claim that Turbo "has no CFG support" is true at inference and false at training, and the false half is the one that decides your dataset.
+
+- **Training:** Turbo carries a `null_condition_emb` (`acestep/models/turbo/modeling_acestep_v15_turbo.py:1622`) and drops the condition at `cfg_ratio = 0.15` (`:1720`, applied `:1741-1749`; also the default at `:2288`) — the same mechanism as every other variant. It trains.
+- **Inference:** Turbo **forces** `diffusion_guidance_scale = 1.0`, with the source noting CFG is folded into the distillation (`:1833-1849, 1893-1895`).
+
+Consequence: the training variant silently decides whether your finished adapter can be steered afterwards. If the intended use is "prompt the adapter harder or softer", a Turbo-trained adapter cannot do it — the scale is pinned at 1.0. Decide the variant *before* preprocessing, because it also selects the text encoder, the VAE and the silence-latent subfolder.
+
+Corollary — correcting a related claim: `bpm`, `keyscale` and `timesignature` are **not** CFG guidance inputs. They reach the model only as the `# Metas` text block inside the same 256-token prompt as the caption (section 7), so they are prompt conditioning. Accuracy still matters, because an inaccurate value is taught to the adapter as fact — but no guidance mechanism reads it.
+
+### 8.8 `--model-variant` defaults to Turbo, not SFT
+
+`model_variant` defaults to `"turbo"` (`acestep/training_v2/configs.py:159`). Omit the flag and both preprocessing and training run on the Turbo variant, with no error and no warning — and the usual "the two must match" rule is then satisfied *consistently wrong*, which is worse than a mismatch because nothing surfaces. Pass `--model-variant sft` explicitly (section 7).
+
+### 8.9 Optimiser defaults, so that epoch counts are comparable
+
+`acestep/training/configs.py:106-118`: `learning_rate = 1e-4`, `batch_size = 1`, `gradient_accumulation_steps = 4`, `max_epochs = 100`, `save_every_n_epochs = 10`, `warmup_steps = 100`, `weight_decay = 0.01`, `max_grad_norm = 1.0`, `seed = 42`; cosine schedule (`acestep/training_v2/configs.py:126`). These are training-side rather than dataset-side, and are listed because published "1000 epochs on 12 songs" field notes were run under different values, so their epoch counts do not transfer to a default run.
+
+### 8.10 Saving, and one VRAM flag with a side effect
+
+- **LoKR saves differently from LoRA.** LoKR goes through `save_lokr_weights` → `lokr_weights.safetensors` with `{"algo": "lokr", "format": "lycoris"}` metadata (`acestep/training/lokr_utils.py:185-208`); LoRA uses the PEFT path (`acestep/training_v2/trainer_helpers.py:169-184`). The saver refuses to hide a configuration error: if `adapter_type` is `"lokr"` but no LyCORIS network is attached, it raises rather than silently writing a LoRA-shaped file (`acestep/training_v2/trainer_helpers.py:156-166`).
+- **`offload_encoder`** (default `False`, `acestep/training_v2/configs.py:135`) moves `vae`, `text_encoder`, `lyric_encoder`, `music_encoder`, `timbre_encoder`, `condition_projection` and `attention_pooler` to CPU after setup (`acestep/training_v2/trainer_helpers.py:121-140`, invoked at `acestep/training_v2/trainer_fixed.py:368-372`). Nothing moves them back. Sample generation *during* training needs those components on the compute device, so leave this off if you intend to generate previews mid-run.
+
+Section 7's checklist remains the practical gate; this section explains why each item on it is load-bearing.
+
+## 9. Master Checklist for LoKR Dataset Annotation
 
 | Step | Action |
 |---|---|
@@ -958,11 +1063,11 @@ The relevant preprocessing flags are --preprocess, --audio-dir, --dataset-json, 
 | 16 | Run the dataset builder with --model-variant sft |
 | 17 | Confirm that every sample resolved (each file name matched), that duration is populated for every sample, and that no lyric file exceeds 512 tokens |
 
-## 9. The One-Sentence Rule
+## 10. The One-Sentence Rule
 
 A descriptor that is present on essentially every song of your dataset, in the captions or in the lyric brackets, belongs to the trigger tag and must not be written again in either stream. If it is present on only part of the dataset, name it on exactly the songs where it occurs. Section 1.1 defines where "essentially every" begins.
 
-## 10. Comprehensive Prompt for Gemini 3.8 Flash
+## 11. Comprehensive Prompt for Gemini 3.8 Flash
 
 Copy the entire prompt below and paste it into Gemini. Replace the bracketed [TRIGGER_TAG] and [ARTIST_STYLE] with your specific values.
 
@@ -1027,7 +1132,8 @@ This guide and prompt are a working reference for ACE-Step 1.5 XL LoKR dataset a
 
 | Claim class | Status | Section |
 |---|---|---|
-| Prompt template, token caps (256 caption / 512 training lyric / 2048 inference lyric), file names, JSON keys, metadata string, mono-to-stereo handling, 48 kHz resampling, max-duration truncation, genre_ratio | Verified against ACE-Step source, with file and line references | 3.2, 4, 4.9, 7 |
+| Prompt template, token caps (256 assembled prompt / 512 training lyric / 2048 inference lyric), file names, JSON keys, metadata string, mono-to-stereo handling, 48 kHz resampling, max-duration truncation, genre_ratio | Verified against ACE-Step source, with file and line references | 3.2, 4, 4.9, 7 |
+| `context_latents` depend on `preprocess_mode` in the legacy dataset builder (silence in v2), so legacy tensors are not interchangeable between LoRA and LoKR | Verified against ACE-Step source, with file and line references | 7 |
 | Caption and lyric as two independent conditioning streams | Verified against ACE-Step source | 1 |
 | Parentheses are processed as background vocals or harmonies; vowel elongation works but is unstable | Verified in official generation docs and the songwriting skill | 4.6, 4.8 |
 | Omission principle and the prevalence bands | This guide's recommendation, derived from how adapter loss is distributed. ACE-Step enforces no such rule, and the exact thresholds are empirical | 1, 1.1, 6 |
@@ -1036,6 +1142,56 @@ This guide and prompt are a working reference for ACE-Step 1.5 XL LoKR dataset a
 | Tier 2 phonetic respellings (wohnt, kant, weel, eyel, kuz, ...) | Unverified. None appear anywhere in ACE-Step documentation, and none have been measured against plain apostrophe removal | 4.6 |
 | An alignment model; a lyric normalizer that strips punctuation, emoji and case; the word-swallowing failure mode | Not supported. No alignment model exists in the repository, and the training lyric path applies no normalization of its own | 4.5, 4.6 |
 | Melisma or vowel elongation as a LoRA/LoKR training requirement | Not supported. No ACE-Step training document mentions it; melisma occurs only as a genre descriptor in the caption vocabulary (acestep/genres_vocab.txt) | 4.6 |
+| Training-time constraints (conditioning frozen at preprocessing, CFG dropout removing the fused condition, the four trainable projections, adapter scale, the two timestep regimes, the unmasked loss, Turbo train-vs-inference CFG, the `model_variant` default) | Verified against ACE-Step source, with file and line references | 8 |
 | "AC/DC songs are mono" | Withdrawn. The 1970s albums are stereo; mono must be established per file | 3.3 |
 
 Apply the verified mechanics as written. Treat the recommendation and convention rows as defaults to test on your own material, and do not spend annotation effort defending the unverified rows.
+
+## 12. Feature Specification: Artist-Scoped Caption & Tag Generation (specified, not yet implemented)
+
+This section specifies a toolkit feature; there is no code behind it yet. It lives here because the two `updated_*_instruct.txt` reference files already describe the intended LLM behaviour, and a requirement that only exists in loose notes is a requirement that will drift. Nothing in this section changes the annotation rules above — it is a generation aid built on them.
+
+### 12.1 Purpose
+
+Given a dataset scoped to one artist or band, produce (a) a caption *template* and (b) a lyric-bracket *template* that stay consistent across every track in that dataset, drawn from that artist's own descriptor faceting rather than one generic list.
+
+The problem it solves is annotation drift: when each track is annotated independently from a generic vocabulary, the same feature gets named three different ways across a twelve-track dataset. Section 8.3 explains why training will not repair that — only the four attention projections adapt and the text encoder is frozen — so the dataset has to be internally consistent by construction. A template makes consistency the default instead of an act of discipline.
+
+### 12.2 Inputs
+
+| Input | Required | Notes |
+|---|---|---|
+| Artist / band name | yes | Loose forms must resolve: `sabbath`, `Doorsdata`, `hank_sr` |
+| Trigger tag | yes | Dataset-level, e.g. `acdc_bon`; identical in every caption (section 7) |
+| Optional per-track facts | no | BPM, key, duration, instruments, structural segments — supplied by `modules/tag_creator.build_track_context` |
+
+### 12.3 Vocabulary resolution (reuse the existing code)
+
+Do **not** build a second vocabulary mechanism. The resolver already exists:
+
+- `modules/vocabulary.resolve_artist(groups, artist)` — word-based loose matching, so real folder names resolve.
+- `modules/vocabulary.terms_for_artist(groups, artist)` — returns `(artist_facets, general_facets, resolved_name)`, falling back to the cross-artist fundamentals only, never to another artist's signature terms.
+
+Data files, all hand-maintained and present in `docs/`: `vocabulary.json` (artist-scoped facets, preferred), `vocabulary.txt` (flat fallback), `section_markers.txt` (the legal `[Marker]` names), `descriptor_reference.md` (the prose standard).
+
+### 12.4 Output shape
+
+Both templates are text intended to be handed to the annotation LLM, not finished annotations:
+
+1. **Caption template** — the fixed prefix (`<trigger_tag>, `), then the artist's facet slots in a stable order (genre → mood/energy → instruments → vocal character → production/era), then the 2–3 sentence flow narrative of section 2. The order is fixed deliberately: position then carries signal, and a consistently ordered caption is easier for the adapter to read than a shuffled one.
+2. **Lyric bracket template** — the legal `[Marker]` set from `section_markers.txt`, the per-bracket descriptor slots (count per 12.7), and the language-first form (`[EN - Chorus - anthemic]`) for non-English tracks.
+
+### 12.5 Guardrails (carry these into any implementation)
+
+- **The vocabulary is an *invocation* list, not a validation list.** It steers a generation prompt. It must never gate what a *training* annotation is allowed to say, and must never be used to reject a caption or a bracket. See `modules/vocabulary.py` and section 1.
+- **Do not name the same feature in both streams.** Section 8.2: CFG dropout removes the caption *and* the lyrics together, so duplicating a feature across the two streams buys no robustness and costs you a clean on/off trigger.
+- **A respelling must not produce a real English word.** Any Tier 2 contraction respelling (section 4.6) generated by a profile must not collide with a dictionary word — `well → weel`, never `heel`; `I'd → eye-d`, never `eyed`. A homophone re-creates exactly the ambiguity the respelling exists to remove.
+- **Omit what is constant.** Whatever appears on essentially every track in the dataset belongs in the trigger tag and must not be repeated in either stream (section 1.1).
+
+### 12.6 Where it plugs in
+
+`modules/tag_creator.py` already assembles the prompt context and loads the vocabulary files and the markers. The feature is a template generator layered on top of `load_vocabulary()` and `load_markers()`: same data, same resolution, new output shape. It must not introduce a third vocabulary path.
+
+### 12.7 The open item this specification cannot settle
+
+How many descriptors a bracket may carry. `docs/ACE_Step_1.5_Master_Annotation_Guide.md` §3 says "maximum 3"; the songwriting skill says 1. That is an unresolved decision, not a settled rule, so the template generator must be parameterised on it rather than hard-coding either number.

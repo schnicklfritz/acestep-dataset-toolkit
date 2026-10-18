@@ -37,8 +37,8 @@ class TestLyricsSource:
         assert lyrics_source(s) == "[Chorus]\nnew"
 
     def test_lyrics_is_the_second_tier(self):
-        # An import that only ever populated ``lyrics`` (or a field the Studio
-        # has not written back yet) is still readable.
+        # An import that only ever populated ``lyrics`` (or a field no writer
+        # has touched yet) is still readable.
         s = new_sample(lyrics="only here", raw_lyrics="old raw")
         assert lyrics_source(s) == "only here"
 

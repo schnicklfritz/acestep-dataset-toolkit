@@ -303,10 +303,12 @@ modules/
   caption_audit.py          Instrument-naming consistency across captions
   instruments_db.py         Filename-keyword instrument lookup
   manifest_validation.py    ACE-Step schema validation
+  audio_probe.py            Audio length from the file header (Duration column)
 kernels/                    Kaggle GPU kernel scripts
   caption_kernel.py         Qwen2.5-Omni captioner (batched)
   stem_separation_kernel.py Meta Demucs (htdemucs_ft / htdemucs_6s)
   structure_kernel.py       SongFormer structure (functional labels)
+  alignment_kernel.py       MMS_FA word alignment + shout detection (.lrc timings)
 workers/                    QThread workers (caption backends, pipelines, stems, …)
 ui/                         Tab builders: caption, ace_step, lyrics, settings, bulk-edit, MVSEP
 ```

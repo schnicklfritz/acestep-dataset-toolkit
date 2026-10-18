@@ -6,6 +6,9 @@ Formats:
   * JSONL           — one sample object per line
   * Sidecar         — a ``<stem>.caption.txt`` file per track (see
     ``export_sidecar_captions`` for why it is not a bare ``<stem>.txt``)
+  * JSON sidecar    — a ``<stem>.json`` per track carrying the five fields
+    ACE-Step's Dataset Builder reads off the audio (see
+    ``export_track_sidecar_json`` for why it holds only those five)
   * Train/Val folders — ``train/`` + ``val/`` with audio copies, caption
     sidecars, and a ``manifest.json`` — ready to hand to a training run.
 """
@@ -112,6 +115,65 @@ def export_sidecar_captions(samples, dest_dir):
         (dest_dir / f"{stem}.caption.txt").write_text(text, encoding="utf-8")
         written += 1
     return written
+
+
+#: The keys ACE-Step reads out of a ``<stem>.json`` sidecar -- and ONLY these.
+#: ``acestep/training/dataset_builder_modules/scan.py:84-97`` looks up each of
+#: these with a truthiness test, so a blank value is skipped rather than fatal,
+#: and no other key is read at all.
+SIDECAR_JSON_FIELDS = ("caption", "bpm", "keyscale", "timesignature", "language")
+
+
+def track_sidecar_json_path(audio_path):
+    """The path ACE-Step looks for a sidecar at: the audio's ``<stem>.json``.
+
+    ``Path.with_suffix`` is the same split ACE-Step performs and the toolkit
+    already uses for caption sidecars, so ``song.v2.mp3`` becomes
+    ``song.v2.json`` on both sides and a basename containing dots cannot drift.
+    """
+    return str(Path(audio_path).with_suffix(".json")) if audio_path else ""
+
+
+def export_track_sidecar_json(sample, path=None):
+    """Write ONE track's ACE-Step sidecar JSON. Returns the path, or ``None``.
+
+    This is the file ``acestep/training/dataset_builder_modules/scan.py:84-97``
+    reads next to the audio, under the audio's own basename. Exactly the five
+    ``SIDECAR_JSON_FIELDS`` are written; every other key on the sample is
+    dropped, because ACE-Step reads no others here -- a stray key would look
+    like it did something and silently do nothing.
+
+    Three traps, recorded because each one is invisible at the call site:
+
+    * **Location is the contract.** The file is read only when it sits beside
+      the audio under the audio's basename. A copy anywhere else is dead weight,
+      which is why the default is ``track_sidecar_json_path``.
+    * **No ``lyrics`` key, deliberately.** ACE-Step takes lyrics from
+      ``<stem>.lyrics.txt`` (or the legacy ``<stem>.txt``) and never from the
+      JSON sidecar (``audio_io.py:72-85``), so a lyrics key written here would
+      be ignored while reading like a feature.
+    * **``language`` has a side effect.** Any value other than
+      ``instrumental`` forces ``is_instrumental=false`` on that path
+      (``scan.py:94-97``), so blanking it for an instrumental track is not
+      cosmetic.
+
+    The v2 JSON trainer (``--dataset-json``) does not read sidecars at all --
+    this format is for the Dataset Builder / Gradio / API route.
+    """
+    sample = sample or {}
+    audio = sample.get("audio_path", "")
+    if not audio:
+        return None
+    target = Path(path or track_sidecar_json_path(audio))
+    payload = {}
+    for key in SIDECAR_JSON_FIELDS:
+        value = sample.get(key, "")
+        # Blank stays an empty string rather than null: scan.py's truthiness
+        # test skips both, and "" keeps the file readable if it is opened.
+        payload[key] = "" if value is None else value
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(target)
 
 
 def export_folders(samples, dest_dir, val_ratio=0.2, seed=42, stratify=True):

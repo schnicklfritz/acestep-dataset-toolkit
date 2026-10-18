@@ -31,7 +31,8 @@ button but four guarantees, one test group each below:
 
 Also pinned here: the lyrics text size steppers (A−/A+) and the numeric "Size:"
 readout drive ONE setting (``lyrics_font_size``), which the Settings row shares;
-and "Expand" hides what is below the field, without ever hiding the field.
+and "Expand" makes the field take the inspector's height — the caption sits
+ABOVE the field, so covering it is what moves the lyrics up under the waveform.
 """
 import pytest
 
@@ -177,23 +178,34 @@ def test_the_field_is_editable_with_no_mode_switch(manager):
     assert manager.lyrics_text.isReadOnly() is False
 
 
-def test_the_inspector_offers_the_studio_as_the_main_way_in(manager, monkeypatch):
-    """The Studio is the main way to change lyrics, so the Inspector needs a
-    prominent way in — routed through ``open_lyrics_editor``, the same seam the
-    Lyrics panel and the toolbar use. A second, private opener is how the two
-    would drift into opening different windows.
-
-    The field above it stays for quick edits; this pins the way in, not a
-    replacement for the field (``test_the_field_is_editable_with_no_mode_switch``
-    pins that separately).
-    """
+def test_the_inspector_has_no_studio_button(manager):
+    """The separate window is gone, so a "Open in Lyrics Studio" button would be
+    a dead end. The field it used to open IS this field now."""
     _load(manager, [_track("a.mp3", "one")])
-    assert manager.open_studio_btn.text() == "🎼 Open in Lyrics Studio"
+    assert not hasattr(manager, "open_studio_btn")
+    assert not hasattr(manager, "lyrics_panel_studio_btn")
 
-    calls = []
-    monkeypatch.setattr(manager, "open_lyrics_editor", lambda: calls.append(1))
-    manager.open_studio_btn.click()
-    assert calls == [1], "the Inspector button does not open the Lyrics Studio"
+
+def test_the_editors_entry_points_focus_the_main_page_field(manager):
+    """``open_lyrics_editor`` / ``open_lyric_capitalizer`` used to open the
+    Studio window. They now point at the main-page field, which is the only
+    editor — a second window is how the two would drift apart again."""
+    _load(manager, [_track("a.mp3", "one")])
+    manager.lyrics_expand_check.setChecked(False)
+    focused = []
+    original = manager.lyrics_text.setFocus
+
+    def _record(*args, **kwargs):
+        focused.append(True)
+        return original(*args, **kwargs)
+
+    manager.lyrics_text.setFocus = _record
+    try:
+        manager.open_lyrics_editor()
+        manager.open_lyric_capitalizer()
+    finally:
+        manager.lyrics_text.setFocus = original
+    assert focused == [True, True]
 
 
 def test_the_field_shows_the_selected_track(manager):
@@ -417,9 +429,9 @@ def test_the_double_click_gesture_needs_no_mode_switch(manager):
 
 
 def test_the_field_is_a_lyric_text_edit(manager):
-    """The inline host must be the SAME widget the popup uses, or the gestures
-    would have to be maintained in two places."""
-    from ui.lyrics_studio import LyricTextEdit
+    """The inline host must be the ONE lyrics widget, or the gestures would have
+    to be maintained in two places."""
+    from ui.lyrics_inspector import LyricTextEdit
 
     _load(manager, [_track("a.mp3", "one")])
     assert isinstance(manager.lyrics_text, LyricTextEdit)
@@ -505,6 +517,49 @@ def test_collapsing_expand_brings_the_fields_back(manager):
     manager.lyrics_expand_check.setChecked(False)
     assert _visible_in_inspector(manager, manager.caption_text)
     assert _visible_in_inspector(manager, manager.track_tag_input)
+
+
+def test_expand_covers_the_caption_and_lets_the_field_fill(manager):
+    """The caption is ABOVE the field, so "extend up and cover the caption" is
+    a height-and-policy change, not only a visibility one: the field must be
+    allowed to take the freed vertical space. A fixed minimum alone would make
+    the box taller without moving its top edge up under the waveform.
+    """
+    from PySide6.QtWidgets import QSizePolicy
+
+    _load(manager, [_track("a.mp3", "one")])
+    manager.lyrics_expand_check.setChecked(True)
+
+    # Everything above the field is gone -- the caption block included.
+    assert not _visible_in_inspector(manager, manager.caption_text)
+    assert not _visible_in_inspector(manager, manager._caption_label)
+    assert not _visible_in_inspector(manager, manager.sample_health_alert)
+
+    # ...and the field may now grow into the space they occupied.
+    assert (manager.lyrics_text.sizePolicy().verticalPolicy()
+            == QSizePolicy.Expanding)
+    assert manager.lyrics_text.minimumHeight() > manager.caption_text.height()
+
+    manager.lyrics_expand_check.setChecked(False)
+    assert (manager.lyrics_text.sizePolicy().verticalPolicy()
+            == QSizePolicy.Preferred)
+
+
+def test_expand_scrolls_the_inspector_back_to_the_field(manager):
+    """A stale scroll offset would leave the field looking unmoved even after
+    the caption above it was hidden."""
+    from PySide6.QtWidgets import QScrollArea
+
+    _load(manager, [_track("a.mp3", "one")])
+    parent = manager.lyrics_text.parentWidget()
+    while parent is not None and not isinstance(parent, QScrollArea):
+        parent = parent.parentWidget()
+    assert parent is not None
+
+    bar = parent.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    manager.lyrics_expand_check.setChecked(True)
+    assert bar.value() == 0
 
 
 # ---------------------------------------------------------------------------

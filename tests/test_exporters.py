@@ -307,3 +307,121 @@ class TestProjectFileVersusTrainingManifest:
         # The project file counts its own rows; the manifest counts the rows the
         # trainer can use. Both counts are correct for their own document.
         assert reloaded["metadata"]["num_samples"] == 2
+
+
+class TestTrackSidecarJson:
+    """``<stem>.json``: the file ACE-Step's Dataset Builder reads off the audio.
+
+    Regression: the studio could only write text, so the five fields the
+    Builder reads beside the audio (caption, bpm, keyscale, timesignature,
+    language) had no way out of the app except a manifest that route never
+    looks at.
+    """
+
+    def _sample(self, tmp_path, name="song.wav", **over):
+        sample = {
+            "filename": name,
+            "audio_path": str(tmp_path / name),
+            "caption": "An energetic rock track.",
+            "bpm": 140,
+            "keyscale": "E minor",
+            "timesignature": "4",
+            "language": "en",
+            # Present to prove they are DROPPED: ACE-Step reads none of these
+            # from a JSON sidecar.
+            "id": "aaa111",
+            "genre": "Rock",
+            "duration": 197,
+            "custom_tag": "trigger",
+            "is_instrumental": False,
+            "labeled": True,
+            "prompt_override": "caption",
+            "lyrics": "words",
+            "raw_lyrics": "words",
+            "formatted_lyrics": "words",
+        }
+        sample.update(over)
+        return sample
+
+    def _read(self, path):
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def test_writes_exactly_the_five_keys_ace_step_reads(self, tmp_path):
+        from modules.exporters import SIDECAR_JSON_FIELDS, export_track_sidecar_json
+
+        written = self._read(export_track_sidecar_json(self._sample(tmp_path)))
+        assert set(written) == set(SIDECAR_JSON_FIELDS)
+
+    def test_the_values_are_the_tracks_own_uncoerced(self, tmp_path):
+        from modules.exporters import export_track_sidecar_json
+
+        written = self._read(export_track_sidecar_json(self._sample(tmp_path)))
+        assert written == {
+            "caption": "An energetic rock track.",
+            "bpm": 140,              # int stays int
+            "keyscale": "E minor",   # casing is trained content, never normalised
+            "timesignature": "4",
+            "language": "en",
+        }
+
+    def test_lyrics_are_never_smuggled_into_the_sidecar(self, tmp_path):
+        """ACE-Step takes lyrics from ``<stem>.lyrics.txt``, not from this file.
+
+        A lyrics key here would be ignored by the loader while reading like a
+        feature -- the silent no-op this format must not pretend to have.
+        """
+        from modules.exporters import export_track_sidecar_json
+
+        written = self._read(export_track_sidecar_json(self._sample(tmp_path)))
+        for key in ("lyrics", "raw_lyrics", "formatted_lyrics", "id", "genre",
+                    "duration", "custom_tag", "is_instrumental", "labeled",
+                    "prompt_override", "filename", "audio_path"):
+            assert key not in written
+
+    def test_lands_beside_the_audio_under_the_audio_basename(self, tmp_path):
+        """Location IS the contract: ACE-Step only looks next to the audio."""
+        from modules.exporters import export_track_sidecar_json
+
+        path = export_track_sidecar_json(self._sample(tmp_path, "song.wav"))
+        assert path == str(tmp_path / "song.json")
+        assert (tmp_path / "song.json").exists()
+
+    def test_dotted_basename_keeps_the_ace_step_split(self, tmp_path):
+        from modules.exporters import (
+            export_track_sidecar_json,
+            track_sidecar_json_path,
+        )
+
+        assert track_sidecar_json_path("/a/song.v2.mp3") == "/a/song.v2.json"
+        assert export_track_sidecar_json(
+            self._sample(tmp_path, "song.v2.mp3")
+        ) == str(tmp_path / "song.v2.json")
+
+    def test_blank_fields_are_empty_strings_not_null(self, tmp_path):
+        """``scan.py`` skips a blank with a truthiness test, so "" is safe and
+        keeps the file readable if a human opens it."""
+        from modules.exporters import export_track_sidecar_json
+
+        written = self._read(export_track_sidecar_json(
+            self._sample(tmp_path, bpm=None, keyscale="", timesignature=None)
+        ))
+        assert written["bpm"] == ""
+        assert written["timesignature"] == ""
+        assert written["keyscale"] == ""
+
+    def test_no_audio_path_writes_nothing(self):
+        from modules.exporters import export_track_sidecar_json
+
+        assert export_track_sidecar_json({"filename": "virtual_01.wav"}) is None
+        assert export_track_sidecar_json({"audio_path": ""}) is None
+        assert export_track_sidecar_json(None) is None
+
+    def test_an_explicit_path_is_honoured_and_its_folder_made(self, tmp_path):
+        from modules.exporters import export_track_sidecar_json
+
+        target = tmp_path / "elsewhere" / "other.json"
+        assert export_track_sidecar_json(
+            self._sample(tmp_path), str(target)
+        ) == str(target)
+        assert target.exists()
+

@@ -43,18 +43,25 @@ COLUMNS = (
     ("Language", 28),
     ("Key", 70),
     ("BPM", 48),
-    ("Time", 40),
-    ("Duration", 60),
+    ("Time", 56),        # "4/4" needs more than 40px
+    ("Duration", 72),    # "1:35" / "1:02:33"
 )
 
 HEADERS = tuple(name for name, _ in COLUMNS)
 DEFAULT_WIDTHS = dict(COLUMNS)
 
+# Shown in the Time cell when a track's ``timesignature`` is blank. DISPLAY
+# ONLY: the stored field stays "" so an export never claims a value nobody
+# entered, and typing in the cell writes the real one. 4/4 is the app's
+# assumption about ordinary material, not a measurement of the file.
+DEFAULT_TIMESIGNATURE = "4/4"
+
 # Columns hidden by default in the narrow track list; every one is still a
-# right-click on the header away. ``Language`` is deliberately NOT hidden: it
-# carries the instrumental state too (blank == instrumental), so it belongs in
-# the default view.
-DEFAULT_HIDDEN_COLUMNS = ["Time", "Duration"]
+# right-click on the header away. Nothing is hidden by default now: ``Language``
+# carries the instrumental state too (blank == instrumental), and ``Time`` /
+# ``Duration`` are the two values the dataset is audited on, so a hidden column
+# reads as a missing one. Widths, not visibility, keep the list narrow.
+DEFAULT_HIDDEN_COLUMNS = []
 
 # Narrower than Qt's 36px default, which would silently override the Language
 # column's 28px default and waste space on every other column too.
@@ -99,6 +106,27 @@ def language_tooltip(choice):
     if not choice:
         return "No language set. A track with no language is an instrumental."
     return f"Language: {choice}"
+
+
+def format_duration(seconds):
+    """Cell text for the Duration column: ``m:ss`` (``h:mm:ss`` past an hour).
+
+    The stored field is whole SECONDS -- that is what the exporter and the
+    training loader expect -- so this is a display format only. The cell editor
+    (``_parse_manual_value``) parses ``m:ss`` straight back, which is what makes
+    the round trip safe: what the user sees is what they can edit.
+    """
+    try:
+        total = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 def column_index(table, name):

@@ -123,8 +123,8 @@ def build_appearance_group(manager):
     form.addRow("Text size:", manager.font_size_spin)
 
     manager.lyrics_font_spin = build_font_size_spin(
-        "Text size for the lyrics fields only — the inline Formatted Lyrics box "
-        "and the Lyrics Studio window. Auto means they match the rest of the app, "
+        "Text size for the lyrics field only — the Formatted Lyrics box in the "
+        "Track Inspector. Auto means it matches the rest of the app, "
         "which is what you want unless you are reading lyrics from a distance.",
         manager.config.get("lyrics_font_size"),
         maximum=LYRICS_FONT_SIZE_MAX,

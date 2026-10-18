@@ -22,6 +22,9 @@ from modules.dataset_schema import (
     normalize_dataset,
 )
 from modules.dataset_schema import apply_language_choice
+# Song length for the Duration column comes from the file header, not a field
+# the user has to fill: modules/audio_probe.py reads it without decoding.
+from modules.audio_probe import backfill_durations, duration_seconds_rounded
 # ACE-Step truncates text at fixed token caps with no warning; these helpers
 # count the real Qwen3 tokens so the UI can show a live budget (see the module
 # docstring for the source references behind the numbers).
@@ -35,10 +38,12 @@ from modules.lyric_limits import (
 # three copies of the index table is how the Instr checkbox and the Actions
 # buttons ended up on the same column).
 from ui.track_table import (
+    DEFAULT_TIMESIGNATURE,
     HEADERS as TRACK_TABLE_HEADERS,
     LANG_ROLE,
     choice_from_sample,
     column_index,
+    format_duration,
     install_table_policy,
     language_display,
     language_tooltip,
@@ -845,8 +850,8 @@ class DatasetManager(QMainWindow):
         insp_layout.addWidget(self.caption_text)
 
         # ---- Lyrics field: live, debounced auto-save -------------------------
-        # The whole surface — the Studio button, the size steppers, the field, the
-        # save status and the debounced auto-save that writes it — lives in
+        # The whole surface — the size steppers, the field, the save status and
+        # the debounced auto-save that writes it — lives in
         # ui/lyrics_inspector.py. It was ~135 lines inline here, and the owner's
         # rule is that new UI is a module (this file is at its 7,390-line budget).
         # The four guarantees the removed Commit button used to buy — a debounced
@@ -855,12 +860,14 @@ class DatasetManager(QMainWindow):
         # code that keeps them. Everything it builds is still assigned onto
         # ``self`` by name, so no other call site had to change.
         #
-        # ``_lyrics_lower_widgets`` is created HERE rather than in that module: the
-        # list also holds the CAPTION widgets, so "Expand" hides the caption block
-        # too and is an inspector-layout concern (see on_lyrics_expand_toggled).
+        # ``_lyrics_hidden_on_expand`` is the list of inspector blocks Expand
+        # takes away so the field can fill the page: the caption block ABOVE the
+        # field first, then the metadata fields below it (see
+        # ``on_lyrics_expand_toggled``). It is created here, in the file that
+        # owns the inspector layout, because the caption is not a lyrics widget.
         # The widgets stay parented and alive when hidden — only visibility
         # changes — which keeps the existing references valid.
-        self._lyrics_lower_widgets = []
+        self._lyrics_hidden_on_expand = []
         from ui.lyrics_inspector import build_lyrics_surface
 
         build_lyrics_surface(self, insp_layout)
@@ -900,13 +907,14 @@ class DatasetManager(QMainWindow):
         # went away would delete information rather than a control.
 
         insp_layout.addLayout(form)
-        # Registered last so Expand hides the whole lower half in one pass:
-        # everything below the lyrics field, in layout order.
-        self._lyrics_lower_widgets.append(form)
-        self._lyrics_lower_widgets.append(self.sample_health_alert)
-        self._lyrics_lower_widgets.append(unlock_bar)
-        self._lyrics_lower_widgets.append(self.caption_text)
-        self._lyrics_lower_widgets.append(self._caption_label)
+        # Everything the field covers or clears when Expand is ticked, in layout
+        # order: the metadata form below it, then the health line, the lock bar
+        # and the CAPTION block above it.
+        self._lyrics_hidden_on_expand.append(form)
+        self._lyrics_hidden_on_expand.append(self.sample_health_alert)
+        self._lyrics_hidden_on_expand.append(unlock_bar)
+        self._lyrics_hidden_on_expand.append(self.caption_text)
+        self._lyrics_hidden_on_expand.append(self._caption_label)
         self.lock_action_combo.activated.connect(self.handle_lock_dropdown)
         self.lyrics_expand_check.toggled.connect(self.on_lyrics_expand_toggled)
         scroll.setWidget(inspector)
@@ -964,8 +972,9 @@ class DatasetManager(QMainWindow):
     def init_lyrics_tab(self, parent):
         """Build the unified Lyrics panel and connect its actions.
 
-        One panel with three inner tabs — Normalize & Tidy, Structure Tags and
-        Studio (see ``ui/lyrics_panel``). It REPLACES the old split, so the
+        One panel with two inner tabs — Normalize & Tidy and Structure Tags —
+        plus a footer for the token budget and the rules in effect (see
+        ``ui/lyrics_panel``). It REPLACES the old split, so the
         three structure-tag rules are no longer built on the "Tags & checks"
         page; ``build_lyrics_tab`` must not be called as well, or there would be
         two sets of the same checkboxes and ``manager.<name>`` would resolve to
@@ -975,13 +984,17 @@ class DatasetManager(QMainWindow):
         build_lyrics_panel(self, parent)
 
         self.lyrics_preview_btn.clicked.connect(self.preview_lyrics_tidy)
-        # ``clicked`` emits a bool and ``apply_lyrics_tidy`` now takes an optional
-        # ``scope`` (the Lyrics Studio passes the scope ITS picker shows), so the
-        # connection is wrapped: without this the button's False would arrive as
-        # the scope and the pass would have no tracks to match.
+        # ``clicked`` emits a bool and ``apply_lyrics_tidy`` takes an optional
+        # ``scope``, so the connection is wrapped: without this the button's
+        # False would arrive as the scope and the pass would have no tracks to
+        # match.
         self.lyrics_apply_btn.clicked.connect(lambda: self.apply_lyrics_tidy())
         self.lyrics_manual_edit_btn.clicked.connect(self.open_lyrics_editor)
         self.lyrics_capitalizer_btn.clicked.connect(self.open_lyric_capitalizer)
+        self.lyrics_export_lrc_btn.clicked.connect(
+            self.export_selected_lyrics_lrc)
+        self.lyrics_align_kaggle_btn.clicked.connect(
+            self.align_selected_lyrics_kaggle)
         self.lyrics_add_row_btn.clicked.connect(self._lyrics_add_contract_row)
         self.lyrics_del_row_btn.clicked.connect(self._lyrics_remove_contract_row)
         self.lyrics_reset_btn.clicked.connect(self._lyrics_reset_contracts)
@@ -1167,10 +1180,10 @@ class DatasetManager(QMainWindow):
     def _lyrics_scope_samples(self, scope=None):
         """Tracks the tidy pass should touch, per the scope combo.
 
-        ``scope`` overrides the combo. The Lyrics Studio passes the scope its own
-        always-visible picker is showing, so a dataset-wide tidy started from the
-        studio rewrites the tracks the user named THERE rather than whatever the
-        Tools tab's combo happened to be left on.
+        ``scope`` overrides the combo. ``None`` means "read the combo", which is
+        what every in-page caller passes. The parameter stays because the
+        dataset-wide tidy is also reachable from other tooling, which supplies
+        its own scope rather than depending on the tab's leftover selection.
         """
         samples = self.dataset.get("samples", [])
         if scope is None:
@@ -1219,8 +1232,7 @@ class DatasetManager(QMainWindow):
 
         # The "Changes (diff)" box that used to be filled right here is gone --
         # see ``ui/lyrics_tab.py``, where the widget was built and where the
-        # removal is explained. Before | after already shows the rewrite, and the
-        # one diff the owner asked for (minimizable) is the Lyrics Studio's.
+        # removal is explained. Before | after already shows the rewrite.
 
         self.lyrics_report_label.setText(
             f"{s.get('filename', '?')} — {report['lines_changed']} line(s) changed | "
@@ -1234,10 +1246,9 @@ class DatasetManager(QMainWindow):
     def apply_lyrics_tidy(self, scope=None):
         """Rewrite lyrics on the tracks in scope (undoable).
 
-        ``scope`` comes from the Lyrics Studio's own scope picker when the pass is
-        started there; ``None`` means the Lyrics tab's combo, which is what its
-        own Apply button passes. One implementation either way, so the two
-        surfaces cannot tidy differently.
+        ``scope`` overrides the tab's combo when a caller supplies one; ``None``
+        means the Lyrics tab's combo, which is what its own Apply button passes.
+        One implementation either way, so no surface can tidy differently.
         """
         from modules.lyrics_normalizer import normalize_lyrics
 
@@ -4009,7 +4020,7 @@ class DatasetManager(QMainWindow):
         ``scoped=True`` and sets it on this window instead: the same look, but
         Qt re-polishes one window rather than all ~1755 widgets, which is the
         difference between a smooth control and a multi-second freeze per step.
-        Dialogs and the Lyrics Studio are Qt children of this window, so they
+        Dialogs are Qt children of this window, so they
         inherit the scoped sheet; only the application palette is set app-wide,
         to keep tooltips readable.
         """
@@ -4401,9 +4412,9 @@ class DatasetManager(QMainWindow):
             _put("Key", _cell(s.get("keyscale", "")))
             bpm = s.get("bpm", 0)
             _put("BPM", _cell(str(bpm) if bpm else ""))
-            _put("Time", _cell(s.get("timesignature", "")))
+            _put("Time", _cell(s.get("timesignature") or DEFAULT_TIMESIGNATURE))
             dur = s.get("duration", 0)
-            _put("Duration", _cell(f"{dur}s" if dur else ""))
+            _put("Duration", _cell(format_duration(dur)))
 
             # Tint rows whose lyrics exceed the ACE-Step training cap, so an
             # over-long song is visible without opening every track.
@@ -4854,18 +4865,6 @@ class DatasetManager(QMainWindow):
             self.track_tag_input.blockSignals(False)
             self.inst_check.blockSignals(False)
 
-        # The Lyrics Studio is a second, NON-MODAL window: it can be open while
-        # the selected row changes here, and it can write lyrics. Leaving it
-        # aimed at the previously selected track is how one song's lyrics land on
-        # another, so it is told about every change -- including "nothing is
-        # selected". The studio decides what to do: it asks before it would drop
-        # text that has not been added to a track, and ignores this entirely while
-        # it is the one writing (its write-back comes through this same handler).
-        # See ``ui/lyrics_studio.LyricsStudioWindow.on_manager_selection_changed``.
-        studio = getattr(self, "_lyrics_studio_window", None)
-        if studio is not None:
-            studio.on_manager_selection_changed(s)
-
     def _load_track_preview(self, sample):
         path = sample.get("audio_path", "") if sample else ""
         valid = bool(path) and os.path.exists(path)
@@ -5199,7 +5198,7 @@ class DatasetManager(QMainWindow):
                 "tokenizer for exact counts)</span>"
             )
         self.lyrics_limit_label.setText(html)
-        # The unified Lyrics panel's Studio tab shows the SAME measurement. This
+        # The unified Lyrics panel's footer shows the SAME measurement. This
         # method is the only writer and drives both views from one measure()
         # result, so the two cannot disagree — a second counter (its own
         # tokenizer call, its own cap lookup) could, and would.
@@ -5258,18 +5257,21 @@ class DatasetManager(QMainWindow):
         return self._lyrics_field.step_font(delta)
 
     def on_lyrics_expand_toggled(self, checked):
-        """Grow the field to most of the inspector and hide what is below it.
+        """Let the lyrics field take the inspector, or put the inspector back.
 
-        No second window: the field already lives inside a scroll area, so giving
-        it height and hiding its neighbours is all "expanding" needs.
+        When checked, every other block in the inspector goes away — the health
+        line, the lock bar, the CAPTION block above the field, and the metadata
+        fields below it — so the lyrics field's first line sits at the top of
+        the inspector, directly under the waveform, and the field fills the
+        height the caption used to occupy. The field's own height and growing
+        policy are ``set_expanded``'s business; the list of widgets to hide is
+        NOT, because ``_lyrics_hidden_on_expand`` also holds the caption block --
+        so that half stays here, in the file that owns the inspector's layout.
 
-        The height is the lyrics surface's business (``set_expanded``); the list of
-        widgets to hide is NOT, because ``_lyrics_lower_widgets`` also holds the
-        caption block -- so that half stays here, in the file that owns the
-        inspector's layout.
+        When unchecked everything comes back exactly as it was.
         """
         self._lyrics_field.set_expanded(checked)
-        for w in self._lyrics_lower_widgets:
+        for w in self._lyrics_hidden_on_expand:
             self._set_layout_item_visible(w, not checked)
 
     def _set_layout_item_visible(self, item, visible):
@@ -5591,6 +5593,12 @@ class DatasetManager(QMainWindow):
             # Backfill any fields this file predates (never overwrites values).
             normalize_dataset(self.dataset)
 
+            # Song length is derived from the audio, not stored by hand, so a
+            # dataset saved before the probe existed gains its durations here.
+            # Falsy values only -- see modules.audio_probe.backfill_durations --
+            # and a missing file simply stays blank.
+            backfill_durations(self.dataset)
+
             self.current_dataset_path = path
             self.record_snapshot()
 
@@ -5821,6 +5829,7 @@ class DatasetManager(QMainWindow):
                 language="en",
                 is_instrumental=is_all_inst,
                 custom_tag=global_tag,
+                duration=duration_seconds_rounded(p),
             ))
             added += 1
         self.refresh_table()
@@ -6851,14 +6860,12 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(f"Successfully processed batch script! Renamed {count} files on disk.")
 
     def open_lyrics_editor(self):
-        """Open the Lyrics Studio for the selected track.
+        """Put the caret in the main-page lyrics field for the selected track.
 
-        This used to be a bare text box with a Split button; it later grew into
-        the "Review & Fix" dialog. It is now the Lyrics Studio — ONE window that
-        also absorbed the Lyric Capitalizer, so the double-click UPPERCASE
-        gesture, the live diff against the track, the tidy rules and the
-        file/LRC tools all live in one place instead of two windows you had to
-        close and reopen to move between.
+        This used to open a separate Lyrics Studio window. That window is gone:
+        the Track Inspector's lyrics field is the editor. It carries the same
+        gestures (double-click a word to UPPERCASE it) and the same debounced
+        auto-save, and it keeps the track's waveform and metadata on screen.
 
         The name is kept: it is what the Lyrics tab and the toolbar's Edit-tools
         strip call, and renaming it would only churn call sites.
@@ -6867,30 +6874,56 @@ class DatasetManager(QMainWindow):
         if not sample:
             QMessageBox.warning(self, "No Track Selected", "Select a track first.")
             return
-        # The Studio is a lyrics editor, so the token-limit notice comes first.
+        # The field is a lyrics editor, so the token-limit notice comes first.
         if not self._lyrics_gate_open():
             return
-        from ui.lyrics_studio import open_lyrics_studio
+        self.focus_lyrics_field()
 
-        open_lyrics_studio(self)
-        # The window may have written lyrics; keep the editor's field in step.
-        self.on_table_selection_changed()
-        self.refresh_table()
+    def focus_lyrics_field(self):
+        """Scroll the inspector to the lyrics field and give it the keyboard."""
+        field = getattr(self, "lyrics_text", None)
+        if field is None:
+            return
+        from PySide6.QtWidgets import QScrollArea
+
+        parent = field.parentWidget()
+        while parent is not None and not isinstance(parent, QScrollArea):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.ensureWidgetVisible(field)
+        field.setFocus(Qt.OtherFocusReason)
+        self.status_label.setText("Lyrics field focused — edit and it saves itself.")
 
     def open_lyric_capitalizer(self):
-        """Open the Lyrics Studio for the selected track.
+        """Focus the main-page lyrics field, where the capitalizer gesture lives.
 
         A separate entry point because the Lyrics tab's 🔠 button and the
-        Edit-tools strip both call it by this name; it opens the same window as
-        ``open_lyrics_editor``. A track is not required: the window is also a
-        scratchpad for pasting lyrics before there is anything to attach them to,
-        and the write-back buttons disable themselves in that case.
+        Edit-tools strip both call it by this name. NO TRACK IS REQUIRED: the
+        field can be used as a scratchpad before there is anything to attach the
+        words to, and the auto-save refuses to write without a selected track.
         """
-        from ui.lyrics_studio import open_lyrics_studio
-
         if not self._lyrics_gate_open():
             return
-        open_lyrics_studio(self)
+        self.focus_lyrics_field()
+
+    def export_selected_lyrics_lrc(self):
+        """Save the selected track's lyrics as .lrc from the main Lyrics page.
+
+        This is the one file tool the removed Studio had that is still useful on
+        its own: the words and their word timings, in a format other lyric
+        editors read. It works from the track's SAVED lyrics (the field writes
+        them 400 ms after typing stops), not from whatever is half-typed.
+        """
+        sample = self.get_selected_sample()
+        if not sample:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        text = sample.get("formatted_lyrics") or sample.get("lyrics") or ""
+        if not text.strip():
+            QMessageBox.information(
+                self, "No Lyrics", "This track has no lyrics to export yet.")
+            return
+        self._export_lyrics(sample, text)
 
     def _export_lyrics(self, sample, text):
         from modules.lyrics_tools import export_lrc
@@ -6900,6 +6933,98 @@ class DatasetManager(QMainWindow):
             return
         export_lrc(text.strip(), sample.get("lyrics_segments") or [], path)
         self.status_label.setText(f"Lyrics exported to {Path(path).name}.")
+
+    # ------------------------------------------------------------------
+    # Word-level alignment (Kaggle MMS_FA)
+    # ------------------------------------------------------------------
+
+    def align_selected_lyrics_kaggle(self):
+        """Force-align the selected track's lyrics on a Kaggle GPU.
+
+        One push does two things at once, because both come from the same
+        alignment: it writes ``lyrics_segments`` (the line starts ``export_lrc``
+        needs, until now never populated) and a lyrics text whose SHOUTED words
+        are UPPERCASE — the classifier's 90-95% recall target.
+
+        The upload is real (the audio goes to a private Kaggle dataset), so this
+        refuses early rather than half-way: no track, no audio, no lyrics, or a
+        job already running all return without touching the network.
+        """
+        sample = self.get_selected_sample()
+        if not sample:
+            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
+            return
+        audio = sample.get("audio_path") or ""
+        if not audio or not os.path.exists(audio):
+            QMessageBox.warning(
+                self, "Audio Missing", "This track's audio file was not found.")
+            return
+        text = sample.get("formatted_lyrics") or sample.get("lyrics") or ""
+        if not text.strip():
+            QMessageBox.information(
+                self, "No Lyrics", "This track has no lyrics to align yet.")
+            return
+        running = getattr(self, "_align_worker", None)
+        if running is not None and running.isRunning():
+            QMessageBox.information(
+                self, "Alignment Running", "An alignment job is already running.")
+            return
+
+        from workers.kaggle_alignment import KaggleAlignmentWorker
+
+        worker = KaggleAlignmentWorker(
+            audio, text, config=self.config, parent=self)
+        self._align_worker = worker
+        worker.progress.connect(self.on_worker_progress)
+        worker.failed.connect(self._on_alignment_failed)
+        # Bind the sample now: the selection may move while the GPU job runs,
+        # and the timings belong to the track that was aligned.
+        worker.finished_ok.connect(
+            lambda result, s=sample: self._on_alignment_done(s, result))
+        worker.finished.connect(self._on_alignment_finished)
+        self.lyrics_align_kaggle_btn.setEnabled(False)
+        self.status_label.setText("Aligning lyrics on a Kaggle GPU...")
+        worker.start()
+
+    def _on_alignment_done(self, sample, result):
+        """Store the timings and the shout-cased lyrics as ONE undo step."""
+        segments = []
+        for segment in result.get("segments") or []:
+            try:
+                start = float(segment.get("start"))
+            except (TypeError, ValueError):
+                continue
+            text = str(segment.get("text") or "").strip()
+            if text:
+                segments.append({"start": start, "text": text})
+        if not segments:
+            QMessageBox.warning(
+                self, "Alignment Empty",
+                "The job returned no aligned lyric lines; nothing was written.")
+            return
+
+        self.record_snapshot()
+        sample["lyrics_segments"] = segments
+        # The kernel's text differs from the input only in capitalization, so
+        # writing it back is what makes the shout marks visible in the field and
+        # in every export. Both lyric fields are kept in step, as every other
+        # writer in the app does (see modules.dataset_schema.lyrics_source).
+        aligned = (result.get("lyrics") or "").strip()
+        if aligned:
+            sample["formatted_lyrics"] = aligned
+            sample["lyrics"] = aligned
+        self.refresh_table()
+        ratio = float(result.get("shout_ratio") or 0.0)
+        self.status_label.setText(
+            f"Aligned {len(segments)} line(s) — {ratio:.0%} of words shouted.")
+
+    def _on_alignment_failed(self, message):
+        self.status_label.setText("Word alignment failed.")
+        QMessageBox.warning(self, "Alignment Failed", message)
+
+    def _on_alignment_finished(self):
+        self.lyrics_align_kaggle_btn.setEnabled(True)
+        self._align_worker = None
 
     def open_ab_captions(self):
         sample = self.get_selected_sample()

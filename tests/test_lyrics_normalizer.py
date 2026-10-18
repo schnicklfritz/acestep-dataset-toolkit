@@ -16,6 +16,7 @@ from modules.lyrics_normalizer import (
     normalize_lyrics,
     shorten_ing,
     strip_all_apostrophes,
+    strip_punctuation,
     strip_trailing_punctuation,
 )
 
@@ -544,6 +545,48 @@ class TestBracketRules:
     def test_the_whole_pass_leaves_a_mid_line_bracket_alone(self):
         out, _ = normalize_lyrics("we sing [Singing] loud", ing_to_in=True)
         assert out == "We sing [Singing] loud"
+
+
+class TestStripPunctuation:
+    """The ✂ button: the CONTRACTION TABLE first, then the marks.
+
+    The order is the contract. ``can't`` must reach ``kaant`` through the table;
+    a blind apostrophe delete would produce ``cant``, a different English word.
+    """
+
+    def test_a_contraction_is_expanded_not_just_stripped(self):
+        assert strip_punctuation("can't stop") == "kaant stop"
+
+    def test_an_apostrophe_left_over_is_dropped(self):
+        """No table entry for a possessive, so the apostrophe simply goes."""
+        assert strip_punctuation("the sun's light") == "the suns light"
+
+    def test_terminal_and_internal_marks_go(self):
+        assert strip_punctuation("Hold on, tight!") == "Hold on tight"
+
+    def test_quotes_go(self):
+        assert strip_punctuation('"Save me"') == "Save me"
+
+    def test_a_structure_tag_keeps_every_mark(self):
+        """A tag is an instruction to the trainer, not a lyric."""
+        assert strip_punctuation("[Rock 'n' Roll]\nhello, world") == (
+            "[Rock 'n' Roll]\nhello world"
+        )
+
+    def test_a_hyphen_survives_because_it_is_a_respelling(self):
+        """``h-eel`` and ``eye-d`` are sounds; removing the hyphen loses them."""
+        assert strip_punctuation("h-eel eye-d there-ill") == "h-eel eye-d there-ill"
+
+    def test_a_dash_between_words_becomes_a_space(self):
+        """Otherwise ``hello—world`` welds into one word."""
+        assert strip_punctuation("hello\u2014world") == "hello world"
+
+    def test_doubled_spaces_are_collapsed(self):
+        assert strip_punctuation("hello ,  world") == "hello world"
+
+    def test_clean_text_is_returned_unchanged(self):
+        text = "hold on\nno punctuation here"
+        assert strip_punctuation(text) == text
 
 
 class TestLineCapitalisation:

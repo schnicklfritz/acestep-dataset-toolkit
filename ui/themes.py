@@ -19,8 +19,8 @@ Config keys (see config.DEFAULT_CONFIG): ``theme_name``, ``theme_overrides``
 
 Text size has two layers, and they are deliberately not the same knob:
 ``ui_font_size`` is the base size every widget inherits, while
-``lyrics_font_size`` overrides it for the lyrics surfaces only (the inline
-field and the Lyrics Studio window). ``ui_zoom`` is a third thing again — it
+``lyrics_font_size`` overrides it for the lyrics surface only (the Track
+Inspector's lyrics field). ``ui_zoom`` is a third thing again — it
 magnifies the whole look, padding and corner radius included.
 
 ``0`` means "Auto": for ``ui_font_size`` that is ``DEFAULT_FONT_SIZE``, and for
@@ -50,7 +50,7 @@ LYRICS_FONT_SIZE_MAX = 72
 # overrides any font a widget sets on itself the next time the theme is
 # applied (measured — a setFont(26px) field snapped back to the base size on a
 # theme switch), whereas a property rule outranks ``*`` and survives the
-# re-apply. See ui/lyrics_studio.py and DatasetManager.init_ui for the users.
+# re-apply. See ui/lyrics_inspector.py and DatasetManager.init_ui for the users.
 FONT_REGION_PROPERTY = "fontRegion"
 FONT_REGION_LYRICS = "lyrics"
 

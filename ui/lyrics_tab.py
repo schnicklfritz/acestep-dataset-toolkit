@@ -151,10 +151,9 @@ def build_lyrics_tab(manager, parent):
     o_form = QFormLayout(opts)
 
     # The four rules are declared in ``ui/lyrics_tidy_controls.py`` and built
-    # from there, so the Lyrics Studio's always-visible rule panel and this tab
-    # cannot describe the same rule with different wording. The widgets are still
-    # stored on the manager under the same names -- they ARE the app's tidy state,
-    # read by ``_lyrics_options()``.
+    # from there, so the wording has one owner. The widgets are still stored on
+    # the manager under the same names -- they ARE the app's tidy state, read by
+    # ``_lyrics_options()``.
     manager.lyrics_rule_boxes = build_rule_checkboxes(manager, o_form)
 
     manager.lyrics_replace_check = QCheckBox("Replace existing lyrics (otherwise fill blanks only)")
@@ -191,15 +190,12 @@ def build_lyrics_tab(manager, parent):
 
     # The "Changes (diff)" QTextEdit that used to sit here is GONE, and the
     # absence is deliberate. It was a THIRD view of the same rewrite -- before |
-    # after already showed it side by side -- and it was not minimizable, which
-    # the owner's spec requires (`.agent_notes.md`, "The Lyrics Studio spec",
-    # item 1). The diff now lives in exactly one place: the pane in the Lyrics
-    # Studio, which is collapsible and remembers that choice. Two diffs meant two
-    # things to keep in step and no way to hide either.
+    # after already showed it side by side -- and it was not minimizable.
+    # Before | After is the one view now, and it is always visible.
     #
-    # ``unified_diff`` / ``diff_pairs`` stay in this module: the Studio's pane
-    # imports ``unified_diff`` from here (``ui/lyrics_diff.py``), and
-    # ``tests/test_lyrics_block.py`` pins both by name.
+    # ``unified_diff`` / ``diff_pairs`` stay in this module because
+    # ``tests/test_lyrics_block.py`` pins both by name and other tooling imports
+    # them; they are pure functions and cost nothing to keep.
 
     preview_row = QHBoxLayout()
     manager.lyrics_preview_btn = QPushButton("🔍 Preview")
@@ -207,17 +203,31 @@ def build_lyrics_tab(manager, parent):
     manager.lyrics_apply_btn = QPushButton("✅ Apply Tidy")
     manager.lyrics_apply_btn.setToolTip("Rewrite lyrics on the tracks in scope (undoable).")
     manager.lyrics_manual_edit_btn = QPushButton("📝 Edit Raw Lyrics…")
-    manager.lyrics_manual_edit_btn.setToolTip("Open the selected track's lyrics for manual editing.")
+    manager.lyrics_manual_edit_btn.setToolTip(
+        "Jump to the selected track's lyrics field in the Track Inspector."
+    )
     manager.lyrics_capitalizer_btn = QPushButton("🔠 Lyric Capitalizer…")
     manager.lyrics_capitalizer_btn.setToolTip(
-        "Open the Lyrics Studio — double-click a word to mark it shouted "
-        "(UPPERCASE), double-click it again to undo, then write it straight "
-        "into the track's caption / lyrics field."
+        "Jump to the lyrics field — double-click a word to mark it shouted "
+        "(UPPERCASE), double-click it again to undo. The field saves itself."
+    )
+    manager.lyrics_export_lrc_btn = QPushButton("⬇ Export .lrc…")
+    manager.lyrics_export_lrc_btn.setToolTip(
+        "Save the selected track's lyrics as an .lrc file (with its word "
+        "timings when the track has them)."
+    )
+    manager.lyrics_align_kaggle_btn = QPushButton("⏱ Align words (Kaggle)")
+    manager.lyrics_align_kaggle_btn.setToolTip(
+        "GPU forced alignment (MMS_FA): gives every lyric line a timestamp and "
+        "capitalizes the words that were shouted. Writes the word timings that "
+        "Export .lrc reads. Uploads the track to a private Kaggle dataset."
     )
     preview_row.addWidget(manager.lyrics_preview_btn)
     preview_row.addWidget(manager.lyrics_apply_btn)
     preview_row.addWidget(manager.lyrics_manual_edit_btn)
     preview_row.addWidget(manager.lyrics_capitalizer_btn)
+    preview_row.addWidget(manager.lyrics_export_lrc_btn)
+    preview_row.addWidget(manager.lyrics_align_kaggle_btn)
     preview_row.addStretch()
     p_layout.addLayout(preview_row)
     layout.addWidget(preview)

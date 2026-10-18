@@ -1,43 +1,20 @@
-"""The tidy rules, declared once and shown where the lyrics are edited.
+"""The tidy rules, declared once, for the Lyrics page and its summary line.
 
-Why this module exists
-----------------------
-The four rule checkboxes used to live on exactly one surface: the ``Tidy
-Options`` group inside the Tools window's Lyrics tab -- which is itself inside
-a ``QScrollArea``. The owner's report was that the rules were therefore not
-visible while editing, and that "Tidy" in the Lyrics Studio applied rules you
-could not see or change. Moving the *widgets* is not possible: the checkboxes
-are the app's tidy state, and two tests pin them inside that panel
-(``tests/test_lyrics_panel.py`` ``isAncestorOf(manager.lyrics_lines_check)``).
+The four rule checkboxes are the app's tidy state. They are built by
+:func:`build_rule_checkboxes`, which ``ui/lyrics_tab.py`` calls, and the wording
+lives here in ``RULE_SPECS`` so no second surface can describe the same rule
+differently.
 
-So the state stays where it is and this module gives the Studio a SECOND VIEW
-of it:
+The checkboxes on the "Normalize & Tidy" tab are the only view of these rules,
+and :func:`rule_summary` gives the panel's one-line "rules in effect" readout
+from the same state.
 
-* the wording of every rule lives HERE (``RULE_SPECS``) and ``ui/lyrics_tab.py``
-  builds its checkboxes from it, so the two surfaces cannot describe the same
-  rule differently;
-* :class:`TidyRulesPanel` is a compact, always-visible group of the same four
-  ticks. Each tick drives the manager's own checkbox, so there is still exactly
-  ONE piece of tidy state and ``manager._lyrics_options()`` is unchanged --
-  the Lyrics tab, the tag panel (``ui/tidy_panel.py``), the dataset-wide apply
-  and the Studio all read the same values;
-* the reverse direction is wired too: changing a tick on the Lyrics tab while
-  the Studio is open refreshes the Studio's view of it.
-
-A manager with no tab widgets (a test stand-in, tooling) still gets a working
-panel: the ticks then stand alone and are used for the editor-buffer tidy only,
-which is what :meth:`TidyRulesPanel.options` documents.
+:func:`rule_summary` reads ``manager._lyrics_options()`` -- the manager's own
+merge of the ticks, the contraction table, the profile and the tag rules -- so
+the summary cannot disagree with what a tidy pass will actually do.
 """
 
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-)
+from PySide6.QtWidgets import QCheckBox
 
 # ---------------------------------------------------------------------------
 # The rules, declared once.
@@ -123,163 +100,28 @@ def build_rule_checkboxes(manager, form):
     manager.lyrics_tags_check = boxes["do_capitalize_tags"]
     manager.lyrics_lines_check = boxes["do_capitalize_lines"]
     manager.lyrics_punct_check = boxes["do_strip_punctuation"]
-    return boxes
 
 
-def _fallback_options(ticks):
-    """Options for a manager with no ``_lyrics_options`` (test stand-in, tooling)."""
-    from modules.lyrics_normalizer import (
-        DEFAULT_CASE_FIXED,
-        DEFAULT_CONTRACTIONS,
-        DEFAULT_ING_EXCEPTIONS,
+def rule_summary(manager):
+    """One line describing the tidy options in effect, so they cannot be guessed."""
+    try:
+        opts = manager._lyrics_options()
+    except Exception:  # noqa: BLE001 — the summary must never break the panel
+        return "unavailable"
+    on = []
+    if opts.get("ing_to_in"):
+        on.append("-ing→-in")
+    if opts.get("do_capitalize_tags"):
+        on.append("tags")
+    if opts.get("do_capitalize_lines"):
+        on.append("line starts")
+    if opts.get("do_strip_punctuation"):
+        on.append("punctuation")
+    count = len(opts.get("contractions") or {})
+    return (
+        (", ".join(on) if on else "no optional rules")
+        + f", {count} contraction(s)"
     )
 
-    return {
-        "contractions": dict(DEFAULT_CONTRACTIONS),
-        "ing_to_in": ticks["ing_to_in"],
-        "ing_exceptions": set(DEFAULT_ING_EXCEPTIONS),
-        "case_fixed": set(DEFAULT_CASE_FIXED),
-        "do_capitalize_tags": ticks["do_capitalize_tags"],
-        "do_capitalize_lines": ticks["do_capitalize_lines"],
-        "do_strip_punctuation": ticks["do_strip_punctuation"],
-    }
 
 
-
-class TidyRulesPanel(QGroupBox):
-    """The four tidy rules, always visible, beside the text they apply to.
-
-    ``with_scope`` adds the "apply to" scope picker and the dataset-wide apply
-    button, which is what makes the Studio a complete tidy surface rather than
-    only a buffer-tidy one.
-
-    The panel holds NO tidy state of its own: every tick is pushed onto the
-    manager's checkbox (the app's single source) and pulled back from it, so the
-    value the Lyrics tab shows and the value this panel shows cannot disagree.
-    """
-
-    TITLE = "Tidy rules \u2014 always visible"
-
-    def __init__(self, manager, *, with_scope=False, on_apply=None, parent=None):
-        super().__init__(self.TITLE, parent)
-        self.manager = manager
-        # Re-entrancy guard: a tick here sets the manager's checkbox, whose
-        # ``stateChanged`` calls back into ``refresh``. Without this the two
-        # would ping-pong (harmlessly today, but it makes the direction of a
-        # change unreadable and would bite the first time a rule is derived).
-        self._syncing = False
-        self.boxes = {}
-        self._bound = {}
-
-        grid = QGridLayout(self)
-        grid.setContentsMargins(8, 6, 8, 6)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(2)
-
-        for spec in RULE_SPECS:
-            key = spec["key"]
-            box = QCheckBox(spec["label"])
-            box.setToolTip(spec["tip"])
-            box.setChecked(spec["default"])
-            self.boxes[key] = box
-            tab_widget = getattr(manager, spec["attr"], None)
-            if tab_widget is not None and hasattr(tab_widget, "isChecked"):
-                # Bound to the manager's own checkbox: copying its state in, and
-                # following it afterwards. A real manager always has it (the tab
-                # is built before any window); a stand-in may not.
-                self._bound[key] = tab_widget
-                box.setChecked(tab_widget.isChecked())
-                box.toggled.connect(lambda on, k=key: self._push(k, on))
-                tab_widget.stateChanged.connect(lambda *_: self.refresh())
-            # An unbound tick is simply this panel's own; nothing else reads it.
-
-        for row, spec in enumerate(RULE_SPECS):
-            grid.addWidget(self.boxes[spec["key"]], row // 2, row % 2)
-
-        self.scope_label = None
-        self.scope_combo = None
-        self.apply_btn = None
-        if with_scope:
-            scope = QHBoxLayout()
-            self.scope_label = QLabel("Apply to:")
-            self.scope_combo = QComboBox()
-            self.scope_combo.addItems(list(SCOPE_CHOICES))
-            self.scope_combo.setToolTip(
-                "Which tracks a dataset-wide tidy rewrites. Instrumentals are "
-                "skipped by the last option because they have no lyrics."
-            )
-            self.apply_btn = QPushButton("\u2705 Apply to dataset")
-            self.apply_btn.setToolTip(
-                "Run these rules over the tracks in scope and save. Undoable "
-                "(Ctrl+Z on the main window)."
-            )
-            if callable(on_apply):
-                self.apply_btn.clicked.connect(on_apply)
-            else:
-                self.apply_btn.setEnabled(False)
-            scope.addWidget(self.scope_label)
-            scope.addWidget(self.scope_combo)
-            scope.addWidget(self.apply_btn)
-            scope.addStretch()
-            grid.addLayout(scope, (len(RULE_SPECS) + 1) // 2, 0, 1, 2)
-        self._grid = grid
-
-    # ---- state ----------------------------------------------------------
-    def ticks(self):
-        """The four rules as this panel currently shows them."""
-        return {key: box.isChecked() for key, box in self.boxes.items()}
-
-    def scope_text(self):
-        """The selected scope, or the default when this panel has no picker."""
-        if self.scope_combo is None:
-            return SCOPE_CHOICES[0]
-        return self.scope_combo.currentText()
-
-    def options(self):
-        """The effective tidy options, ready for ``normalize_lyrics(**opts)``.
-
-        Prefers the manager's own ``_lyrics_options()`` -- it also merges the
-        contraction table, the profile and the tag rules, and it reads the very
-        checkboxes this panel drives, so the two agree by construction. The
-        fallback exists only for a manager that has no such method, and is
-        documented as such rather than being a second rule set.
-        """
-        getter = getattr(self.manager, "_lyrics_options", None)
-        if callable(getter):
-            try:
-                return dict(getter())
-            except Exception:  # noqa: BLE001 -- a stand-in may raise; use the ticks
-                pass
-        return _fallback_options(self.ticks())
-
-    def refresh(self):
-        """Re-read the bound ticks, so a change on the Lyrics tab shows here."""
-        if self._syncing:
-            return
-        self._syncing = True
-        try:
-            for key, widget in self._bound.items():
-                self.boxes[key].setChecked(widget.isChecked())
-        finally:
-            self._syncing = False
-
-    # ---- wiring ---------------------------------------------------------
-    def _push(self, key, checked):
-        """Send a tick to the manager's checkbox (the app's tidy state)."""
-        if self._syncing:
-            return
-        widget = self._bound.get(key)
-        if widget is None:
-            return
-        self._syncing = True
-        try:
-            widget.setChecked(bool(checked))
-        finally:
-            self._syncing = False
-
-    # ---- Qt -------------------------------------------------------------
-    def showEvent(self, event):
-        # The window is cached and re-shown for other tracks, and the Lyrics tab
-        # may have been edited in between, so re-read before displaying.
-        self.refresh()
-        super().showEvent(event)
