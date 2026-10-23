@@ -33,6 +33,8 @@ never to some other artist's signature terms.
 """
 import os
 
+from modules.caption_spec import CAPTION_DENSITY_RULE
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS_DIR = os.path.join(ROOT, "docs")
 GROUPS_PATH = os.path.join(DOCS_DIR, "vocabulary.json")
@@ -144,10 +146,13 @@ def tag_creator_messages(sample, artist=""):
         "- Max 3 descriptors per bracket. More risks the model singing tag names.\n"
         "- NEVER put BPM, key, or time signature in the caption or section tags; "
         "those belong in dedicated metadata fields, not in the text.\n"
-        "- Caption shape: 5-12 comma-separated keywords, then 2-3 sentences "
-        "describing how the energy moves through the track.\n"
+        "- Caption shape: 5-12 comma-separated keywords, then the fact tail.\n"
+        f"- {CAPTION_DENSITY_RULE}\n"
+        "- The tag block ends with one full stop; the facts after it are "
+        "separated by commas.\n"
         "- Output exactly two blocks:\n"
-        "CAPTION:\n<comma-separated keywords. Then 2-3 sentences.>\n\n"
+        "CAPTION:\n<5-12 comma-separated keywords. Then 8-16 comma-separated "
+        "acoustic facts — no prose sentences.>\n\n"
         "LYRICS:\n<the structured lyrics with [Section] markers and (vocal delivery) notes>"
     )
     return [{"role": "system", "content": sys_prompt},

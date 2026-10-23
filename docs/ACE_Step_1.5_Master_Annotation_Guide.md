@@ -24,7 +24,7 @@ The Caption establishes the **global sound portrait** across the entire duration
 
 ### Structure Formula
 ```text
-[Trigger Tag], [Primary Genre], [Subgenre/Mood], [2-3 Specific Instruments], [Vocal Style], [Production & Mix], [Era/Aesthetic]. [2-3 sentences detailing dynamic build, arrangement transitions, and energy flow].
+[Trigger Tag], [Primary Genre], [Subgenre/Mood], [2-3 Specific Instruments], [Vocal Style], [Production & Mix], [Era/Aesthetic]. [8-16 comma-separated acoustic facts: arrangement, transitions, timbral detail].
 ```
 
 ### Formatting Standards
@@ -32,8 +32,11 @@ The Caption establishes the **global sound portrait** across the entire duration
 2. **Concrete Instruments**: Use exact, specific instruments and gear (e.g., `Vox Continental organ`, `Gibson SG with P-90 pickups`, `Fender Rhodes bass`, `808 sub bass`, `gated reverb drums`).
 3. **Mandatory Vocal Descriptor**: Always declare vocal presence and character:
    - `male vocal`, `female vocal`, `male baritone`, `raspy vocals`, `powerful belting`, `clean vocals`, `screamed vocals`, `whispered vocals`, `choir`, or `instrumental` / `no vocals`.
-4. **Flow Narrative**: Follow the tag list with 2–3 concise sentences describing the song's energy progression (e.g., *Opens with a sparse intro before building into a driven verse with layered harmonies, reaching a peak belted chorus and dynamic outro*).
+4. **No Prose Sentences**: Every token in the caption must pay rent in acoustic information. Do not write full prose sentences. A dense, comma-separated list of acoustic facts, structural transitions, and timbral descriptors provides higher attention focus to the DiT cross-attention heads than narrative filler.
+   - The tag block ends with **one full stop**; the fact tail carries no full stops — facts are separated by commas. That single period is load-bearing: `modules/caption_quality.tag_prefix` splits on it, so without it the entire caption parses as tags and trips the 15-tag hard maximum.
 5. **No Parameter Contradictions**: Never place BPM, Key, or Time Signature inside the caption—those are handled as dedicated numeric/categorical metadata fields.
+
+> **Why the narrative was retired (2026-10-23).** The 2–3 sentence "flow narrative" was a holdover from image captioning (BLIP/CLIP), where a caption describes a single frame. Here the caption conditions the DiT through cross-attention for the whole render, so connective tissue ("opens with… before building into…") spends attention mass on tokens that carry no acoustic information. Measured with the shipped `Qwen3-Embedding-0.6B` tokenizer: this guide's Black Sabbath caption is **47 words / 75 tokens** as narrative prose and **35 words / 59 tokens** as dense facts. The token counts are measured; the attention-dilution mechanism is the stated rationale, not measured on this checkpoint. The rule is defined once in `modules/caption_spec.CAPTION_DENSITY_RULE` — the text above quotes it.
 
 ---
 
@@ -394,13 +397,13 @@ Descriptors attach to section markers with a dash to modify local delivery and e
 ```text
 You are a music annotation assistant for the ACE-Step 1.5 music generation model.
 Process each song entry and output ONLY a JSON object containing:
-1. "caption": A hybrid caption (comma-separated tags followed by 2-3 sentences of dynamic flow).
+1. "caption": A hybrid caption (comma-separated tags followed by 8-16 comma-separated acoustic facts; no prose sentences).
 2. "lyrics": Full lyrics with Capitalized structural markers ([Verse], [Chorus]) and max 3 architectural descriptors.
 
 Output Format:
 {
   "id": "<song_id>",
-  "caption": "<tag list>. <structural flow narrative>",
+  "caption": "<tag list>. <8-16 comma-separated acoustic facts>",
   "lyrics": "[Intro]\n\n[Verse 1 - delivery]\nLyrics...\n\n[Chorus - energy]\n..."
 }
 ```

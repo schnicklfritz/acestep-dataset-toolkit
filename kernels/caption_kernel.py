@@ -414,8 +414,9 @@ def _merge_part_captions(name, spans, parts):
         f"These are descriptions of {len(parts)} consecutive parts of ONE song "
         f"({name}). Merge them into a SINGLE caption for the whole track, in the "
         "exact schema above: the front-loaded comma-separated keyword list first, "
-        "then 2-3 sentences describing how the track develops from beginning to "
-        "end. Do not mention that the song was split into parts, do not repeat the "
+        "then 8-16 comma-separated acoustic facts covering how the track develops "
+        "from beginning to end — no prose sentences. Do not mention that the song "
+        "was split into parts, do not repeat the "
         "keyword list, and output ONLY the merged caption text.\n\n" + listing
     )
     conversation = [[

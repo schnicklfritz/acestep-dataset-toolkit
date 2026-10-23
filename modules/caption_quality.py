@@ -43,9 +43,13 @@ VOCAL_TERMS = (
     "no vocals", "lead vocal", "male voice", "female voice", "spoken word",
 )
 
-# Captions are 2-3 sentences of flow narrative after the tag list.
-MIN_FLOW_SENTENCES = 2
-MAX_FLOW_SENTENCES = 3
+# The caption body is a comma-separated list of acoustic facts after the tag
+# block. A fact is one comma-delimited unit of at least two words: "wailing
+# vocal", "half-time tom fill", "bleak atmospheric outro fade". The old
+# 2-3 sentence flow-narrative rule is retired — see the "WHY NO FLOW NARRATIVE"
+# note in modules/caption_spec.py.
+MIN_FACTS = 8
+MAX_FACTS = 16
 
 # A 3-gram repeated this many times in a caption is a decoding loop, not style.
 REPEAT_NGRAM = 3
@@ -57,18 +61,26 @@ CONSECUTIVE_MIN = 5
 def tag_prefix(text):
     """Return the front-loaded comma-separated tag list (before the first '.').
 
-    The schema puts the keywords first and the flow narrative after a full stop,
-    so everything before the first period is the tag block.
+    The schema puts the keywords first and the fact tail after a full stop, so
+    everything before the first period is the tag block. That single period is
+    load-bearing: without it the whole caption parses as tags and trips
+    ``TAG_HARD_MAX``.
     """
     head = (text or "").strip().split(".")[0]
     return [t.strip() for t in head.split(",") if t.strip()]
 
 
-def count_sentences(text):
-    """Count sentences in the flow narrative (everything after the tag block)."""
+def count_facts(text):
+    """Count the acoustic facts in the tail (everything after the tag block).
+
+    Full stops and semicolons end a fact as well as commas, so a model that
+    ignores the density rule and writes prose is still measured rather than
+    silently scoring zero.
+    """
     parts = (text or "").split(".", 1)
     tail = parts[1] if len(parts) > 1 else ""
-    return len([s for s in re.split(r"[.!?]+", tail) if len(s.split()) >= 3])
+    units = re.split(r"[,;.!?]+", tail)
+    return len([u for u in units if len(u.split()) >= 2])
 
 
 def max_ngram_repeat(text, n=3):
@@ -131,23 +143,23 @@ def check_caption(text):
     if KEY_IN_TEXT.search(body):
         issues.append("key in the caption (rule 5)")
 
-    sentences = count_sentences(body)
-    if sentences < MIN_FLOW_SENTENCES:
+    facts = count_facts(body)
+    if facts < MIN_FACTS:
         issues.append(
-            f"{sentences} flow sentence(s); the schema requires "
-            f"{MIN_FLOW_SENTENCES}-{MAX_FLOW_SENTENCES} after the tag list"
+            f"{facts} acoustic fact(s); the schema requires {MIN_FACTS}-"
+            f"{MAX_FACTS} comma-separated facts after the tag list"
         )
-    elif sentences > MAX_FLOW_SENTENCES:
+    elif facts > MAX_FACTS:
         issues.append(
-            f"{sentences} flow sentences; the schema allows at most "
-            f"{MAX_FLOW_SENTENCES} — a caption is not an essay"
+            f"{facts} facts; the schema allows at most "
+            f"{MAX_FACTS} — a caption is not an essay"
         )
 
     words = len(body.split())
     if words > CAPTION_MAX_WORDS:
         issues.append(
             f"{words} words; the schema allows {CAPTION_MAX_WORDS} "
-            f"(keywords + 2-3 sentences)"
+            f"(keywords + 8-16 facts)"
         )
     if len(body) > CAPTION_MAX_CHARS:
         issues.append(f"{len(body)} characters; the schema allows {CAPTION_MAX_CHARS}")
@@ -171,8 +183,8 @@ def trim_to_caption(text, max_words=CAPTION_MAX_WORDS):
     """Trim an over-long caption back to the schema shape.
 
     Keeps the front-loaded tag list (capped at ``TAG_MAX`` keywords) and then as
-    many whole sentences as fit the word budget. Whole sentences only — never a
-    cut mid-sentence — so the result is still usable training data.
+    many whole facts as fit the word budget. Whole facts only — never a cut
+    mid-fact — so the result is still usable training data.
 
     This exists because the provider's ``max_tokens`` cannot be trusted: a caption
     came back at ~2000 words from an endpoint configured with 512.
@@ -186,21 +198,25 @@ def trim_to_caption(text, max_words=CAPTION_MAX_WORDS):
         return body
 
     keep = tags[:TAG_MAX]
-    parts = [", ".join(keep) + "."] if keep else []
+    head_text = ", ".join(keep) + "." if keep else ""
     budget = max_words - len(", ".join(keep).split())
+    facts = []
 
-    for sentence in re.split(r"(?<=[.!?])\s+", tail.strip()):
-        sentence = sentence.strip()
-        cost = len(sentence.split())
+    for fact in re.split(r"[,;]|(?<=[.!?])\s+", tail.strip()):
+        fact = fact.strip().strip(".!?;,").strip()
+        cost = len(fact.split())
         if not cost:
             continue
         if cost > budget:
-            # One run-on sentence larger than the whole budget: keep as many
-            # words as fit rather than dropping the flow narrative entirely.
-            keep_words = sentence.split()[:max(0, budget)]
+            # One run-on fact larger than the whole budget: keep as many words
+            # as fit rather than dropping the fact tail entirely.
+            keep_words = fact.split()[:max(0, budget)]
             if keep_words:
-                parts.append(" ".join(keep_words).rstrip(",;:") + ".")
+                facts.append(" ".join(keep_words).rstrip(",;:"))
             break
-        parts.append(sentence if sentence.endswith((".", "!", "?")) else sentence + ".")
+        facts.append(fact)
         budget -= cost
-    return " ".join(parts).strip()
+
+    if not facts:
+        return head_text
+    return ((head_text + " ") if head_text else "") + ", ".join(facts) + "."

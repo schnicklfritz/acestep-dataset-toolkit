@@ -174,9 +174,10 @@ artist's signature terms.
 
 Training captions are not free prose. `docs/ACE_Step_1.5_Master_Annotation_Guide.md`
 §1 defines a **hybrid caption**: 5–12 comma-separated conditioning keywords
-(max 15) followed by 2–3 sentences of flow narrative — with a mandatory vocal
-descriptor, concrete instruments/gear, and **no BPM, key or time signature** in
-the text (those are dedicated metadata fields).
+(max 15) followed by a dense, comma-separated list of 8–16 **acoustic facts**
+(no prose sentences) — with a mandatory vocal descriptor, concrete
+instruments/gear, and **no BPM, key or time signature** in the text (those are
+dedicated metadata fields).
 
 That standard lives in code as `modules/caption_spec.py`, and every captioning
 backend is given it as the **system prompt**:

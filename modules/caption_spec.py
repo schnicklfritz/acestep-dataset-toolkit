@@ -12,22 +12,51 @@ WHY THIS EXISTS
 ---------------
 The captioner used to be told: "write a detailed description ... Write 3 to 5
 sentences. Start with A or An." The schema says the opposite: front-load 5-12
-comma-separated conditioning keywords (max 15), then 2-3 sentences of flow
-narrative. A model that opens with "A high-energy Garage Rock track with a raw,
-lo-fi aesthetic..." is COMPLYING with that old prompt — which is exactly why the
-output was worthless as training data. The prompt was schema-less; the model was
-not at fault.
+comma-separated conditioning keywords (max 15), then a comma-separated list of
+acoustic facts. A model that opens with "A high-energy Garage Rock track with a
+raw, lo-fi aesthetic..." is COMPLYING with that old prompt — which is exactly why
+the output was worthless as training data. The prompt was schema-less; the model
+was not at fault.
+
+WHY NO FLOW NARRATIVE (2026-10-23)
+----------------------------------
+The 2-3 sentence "flow narrative" that used to sit after the tag list was a
+holdover from image captioning (BLIP/CLIP), where a caption describes one frame.
+An audio DiT conditions on the caption through cross-attention for the whole
+render, so connective tissue ("the track breathes with an unhurried...
+atmosphere driven by") spends attention mass on tokens that carry no acoustic
+information, and spends prompt budget the metadata block needs. Measured with
+the shipped Qwen3-Embedding-0.6B tokenizer: one Black Sabbath caption costs 75
+tokens as 47 words of narrative prose and 59 tokens as 35 words of dense facts.
+The rule below is therefore a hard ban, and ``GOLD_EXAMPLE`` is dense for the
+same reason — models imitate the example before they obey the instructions.
 
 The built-in prompt below IS the schema and is set in stone. User text is
 APPENDED to it, never substituted for it — see ``build_system_prompt``.
 """
 
-# The §1 structure formula, verbatim.
+# The §1 structure formula.
 CAPTION_FORMULA = (
     "[Trigger Tag], [Primary Genre], [Subgenre/Mood], [2-3 Specific Instruments], "
     "[Vocal Style], [Production & Mix], [Era/Aesthetic]. "
-    "[2-3 sentences detailing dynamic build, arrangement transitions, and energy flow]."
+    "[8-16 comma-separated acoustic facts: arrangement, transitions, timbral detail]."
 )
+
+# The density rule, verbatim. Every document that describes the caption shape
+# quotes this string, so the prose cannot drift from the prompt that is actually
+# sent. See the module docstring for why the narrative form was retired.
+CAPTION_DENSITY_RULE = (
+    "Every token in the caption must pay rent in acoustic information. Do not "
+    "write full prose sentences. A dense, comma-separated list of acoustic facts, "
+    "structural transitions, and timbral descriptors provides higher attention "
+    "focus to the DiT cross-attention heads than narrative filler."
+)
+
+# The caption is the tag block plus the fact tail. The band is what leaves the
+# metadata block room inside a 256-token prompt: a 59-word dense caption measures
+# 99 tokens against 75 for a 47-word narrative one (Qwen3-Embedding-0.6B).
+CAPTION_MIN_WORDS = 35
+CAPTION_MAX_WORDS = 70
 
 # §1 formatting standards + descriptor_reference §10 rules 5, 8, 9, 10, 11.
 # NOTE: rule 1 keeps the exact phrase "5-12 comma-separated keywords" because
@@ -40,16 +69,17 @@ CAPTION_RULES = (
     "3. ALWAYS declare vocal presence and character: male vocal, female vocal, "
     "male baritone, raspy vocals, powerful belting, clean vocals, screamed "
     "vocals, whispered vocals, choir, or instrumental / no vocals.\n"
-    "4. Follow the tag list with 2-3 sentences describing how the energy moves "
-    "through the track (dynamic build, arrangement transitions, energy flow).\n"
+    "4. " + CAPTION_DENSITY_RULE + "\n"
     "5. NEVER put BPM, key, or time signature in the caption — those are "
     "dedicated numeric/categorical metadata fields.\n"
     "6. No headings, no field labels, no bullet points, no markdown. Output ONLY "
-    "the caption text.\n"
+    "the caption text. The tag block ends with one full stop; the fact tail "
+    "contains no full stops — facts are separated by commas.\n"
     "7. Do not transcribe, quote, or repeat lyrics — describe the vocal delivery "
     "instead. Never repeat a word or phrase for emphasis.\n"
-    f"8. Keep the WHOLE caption to the keywords plus 2-3 sentences: about 70-90 "
-    f"words, and NEVER more than {120}. A long essay is not a caption."
+    f"8. Keep the WHOLE caption to the keyword list plus 8-16 facts: about "
+    f"{CAPTION_MIN_WORDS}-{CAPTION_MAX_WORDS} words, and NEVER more than "
+    f"{CAPTION_MAX_WORDS}. A long essay is not a caption."
 )
 
 # §2 lyrics architecture + §3 descriptor limits. Consumed by the Tag Creator and
@@ -62,13 +92,13 @@ LYRIC_MIN_SYLLABLES = 6      # §2 syllable cadence
 LYRIC_MAX_SYLLABLES = 10
 LYRIC_FLAG_SYLLABLES = 12    # §2: flag lines exceeding this
 
-# The schema is 5-12 keywords plus 2-3 sentences, i.e. roughly 70-90 words.
-# Anything far beyond that is not a caption: a 2000+ word output is either a
-# decoding runaway or a provider ignoring max_tokens (observed: a caption ran to
-# ~2000 words on an endpoint configured with max_tokens=512), and it is unusable
-# as training data. Enforced in caption_quality, and enforced by trimming in the
-# backends because a provider's token cap cannot be trusted.
-CAPTION_MAX_WORDS = 120
+# The schema is the tag block plus a fact tail: 35-70 words. Anything far beyond
+# that is not a caption: a 2000+ word output is either a decoding runaway or a
+# provider ignoring max_tokens (observed: a caption ran to ~2000 words on an
+# endpoint configured with max_tokens=512), and it is unusable as training data.
+# Enforced in caption_quality, and enforced by trimming in the backends because a
+# provider's token cap cannot be trusted. The upper bound is the caption half of
+# the 256-token prompt, not an aesthetic preference: see CAPTION_MIN_WORDS.
 CAPTION_MAX_CHARS = 900
 
 LYRICS_RULES = (
@@ -85,13 +115,15 @@ LYRICS_RULES = (
 )
 
 # A caption that conforms. Taken from the Black Sabbath example in
-# docs/descriptor_reference.md "Complete examples".
+# docs/descriptor_reference.md "Complete examples", rewritten in the dense form:
+# 8 tags, then 8 facts, 45 words. Models copy the shape of the example before
+# they obey the rules, so this string is the real spec.
 GOLD_EXAMPLE = (
-    "heavy metal, doom metal, doom-laden, ominous, downtuned guitar, distorted "
-    "bass, thunderous drums, nasal male vocal, raw 1970s analog production, "
-    "heavy low-end. Opens with a slow, ominous riff before building into a "
-    "plaintive verse with wailing vocals. Reaches a crushing peak and fades "
-    "into a bleak, atmospheric outro."
+    "heavy metal, doom metal, downtuned guitar, distorted bass, thunderous drums, "
+    "nasal male vocal, raw 1970s analog production, heavy low-end. slow ominous "
+    "riff intro, plaintive verse, wailing vocal, doubled guitar harmony, crushing "
+    "chorus peak, wah solo over pedal tone, half-time tom fill, bleak atmospheric "
+    "outro fade"
 )
 
 # A real captioner failure, kept as the negative example. It violates rules 1
@@ -158,18 +190,41 @@ def is_legacy_caption_prompt(text):
     return (text or "").strip() == LEGACY_CAPTION_PROMPT
 
 
+# The rule-4 wording that shipped before 2026-10-23: "then 2-3 sentences
+# describing how the energy moves through the track". That sentence now
+# contradicts rule 4 (CAPTION_DENSITY_RULE), so a stored prompt containing it is
+# treated as "no user edit" rather than appended as an instruction that fights
+# the schema. Substring, not equality: unlike LEGACY_CAPTION_PROMPT this wording
+# was pasted into ``caption_system_prompt`` with edits around it, so there is no
+# single string to compare against.
+NARRATIVE_CAPTION_MARKERS = (
+    "2-3 sentences",
+    "3 to 5 sentences",
+    "flow narrative",
+    "how the energy moves",
+    "energy moves through the track",
+)
+
+
+def is_narrative_caption_prompt(text):
+    """True if ``text`` still asks for prose sentences after the tag list."""
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in NARRATIVE_CAPTION_MARKERS)
+
+
 def user_addendum_from_config(config):
     """Pull the user's caption instructions out of a config dict.
 
-    Returns "" when the stored value is the legacy contradictory default, so an
-    untouched settings.json cannot silently undo the schema.
+    Returns "" when the stored value is the legacy contradictory default or still
+    asks for narrative sentences, so an untouched settings.json cannot silently
+    undo the schema.
     """
     stored = (config.get("caption_system_prompt") or "").strip()
     if stored:
-        return stored
+        return "" if is_narrative_caption_prompt(stored) else stored
     legacy = (config.get("caption_prompt") or "").strip()
     if legacy and not is_legacy_caption_prompt(legacy):
-        return legacy
+        return "" if is_narrative_caption_prompt(legacy) else legacy
     return ""
 
 

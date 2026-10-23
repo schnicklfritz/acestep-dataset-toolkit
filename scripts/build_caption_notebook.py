@@ -91,7 +91,8 @@ way — so a file from this notebook can be imported into a dataset with
 *📥 Import captions_out.json…* and diffed like any other run.
 
 Captions follow the ACE-Step 1.5XL annotation schema (front-loaded 5-12 keywords,
-a mandatory vocal descriptor, 2-3 sentences of flow, no BPM/key/time signature).
+a mandatory vocal descriptor, 8-16 comma-separated acoustic facts, no prose
+sentences, no BPM/key/time signature).
 An over-long caption is trimmed back to the schema.
 
 Regenerate with `.venv/bin/python scripts/build_caption_notebook.py` — do not

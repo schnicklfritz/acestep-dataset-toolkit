@@ -13,8 +13,10 @@ import os
 import re
 
 from modules.caption_quality import (
+    MAX_FACTS,
+    MIN_FACTS,
     check_caption,
-    count_sentences,
+    count_facts,
     is_conforming,
     max_consecutive_repeat,
     tag_prefix,
@@ -22,6 +24,7 @@ from modules.caption_quality import (
 )
 from modules.caption_spec import (
     BUILTIN_SYSTEM_PROMPT,
+    CAPTION_DENSITY_RULE,
     CAPTION_FORMULA,
     CAPTION_MAX_WORDS,
     COUNTER_EXAMPLE,
@@ -34,6 +37,7 @@ from modules.caption_spec import (
     TAG_MIN,
     build_system_prompt,
     is_legacy_caption_prompt,
+    is_narrative_caption_prompt,
     system_prompt_from_config,
     task_prompt_from_config,
     build_task_prompt,
@@ -69,6 +73,20 @@ def test_builtin_prompt_encodes_the_schema():
     assert GOLD_EXAMPLE in BUILTIN_SYSTEM_PROMPT
 
 
+def test_builtin_prompt_encodes_the_density_rule():
+    """The rule is the schema, and the example must already obey it."""
+    assert CAPTION_DENSITY_RULE in BUILTIN_SYSTEM_PROMPT
+    assert "2-3 sentences" not in BUILTIN_SYSTEM_PROMPT
+    # tag_prefix() splits on the first '.', so the gold example must carry
+    # exactly one: the full stop that ends the tag block.
+    assert GOLD_EXAMPLE.count(".") == 1
+
+
+def test_gold_example_is_dense_not_prose():
+    assert MIN_FACTS <= count_facts(GOLD_EXAMPLE) <= MAX_FACTS
+    assert len(tag_prefix(GOLD_EXAMPLE)) <= TAG_MAX
+
+
 def test_empty_addendum_changes_nothing():
     assert build_system_prompt("") == BUILTIN_SYSTEM_PROMPT
     assert build_system_prompt("   \n  ") == BUILTIN_SYSTEM_PROMPT
@@ -92,6 +110,15 @@ def test_legacy_default_cannot_return_through_the_config():
     assert "Start with A or An" not in prompt
     assert prompt == BUILTIN_SYSTEM_PROMPT
     assert task_prompt_from_config(config) == DEFAULT_TASK_PROMPT
+
+
+def test_a_stored_narrative_prompt_cannot_return_through_the_config():
+    """settings.json may still hold the retired "2-3 sentences" instruction."""
+    stale = ("Front-load the keywords, then 2-3 sentences describing how the "
+             "energy moves through the track.")
+    assert is_narrative_caption_prompt(stale)
+    assert system_prompt_from_config({"caption_system_prompt": stale}) == (
+        BUILTIN_SYSTEM_PROMPT)
 
 
 def test_a_genuine_user_edit_is_still_honoured():
@@ -179,9 +206,9 @@ def test_missing_vocal_descriptor_is_flagged():
     assert any("vocal" in i for i in check_caption(text))
 
 
-def test_tags_only_caption_is_flagged_for_no_flow_narrative():
+def test_tags_only_caption_is_flagged_for_no_facts():
     text = "hard rock, drums, bass, male vocal, raw production, 1970s analog"
-    assert any("flow sentence" in i for i in check_caption(text))
+    assert any("acoustic fact" in i for i in check_caption(text))
 
 
 def test_degenerate_repetition_is_flagged():
@@ -204,7 +231,7 @@ def test_empty_caption_is_flagged():
 
 
 def test_helpers_behave():
-    assert count_sentences(
+    assert count_facts(
         "tags, here. It builds through the verse and peaks. Then it fades out."
     ) == 2
     assert max_consecutive_repeat("go go go go go now")[0] == 5
@@ -224,7 +251,7 @@ TOME = TAGS + ". " + "The band plays with conviction and the guitars ring out. "
 def test_an_over_long_caption_is_flagged():
     """A 2000-word caption is unusable; the token cap could not be trusted."""
     issues = check_caption(TOME)
-    assert any("flow sentences" in i for i in issues)
+    assert any("facts" in i for i in issues)
     assert any("words" in i for i in issues)
 
 
