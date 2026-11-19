@@ -44,10 +44,10 @@ First, make sure .changed_markers file is empty or create one, then run:
 [REPO] Do not run the snippet above by hand in this tree. It has no
 text-pathspec allowlist, so `git add -N .` here also records intent-to-add for
 every binary, and the diff then carries a "Binary files ... differ" header for
-each one -- the exact shape of the 69 KB index corruption this repo has already
-hit twice. scripts/gen_changed_markers.sh IS that snippet plus the allowlist,
-an atomic rename, a loud failure, and a per-run shadow index. Keep the snippet
-for repos with no binary assets.
+each one -- the same failure that corrupted this index once before (the 69 KB of
+binary lines documented in the recipe below). scripts/gen_changed_markers.sh IS
+that snippet plus the allowlist, an atomic rename, a loud failure, and a
+per-run shadow index. Keep the snippet for repos with no binary assets.
 
 # Repos with binary assets use scripts/gen_changed_markers.sh instead: same
 # output, plus a TEXT pathspec allowlist (a bare `add -N .` emits a
