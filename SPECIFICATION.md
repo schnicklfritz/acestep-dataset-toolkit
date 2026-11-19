@@ -26,7 +26,6 @@ quality threshold; it validates manifest structure instead.
 
 ### Main Interface Layout
 1. **Global Header & Health Strip**:
-   * Live Quality Score Gauge (`0% - 100%`) with color progression (Red $\rightarrow$ Yellow $\rightarrow$ Green).
    * Dataset Name & Trigger Tag inputs.
    * "I Know What I'm Doing" (Bypass Warnings) button.
    * Global Instrumental Mode: `[ All Instrumental ]` / `[ No Instrumentals ]` / `[ Mixed Dataset ]`.
@@ -113,7 +112,7 @@ quality threshold; it validates manifest structure instead.
 4. **Local Profile Rule Engine**: Instant CPU-based template generation.
 
 ### Caption Architectures
-* **Hybrid Structure (Recommended)**: Comma-separated acoustic/instrumentation tags followed by a structural arrangement narrative.
+* **Dense Facts (Required)**: front-loaded comma-separated keyword tags, then 8-16 comma-separated acoustic facts. Prose narrative is BANNED - see `modules/caption_spec.CAPTION_DENSITY_RULE` and the generated Hard limits block in `docs/ACE_Step_1.5_Master_Annotation_Guide.md`; enforced by `modules/caption_quality.py`.
 * **Concise Tags**: Short comma-separated tags for style/character adapters.
 * **Deep Structural Breakdown**: Multi-section chronological progression (Intro $\rightarrow$ Verse $\rightarrow$ Chorus $\rightarrow$ Bridge $\rightarrow$ Outro).
 * **Overwrite Safety**: Prompts the user before modifying existing captions, with automatic backup snapshots.
@@ -121,6 +120,8 @@ quality threshold; it validates manifest structure instead.
 ---
 
 ## 7. Quality Degradation Penalty Reference Table
+
+> **Superseded.** The health audit and its gauge were removed (see section 2); no code applies these weights. Retained for history only.
 
 | Diagnostic Warning | Quality Impact | Degradation Description |
 | :--- | :--- | :--- |

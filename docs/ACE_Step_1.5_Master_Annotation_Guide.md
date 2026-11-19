@@ -407,3 +407,25 @@ Output Format:
   "lyrics": "[Intro]\n\n[Verse 1 - delivery]\nLyrics...\n\n[Chorus - energy]\n..."
 }
 ```
+
+<!-- BEGIN GENERATED: caption_spec -->
+
+## Hard limits (generated — do not edit by hand)
+
+Rendered from `modules/caption_spec.py` by `scripts/gen_doc_numbers.py`.
+If these disagree with the prose above, the prose is wrong.
+
+| limit | value |
+| --- | --- |
+| Caption length | 35–70 words |
+| Caption hard cap | 900 characters |
+| Front-loaded tags | 5–12, hard max 15 |
+| Facts after the tag block | 8–16 |
+| Descriptors per bracket | max 3 |
+| Lyric line syllables | 6–10, flag over 12 |
+
+Density rule, verbatim:
+
+> Every token in the caption must pay rent in acoustic information. Do not write full prose sentences. A dense, comma-separated list of acoustic facts, structural transitions, and timbral descriptors provides higher attention focus to the DiT cross-attention heads than narrative filler.
+
+<!-- END GENERATED: caption_spec -->
