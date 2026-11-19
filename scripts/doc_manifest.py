@@ -19,6 +19,12 @@ GUIDES = [
     "Comprehensive_LoRA_LoKR_Dataset_Annotation_Guide_updated.md",
     "LoRA_LoKR_Creation_Guide.md",
     "descriptor_reference.md",
+    # The index/context protocol text. It was lost once already (recovered from
+    # a paste outside the repo), so it is guarded like a guide: truncation is
+    # loud instead of silent. v1 is the frozen original the living file is
+    # annotated against; it must never change.
+    "gitdiff-plus.md",
+    "gitdiff-plus-v1-original.md",
 ]
 
 
