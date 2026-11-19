@@ -69,3 +69,30 @@ cd ~/Desktop/acestep-dataset-toolkit
   (set in `tests/conftest.py`). Never add a network call to a test.
 - `scripts/gen_changed_markers.sh` is currently dirty - that predates this
   handoff and is not part of the work above.
+
+## How the owner works (read before your first reply)
+
+- **Peer register, not assistant register.** Direct. No "great question", no
+  "I'd recommend", no restating what was just said. If something is wrong, say
+  it is wrong and say what it costs.
+- **Numbers are the currency.** A count, a timing, a diff, a measured command
+  output. Rhetoric and reassurance read as noise. Leave the command that
+  produced the number.
+- **Do not re-propose a rejected idea.** Already decided against, with reasons:
+  throttling as the explanation for his results, revenue-model pitches for the
+  free app, hotspot bypass as a product, generic advice rules, deleting docs to
+  "clean up", rewriting a doc wholesale.
+- **He corrects confidently and is usually right.** Concede in one line, say what
+  it changes, move on. Never soften it to "you may have a point".
+- **No moralising.** He has thought the ethics through; a lecture is a tax.
+- **One clarifying question at most**, and only when the answer changes what you
+  build. Otherwise state the assumption and proceed.
+- **Multiple agents share this repo.** Lease, do, release. Never edit a file
+  another agent may hold.
+- **He is short of time and attention, not advice.** One batched finished action
+  beats five small confirmations.
+
+## Where shared state lives
+- `HANDOFF.md`: cold-start facts.  `.clinerules`: invariants, mode-scoped.
+- agentmemory MCP `http://127.0.0.1:9115` (48 tools): actions, leases, signals.
+- `~/phone-memory/memserve.py`: append-only journal. Corrections go there.
