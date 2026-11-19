@@ -84,6 +84,8 @@
 - git diff is blind to callers. After any rename, before committing:
   `git grep -n <old_name>` then `git grep -n <new_name>`. No hits for a symbol
   you expected means UNKNOWN, not gone.
+- Callees too, not just callers: a changed function can look correct in its own
+  hunk while an unchanged module it calls now gets different arguments.
 
 # ============================================================
 # 6. SPELLING (domain rule - keep verbatim)
@@ -108,6 +110,14 @@
 # ============================================================
 # 8. DEFINITION OF DONE
 # ============================================================
+# Verify by RUNNING a deterministic tool on the CHANGED files, never by
+# re-reading your own diff. Measured 2026-11-19 on this machine, both rc=0
+# across the 8 changed .py files:
+#   git diff --name-only --diff-filter=ACMR HEAD -- '*.py' \
+#     | xargs -r .venv/bin/flake8 --select=F,E9
+#   git diff --name-only --diff-filter=ACMR HEAD -- '*.py' \
+#     | xargs -r .venv/bin/vulture --min-confidence 80
+# ruff and deadtrace do NOT exist here; a gate that names them never runs.
 - Tests pass, or the failure is named and explained. `pytest -q` before claiming
   done; `pytest -m "not slow"` is the inner loop.
 - Any doc claim you touched agrees with the code (tests/test_docs_sync.py,
