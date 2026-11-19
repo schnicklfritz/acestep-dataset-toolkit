@@ -1,0 +1,230 @@
+Never permanently delete anything.  Anything deleted - code or data - is archived first in a separate folder called `deletions/`, and `deletions/` must be in `.gitignore`.  If it is not in `.gitignore`, then add it.  See DELETION POLICY below for what may be deleted.
+Do not assume anything.  Treat you training data as obsolete.  Before writing any code, ask user questions for context.  Be comprehensive.
+
+# ============================================================
+# DELETION POLICY (amended 2026-10-15) - CODE may be removed, DATA may not
+# ============================================================
+# Original rule: never delete anything. Written after a byte-identical duplicate
+# in docs/ was removed unasked and could not be recovered (it was untracked).
+# AMENDMENT: the user has authorised removing CODE that conflicts with the
+# current spec or does not behave as intended. The original protection REMAINS
+# for DATA.
+#
+# MAY be deleted (code), after the safety net below:
+#   - source in modules/ ui/ core/ workers/ tests/, whole files included
+#   - functions, classes, methods, test cases, dead branches
+#   - code encoding a superseded contract (a modal exec() the spec replaced, a
+#     dock layout the spec replaced, an inline field the spec removed)
+#   - a test pinning behaviour the app no longer intends
+# MUST STILL NOT be deleted without an explicit, per-path request:
+#   - the user's DATA: datasets, audio, captions, lyrics, exports, docs/,
+#     lyrics_profiles/, settings.json
+#   - backups, project_backups/, structural_slices/
+#   - duplicates, "copy 1"/"(1)" files, drafts, generated artifacts
+#
+# SAFETY NET (unchanged, mandatory, BEFORE the original is touched):
+#   1. copy the exact file - or, for a partial deletion, the exact PRE-EDIT
+#      version - into deletions/, preserving its relative path
+#   2. deletions/ must be gitignored  (it is: .gitignore:80)
+#   3. only then remove/overwrite the original
+#   4. report every deleted path in the final summary
+# For a PARTIAL deletion (dropping a function, not a file), step 1 means writing
+# the pre-edit file into deletions/ FIRST. An in-place edit that drops content
+# the user had is otherwise unrecoverable - that is the original sin.
+# Never reach a removal indirectly without the safety net: no `sed -i` line
+# deletions, no "rewrite the file without section X", no overwriting a file with
+# a version that drops content the user had.
+
+# ============================================================
+# RESPELLING RULE - never produce a real English word (hard rule)
+# ============================================================
+# When respelling an English word (contraction phonetics, -ing/-in, any
+# pronunciation fix) the RESULT MUST NOT ITSELF BE A DICTIONARY WORD. A
+# homophone collision re-creates the exact ambiguity the respelling exists to
+# remove.
+#   BAD: he'll -> heel | i'll -> aisle | i'd -> eyed | you're -> your
+#   OK : she'll -> sheel                      (not a word)
+# Where no clean respelling exists, DISAMBIGUATE WITH A HYPHEN (h-eel, eye-d,
+# there-ill) rather than accept a collision.
+# Applies to modules/lyrics_normalizer.py DEFAULT_CONTRACTIONS, every profile in
+# lyrics_profiles/, settings.json -> lyrics_contractions, and anything shipped as
+# a default. Verify before adding an entry:
+#     grep -qx "<word>" /usr/share/dict/words
+# (this machine has no /usr/share/dict/words; the stand-in is
+#  /usr/share/cracklib/cracklib-small - a password list, useful but not
+#  authoritative. Install a real wordlist before trusting a marginal call.)
+# The rule constrains SPELLING ONLY - never change the intended sound with it.
+
+
+
+# Context Optimization Rules for DeepSeek Coder
+- NEVER read entire binary or data files like wav, mp3, flac, or zip.
+- You are strictly forbidden from running recursive global searches across 'project_backups/' or 'structural_slices/'. 
+- Do not read any code files in the repository unless explicitly asked by the user or required by the immediate task.
+- If you need to view code structure, always use specific structural tools (like reading only 'widgets.py' or 'workers/deepseek.py') instead of executing generic shell 'cat' commands on random files.
+- When generating or editing PySide6 UI structures, do not read digital signal processing logic files (e.g., dsp_normalizer, stem_separator) unless actively compiling data hooks between them.
+
+# ============================================================
+# CHANGE-MARKER SYSTEM (cost optimization) — READ .changed_markers FIRST
+# ============================================================
+# `.changed_markers` is the SINGLE exception to the cache-hit rule:
+# it is always read first, before any code, because it is the index.
+- Before reading ANY module, read `.changed_markers`.
+- Treat committed state (git HEAD) as an IMMUTABLE CACHE HIT. Never run
+  whole-repo file sweeps; never scan clean files to "confirm" behavior. Trust git.
+- Only inspect the specific hunks / functions identified in `.changed_markers`.
+- STALE LINE PROTECTION: anchor every edit to function/class names + surrounding
+  hunk context, never raw line numbers (marker line ranges can go stale).
+- SIDE-EFFECT AUDIT: if an edit changes a function signature, parameter list, or
+  return type, run `git grep -n "<fn>"` to inspect ONLY the call sites for
+  breakage. Do not re-read entire caller files.
+- Prefer `git diff` (base vs working tree) over whole-file reads to learn what
+  changed. Never `cat` a 5000-line file to find a delta.
+- Once changes are committed to git, REGENERATE `.changed_markers`
+  (`scripts/gen_changed_markers.sh`) so the next session starts from a file that
+  matches HEAD. It is GITIGNORED derived data: never commit it (a commit cannot
+  carry its own SHA, so a committed marker is stale by construction) and never
+  hand-edit it — the hand-curated
+  ledger lives in `.agent_notes.md`, which no script ever writes.
+
+# ------------------------------------------------------------
+# INDEX VALIDITY — a stale index is worse than no index
+# ------------------------------------------------------------
+# The marker file is only useful if it agrees with reality. If it disagrees with
+# `git status`, an agent scopes its work off stale information and never finds
+# out — the same silent-wrong-answer failure the UNKNOWN rule guards against,
+# but applied to the index itself rather than to an anchor.
+- BEFORE scoping any task, validate the index in this order:
+    1. `grep '^# HEAD:' .changed_markers` must equal `git rev-parse HEAD`. The
+       file also carries `# generated:` and `# dirty: <n> path(s)`.
+    2. every dirty/untracked file in `git status` must be listed in the index,
+       and every file the index lists must actually be dirty.
+- SANCTIONED EXEMPTION: `.changed_markers` and its `.changed_markers.*`
+  scratch file are gitignored and excluded from their own diff. Their absence from the index is
+  NOT a staleness signal. Everything else must be listed.
+- On ANY disagreement: STOP. Do not scope, do not edit, do not "work around it".
+  Regenerate the index first (`scripts/gen_changed_markers.sh`). Then re-read it
+  and continue.
+- NEVER invent a scope. If the index is empty while `git status` is not, that is
+  not "nothing changed" — it is a broken index.
+- After a successful commit, regenerate the index (not just empty it) so the
+  next session starts from a file that matches HEAD.
+- `.agent_notes.md` is the other half of the picture and does NOT go stale with
+  the diff: unresolved causes, unverified claims, machine-local damage, the
+  baseline sweep. Read it together with the index. It is HAND-OWNED — never
+  regenerate, reflow or "tidy" it, and never move its items into the generated
+  file, where the next run would delete them.
+
+# INDEX GENERATION RECIPE (verified)
+# ---------------------------------------------------------------------------
+#   scripts/gen_changed_markers.sh
+#
+# That script is the ONLY supported way to build this file. Two properties are
+# load-bearing and were each measured — do not "simplify" them away:
+#
+#   * IT STAGES INTO A SHADOW INDEX (GIT_INDEX_FILE), never the real one. A
+#     bare `git add -A` silently stages the entire working tree, which changes
+#     what a later `git commit` picks up and is how someone commits files they
+#     never intended to. Measured: the real `.git/index` is byte-identical
+#     before and after the script.
+#   * IT USES A TEXT-PATHSPEC ALLOWLIST, NOT A DENYLIST. `-diff` in
+#     .gitattributes marks a file as binary but git STILL emits a one-line
+#     "Binary files ... differ" header for it (re-verified with
+#     `git check-attr`), and a denylist can never enumerate every binary
+#     extension this toolkit produces. A single added .flac therefore injects
+#     noise for every binary in the working tree, and that is exactly how this
+#     index was corrupted once before (69KB of binary lines). Restricting the
+#     diff to text pathspecs removes the header entirely and shrinks the index.
+#     Measured on one identical tree: allowlist 95 bytes / 1 file / 0 headers
+#     vs denylist 317 bytes / 3 files / 2 headers.
+#   * THE TRAP IN AN ALLOWLIST: it is BLIND to files with NO extension. That
+#     included `.clinerules`, `.gitattributes` and `.gitignore` themselves, so
+#     editing the rules file produced an index with no sign of it. It was found
+#     by validating the index against `git status` — which is exactly why that
+#     rule below exists. `':(top,glob).*'` in TEXTS closes it. The `glob`
+#     magic matters: without it `*` also matches `/`, so the spec silently
+#     pulled in everything under .agents/ and .claude/ too. An extensionless text file elsewhere must be named
+#     in TEXTS explicitly.
+#
+#   * THE SHADOW ADD IS `git add -N` (intent-to-add) ON UNTRACKED ALLOWLIST
+#     PATHS ONLY. A shadow `git add -A` hashes every untracked file into
+#     .git/objects, binaries included: one 20 MB .wav grew it by 19.5 MB per
+#     run (measured). `-N` records the path without its content.
+#
+# The shadow intent-to-add is also what makes not-yet-tracked files visible to
+# `git diff HEAD`, and what makes git emit real `rename from/to` entries for a
+# rename that is still unstaged — plain `git diff --summary -M` shows only the
+# deletion (measured). When adding a new TEXT format, add its extension to
+# TEXTS in the script, not to a denylist here.
+
+
+# ------------------------------------------------------------
+# RENAME SAFETY — git diff is blind to cross-file fallout
+# ------------------------------------------------------------
+# A rename commit looks clean. The breakage is in the CALLERS, which did not
+# change and therefore do not appear in any diff.
+- After any rename, before committing — START WITH THE INDEX YOU ALREADY HAVE,
+  because the generator's shadow index is the only thing that makes a
+  still-unstaged rename visible at all:
+      grep -n -E '^(rename |rename from|rename to|similarity)' .changed_markers
+      git grep -n "old_name"                 # who still points to the old name?
+      git grep -n "new_name"                 # did the new name actually land?
+- MEASURED, so this mistake is not repeated: on an unstaged rename,
+  `git diff --summary -M` prints ONLY `delete mode 100644 old_name` — the new
+  name is invisible — and `git status --porcelain -M` reports it as
+  `?? new_name` with no rename pairing. Detection requires the shadow index
+  (`cp .git/index /tmp/x && GIT_INDEX_FILE=/tmp/x git add -N <new paths>`), which the
+  generator already does for you; the marker file carries the `rename from` /
+  `rename to` lines. Do NOT substitute `git log --diff-filter=R --summary -1`
+  here either: it inspects the LAST COMMIT and cannot see uncommitted work.
+- If rename detection and those greps DISAGREE, stop and ask. Do not reconstruct
+  callers from memory — that is how live code gets deleted.
+- An anchor with no `git grep` hits means UNKNOWN, not "gone". Investigate
+  before editing or removing anything.
+
+# ------------------------------------------------------------
+# BOUNDARIES — the contracts a local hunk cannot show you
+# ------------------------------------------------------------
+# Some breakage is invisible in a per-file diff: shared types, field/format
+# names at an export or API boundary, schemas, migrations. Changing these can
+# break a consumer in another repository with no error on this side.
+- Keep a short ALWAYS-READ allowlist for such files (e.g. schema/contract
+  modules). Reading those few files is cheaper than unbounded exploration and
+  prevents "the diff is green so the interface must be fine".
+- Field/format names are a CONTRACT the moment data leaves the app (export,
+  training loader, API). Pin the mapping in ONE module and cover it with a test;
+  internal names are free to change, boundary names are not.
+
+# ------------------------------------------------------------
+# SCOPE DECLARATION — make context growth visible
+# ------------------------------------------------------------
+- Before opening anything, STATE the paths you intend to read and why.
+  Declared scope makes accidental context growth obvious, to the user and to
+  yourself, instead of it happening silently over many tool calls.
+- Stay inside that declared scope. If the task genuinely needs more, say so and
+  get agreement before expanding it.
+- Keep the generated index OUT of source directories and out of the diff it
+  describes (binary/data extensions should be `-diff` in `.gitattributes` so a
+  stray asset cannot flood the index).
+
+# ============================================================
+# TWO-MODE MAINTENANCE (fix for historical dead code / tech debt)
+# ============================================================
+# `git diff` only sees DIRTY files. A dead function committed long ago and
+# never edited looks 100% clean to git (a cache hit) and would never be found.
+# So maintenance is split into two explicit modes:
+#
+# 1. DAILY ITERATIVE MODE (runs ~99% of the time) — git-as-cache above.
+#    Only touch dirty hunks + direct callers. Cost ~pennies.
+#
+# 2. ONE-TIME BASELINE SWEEP (explicit, when auditing an old repository):
+#    - Do NOT pay the LLM to read tens of thousands of lines searching for
+#      dead code. Run a FREE local static analyzer first, e.g.
+#        Python:     vulture . --exclude .venv,kernels   (dead code)
+#                    flake8 --select=F401 .              (unused imports)
+#        TypeScript: knip  /  ts-prune                    (unused/dead)
+#    - Record ONLY the flagged lines in `.agent_notes.md` under its
+#      `[BASELINE SWEEP]` section — NEVER in `.changed_markers`, which the
+#      generator overwrites on every run and is gitignored. The LLM then inspects just those
+#      candidates (judgment: is this really dead?) instead of the whole repo.
+#    - The free, deterministic tool does the scan; the model only reviews flags.
