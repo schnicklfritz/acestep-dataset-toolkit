@@ -1,3 +1,20 @@
+<!--
+  LIVING DOCUMENT -- annotated for acestep-dataset-toolkit on 2026-11-19.
+  Everything marked [REPO] was added here. Everything unmarked is the original
+  text, kept verbatim; the untouched original is docs/gitdiff-plus-v1-original.md
+  (sha256 4a61b0a9...), so a happy medium can be renegotiated instead of being
+  rewritten. Add new findings instead of replacing old ones, and keep additions
+  short -- this file is only useful if the diff against v1 stays readable.
+
+  Scope, so the next merge does not repeat the last one (part of another
+  project's folder ended up in here): this is the protocol for EDITING a large,
+  old repository, where most of the code is unread and most of the risk is
+  invisible. It is not a repo-initialisation guide, not a style guide, and none
+  of it is worth its token cost on a 700-line project. Its executable form here
+  is scripts/gen_changed_markers.sh, its shipped form is .clinerules, and its
+  evidence lives in docs/ and .agent_notes.md.
+-->
+
 First, make sure .changed_markers file is empty or create one, then run: 
 
 # `git add -N .` on the REAL index records intent-to-add for every untracked
@@ -23,6 +40,14 @@ First, make sure .changed_markers file is empty or create one, then run:
   unset GIT_INDEX_FILE
   rm -f "$tmp_idx"
 }
+
+[REPO] Do not run the snippet above by hand in this tree. It has no
+text-pathspec allowlist, so `git add -N .` here also records intent-to-add for
+every binary, and the diff then carries a "Binary files ... differ" header for
+each one -- the exact shape of the 69 KB index corruption this repo has already
+hit twice. scripts/gen_changed_markers.sh IS that snippet plus the allowlist,
+an atomic rename, a loud failure, and a per-run shadow index. Keep the snippet
+for repos with no binary assets.
 
 # Repos with binary assets use scripts/gen_changed_markers.sh instead: same
 # output, plus a TEXT pathspec allowlist (a bare `add -N .` emits a
@@ -57,6 +82,20 @@ Add the following to a system prompt, and/or treat this file as part of the syst
 git diff --name-only --diff-filter=ACMR HEAD -- '*.py' | xargs -r ruff check
 git diff --name-only --diff-filter=ACMR HEAD -- '*.py' | xargs -r vulture --min-confidence 80
 git diff --name-only --diff-filter=ACMR HEAD -- '*.py' | xargs -r deadtrace
+
+[REPO] Measured on this machine, 2026-11-19. `ruff`: not installed, not in
+.venv/bin. `deadtrace`: does not exist -- absent from PATH, from .venv/bin, and
+from every file in this repo, so a gate naming it has never run once.
+`vulture` and `flake8`: installed in .venv/bin ONLY, so `xargs -r vulture`
+fails from a plain shell. The gate that actually runs here:
+
+    git diff --name-only --diff-filter=ACMR HEAD -- '*.py' \
+      | xargs -r .venv/bin/flake8 --select=F,E9            # rc=0 on 8 files
+    git diff --name-only --diff-filter=ACMR HEAD -- '*.py' \
+      | xargs -r .venv/bin/vulture --min-confidence 80     # rc=0 on 8 files
+
+It paid for itself on its first run: F401 in workers/assistant.py:130. Two of
+the three tools named above are fiction; the rule survives on the third.
 
 # WHAT THIS STILL CANNOT CATCH (this is the part that keeps the protocol honest)
 # 1. UNCHANGED-FILE INTERACTIONS. The diff shows the changed function looking
@@ -168,6 +207,27 @@ git diff --name-only --diff-filter=ACMR HEAD -- '*.py' | xargs -r deadtrace
 # deletion (measured). When adding a new TEXT format, add its extension to
 # TEXTS in the script, not to a denylist here.
 
+
+[REPO] Incident, 2026-11-19, this repo. `.changed_markers` said `# HEAD:
+b545885` and `# dirty: 0 path(s)`. Reality was HEAD 20a8ccb with 13 dirty
+paths, and the regenerated file was 83,693 bytes against the stale 101.
+Nothing in the working tree looked wrong -- a stale index is silent by
+construction and reads as a clean tree. It was caught only by running the
+validation greps before scoping: the cheapest part of this protocol and the
+part most likely to be skipped.
+
+[REPO] Where each rule is actually enforced here, so prose and mechanism
+cannot drift apart:
+
+    shadow index / allowlist / atomic rename   scripts/gen_changed_markers.sh
+    read-index-first, scope, renames, UNKNOWN  .clinerules
+    docs may never lose content                tests/test_docs_integrity.py
+    gate on changed files only                 .clinerules section 8
+    unresolved causes, machine-local damage    .agent_notes.md (hand-owned)
+
+[REPO] Open, not fixed: docs/archive/ is owned by root:root on this machine,
+so nothing can be archived there as a normal user; the failure is a bare
+EACCES with no explanation. Fix is one `sudo chown -R fritz:fritz docs/archive`.
 
 # ------------------------------------------------------------
 # RENAME SAFETY — git diff is blind to cross-file fallout
