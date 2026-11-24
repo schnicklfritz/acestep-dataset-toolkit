@@ -1244,3 +1244,34 @@ on the rules in this guide rather than changing them.
 - [`AGENT_GUARDRAILS.md`](AGENT_GUARDRAILS.md) — how documentation in this repository is
   verified and cited.
 
+
+---
+
+## Correction (2026-11-18): caption shape is guidance, not a gate
+
+The "35–70 words, 8–16 comma-separated acoustic facts, no prose sentences" budget
+stated in §3.2 is the **captioner's prompt**, not an ACE-Step LoRA training
+requirement, and the app no longer enforces it. The rule entered this guide on
+2026-10-23 (commit `b545885`) from a token measurement; that measurement is real,
+but the claim that LoRA training *requires* the dense shape is not supported
+upstream:
+
+- `docs/en/LoRA_Training_Tutorial.md` in the ACE-Step 1.5 source tree gives
+  `"A high-energy J-pop track with synthesizer leads and fast tempo"` as its
+  caption example — one prose line, 11 words.
+- `scripts/lora_data_prepare/gemini_caption.py`, the official LoRA captioner,
+  asks only for a "detailed caption and lyrics" and constrains no shape.
+
+What IS an upstream constraint, and is kept: `SFT_GEN_PROMPT`
+(`acestep/constants.py:160-168`) places the caption before a `# Metas` block
+inside a 256-token prompt, so an over-long caption silently deletes the
+bpm/keyscale/timesignature/duration lines. Hence a length guard still exists
+(`modules/caption_quality.trim_to_caption`), and BPM/key/time-signature still
+should not be restated inside the caption text.
+
+Retired with this correction: `check_caption`, `count_facts`, the tag-count,
+fact-count and vocal-descriptor checks, `modules/caption_audit.py`, the
+export-time caption gate and `write_caption`'s self-review. Caption wording is
+judged by a human or an LLM, because captions are too varied to be scored by a
+script.
+

@@ -124,3 +124,4 @@
   tests/test_docs_integrity.py).
 - Report: what changed, what you verified by running, and what you did NOT
   verify. Three lines is enough.
+- Zafiro planner context lives in docs/zafiro-planner-context.md; read it for phone/laptop/Kaggle work. Not prepended here on purpose.

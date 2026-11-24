@@ -148,7 +148,7 @@ inline in the table.
 ### AI assistant skills
 The built-in assistant (DeepSeek or any LLM provider) exposes **tools** it can
 call against your dataset: dataset summary, list tracks, instrument lookup,
-caption audit, manifest validation, health scan, instrument detection, **sound
+manifest validation, health scan, instrument detection, **sound
 profile**, and **curate dataset for a target sound** (picks the genre/artist/
 instrument gaps to fill so the dataset converges on a specific sound). This is
 rare in dataset apps — your dataset becomes directly steerable by AI.
@@ -170,14 +170,18 @@ falling back to the dataset name (`sabbath` → Black Sabbath, `Doorsdata` →
 The Doors). An unrecognised artist gets the fundamentals only — never another
 artist's signature terms.
 
-## 📐 The caption schema (ACE-Step 1.5XL)
+## 📐 The captioner prompt (ACE-Step 1.5XL)
 
-Training captions are not free prose. `docs/ACE_Step_1.5_Master_Annotation_Guide.md`
-§1 defines a **hybrid caption**: 5–12 comma-separated conditioning keywords
-(max 15) followed by a dense, comma-separated list of 8–16 **acoustic facts**
-(no prose sentences) — with a mandatory vocal descriptor, concrete
-instruments/gear, and **no BPM, key or time signature** in the text (those are
-dedicated metadata fields).
+`modules/caption_spec.py` gives every captioning backend a built-in system prompt
+asking for a **hybrid caption**: 5–12 comma-separated conditioning keywords
+(max 15) followed by a dense, comma-separated list of **acoustic facts**, with a
+mandatory vocal descriptor, concrete instruments/gear, and **no BPM, key or time
+signature** in the text (those are dedicated metadata fields).
+
+That is guidance, not a gate. Nothing in the app scores a caption's wording
+any more: captions are too varied to be judged by a script, and upstream's own
+LoRA tutorial uses a one-line prose caption while its LoRA captioner constrains
+the shape not at all. The prompt is the starting point; your ear is the judge.
 
 That standard lives in code as `modules/caption_spec.py`, and every captioning
 backend is given it as the **system prompt**:
@@ -195,10 +199,14 @@ which said *"Write 3 to 5 sentences. Start with A or An"* — the exact opposite
 a front-loaded tag list, and the reason schema-less runs produced captions that
 opened with "A high-energy Garage Rock track..." instead of keywords.
 
-`modules/caption_quality.py` then **checks** the result: tag count, vocal
-descriptor, BPM/key/time-signature leakage, field-label headings, markdown, and
-degenerate repetition. Violations are reported per caption in the caption audit
-and in manifest validation — a prompt is guidance, a check is a guarantee.
+`modules/caption_quality.py` no longer scores caption text. It keeps one job — a
+length guard that trims a runaway caption (a 2,000-word caption once came back
+from an endpoint set to 512 tokens) so it cannot eat the `# Metas` block inside
+the trainer's 256-token prompt. Judging whether a caption is *good* is a human or
+LLM call: captions are too varied for a script, and the "8–16 comma-separated
+facts" rule it used to enforce was a song-generation prompt convention, not an
+ACE-Step LoRA requirement — upstream's own LoRA tutorial uses a one-line prose
+caption, and its LoRA captioner script constrains the shape not at all.
 
 ## 🔐 Configurability & security
 

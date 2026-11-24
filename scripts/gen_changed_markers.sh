@@ -69,6 +69,15 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || git rev-parse --git-dir)"
+
+# Machine-local ignore, so the scratch file cannot be staged or committed even
+# in a repo whose .gitignore is missing or read-only. .git/info/exclude is not
+# committed, so this never shows up as a change of yours.
+if ! git check-ignore -q .changed_markers 2>/dev/null; then
+  [ -d "$git_dir/info" ] || mkdir -p "$git_dir/info"
+  echo '.changed_markers' >> "$git_dir/info/exclude"
+fi
+
 markers="$repo_root/.changed_markers"
 tmp_markers="$(mktemp "$repo_root/.changed_markers.XXXXXX")"
 # mktemp creates the file 0600. Preserve the mode of the file we are about to
@@ -156,7 +165,7 @@ git ls-files -z --others --exclude-standard -- "${TEXTS[@]}" "${EXCLUDES[@]}" \
 {
   echo "# AUTO-GENERATED -- do not edit. Regenerate: scripts/gen_changed_markers.sh"
   echo "# HEAD: $head_sha"
-  echo "# generated: $(date -Iseconds)"
+  echo "# Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "# dirty: $real_dirty_count path(s), this file excluded"
   echo "#"
   echo "# VALIDATE ME BEFORE SCOPING ANY WORK:"
@@ -183,9 +192,17 @@ git ls-files -z --others --exclude-standard -- "${TEXTS[@]}" "${EXCLUDES[@]}" \
   git --no-pager diff --no-color --no-ext-diff --stat HEAD -- \
     "${TEXTS[@]}" "${EXCLUDES[@]}"
   echo
-  echo "# ------ FULL HUNKS (3 lines of context) ------"
+  echo "# ------ NAME-STATUS (renames included; orient here first) ------"
+  echo "#   M modified   A added   R renamed   D deleted   T type-change"
+  echo "# A D or R is a MANDATORY investigation, never an automatic delete."
+  git --no-pager diff --no-color --no-ext-diff --name-status HEAD -- \
+    "${TEXTS[@]}" "${EXCLUDES[@]}"
+  echo
+  echo "# ------ FULL HUNKS (function context, -W, 3 lines of context) ------"
   echo "# Anchor edits to function/class names + hunk context, never line numbers."
-  git --no-pager diff --no-color --no-ext-diff -U3 -p HEAD -- \
+  echo "# -W widens each hunk to its enclosing function, so a hunk can be read"
+  echo "# without opening the file just to find out which function it is in."
+  git --no-pager diff --no-color --no-ext-diff -W -U3 -p HEAD -- \
     "${TEXTS[@]}" "${EXCLUDES[@]}"
   echo
   echo "# ------ RENAME GUARD ------"

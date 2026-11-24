@@ -17,9 +17,11 @@ caption -> export manifest. 34,174 live lines, 36 test files.
   git-gated, `deletions/` retired.
 
 ## Open work, priority order
-1. **Two failing tests.** Names unknown. Get them with
-   `.venv/bin/python -m pytest --lf -q`. The full suite takes ~15 min and two
-   runs were killed before finishing.
+1. ~~**Two failing tests.** Names unknown.~~ **Resolved 2026-11-18.** They were
+   `tests/test_assistant_actions.py::test_gap_audit_says_ok_for_a_complete_track`
+   and `tests/test_assistant_tool_routing.py::test_write_caption_validates_what_it_just_wrote`,
+   both tripping `MIN_FACTS = 8` against a prose fixture. The fixtures were right:
+   the CHECKER was wrong (see the first invariant below) and has been deleted.
 2. **UI overhaul.** Owner's words: "the UI needs an overhaul, it feels wrong."
    Measured: styling is NOT the problem (5 `setStyleSheet` calls, 0 hardcoded
    font sizes, tokens live in `ui/themes.py`). The problem is layout: one screen
@@ -43,10 +45,16 @@ cd ~/Desktop/acestep-dataset-toolkit
 ```
 
 ## Invariants that will bite you
-- Caption = front-loaded keyword tags + 8-16 comma-separated acoustic facts.
-  A prose narrative is BANNED (retired 2026-10-23, token-measured). The rule
-  text lives in `modules/caption_spec.CAPTION_DENSITY_RULE`; never restate it,
-  quote it.
+- **Caption TEXT is judged by a human/LLM, never by a script** (2026-11-18).
+  The "front-load 5-12 tags then 8-16 comma-separated facts" rule was a
+  SONG-GENERATION prompt convention, not a LoRA requirement: upstream's
+  `docs/en/LoRA_Training_Tutorial.md` caption example is one prose line and its
+  LoRA captioner (`scripts/lora_data_prepare/gemini_caption.py`) constrains the
+  shape not at all. `check_caption`, `count_facts`, `modules/caption_audit.py`,
+  the export-time caption gate and `write_caption`'s self-review are DELETED.
+  `trim_to_caption` survives as a runaway length guard only.
+  `BUILTIN_SYSTEM_PROMPT` still asks for the dense shape — that is the captioner's
+  guidance, and retiring it is an open decision, not a check to re-add.
 - Budget: 35-70 words, max 900 chars, max 3 descriptors per bracket, 6-10
   syllables per lyric line. All generated into the guide - do not hand-edit
   that block.
