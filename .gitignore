@@ -82,3 +82,6 @@ deletions/
 # Local safety copies taken before a repair (see the .clinerules backup rule).
 # They are machine-local working state, not source, so they stay untracked.
 *.pre-repair-*
+.serena/
+dead_code.txt
+teest.sh
