@@ -4,7 +4,6 @@ Layout (the approved mockup):
 
     [ toolbar: Open / Save / Add / Export · dataset settings · Settings · Panels ]
     [ track table | track editor ]   [ Tools dock: Track / Caption / Lyrics / ... ]
-                                     [ Assistant dock                           ]
     [ status bar: status text · progress ]
 
 The pages are the same QWidgets the old top-level tabs used, re-parented into
@@ -244,7 +243,7 @@ def _column(*items, stretch_last=True, margins=(0, 0, 0, 0), spacing=8):
     return w
 
 
-def install_shell(manager, parts, tool_pages, assistant_page, settings_page):
+def install_shell(manager, parts, tool_pages, settings_page):
     """Build the mockup layout from the pieces init_ui created.
 
     ``parts``: header, dataset_box, bulk, view_row, player, waveform, filter,
@@ -315,23 +314,12 @@ def install_shell(manager, parts, tool_pages, assistant_page, settings_page):
     manager.tools_dock.setMinimumWidth(360)
     manager.addDockWidget(Qt.RightDockWidgetArea, manager.tools_dock)
 
-    manager.assistant_dock = QDockWidget("Assistant", manager)
-    manager.assistant_dock.setObjectName("dock_assistant")
-    manager.assistant_dock.setWidget(assistant_page)
-    manager._tab_pages.append(assistant_page)
-    manager.addDockWidget(Qt.RightDockWidgetArea, manager.assistant_dock)
     # Stationary: no dragging it out to float (which is how it got lost off the
     # edge of the screen), and it may only live in the right-hand column. It can
     # still be tucked away — see install_collapsible_titlebar — but only to its
     # title bar, so the dock itself never disappears from the column.
     # PySide6 6.x dropped ``setFloatable`` (obsolete since Qt 6.2), so the flag
     # is cleared on the feature set directly.
-    features = manager.assistant_dock.features()
-    features &= ~QDockWidget.DockWidgetFeature.DockWidgetFloatable
-    manager.assistant_dock.setFeatures(features)
-    manager.assistant_dock.setAllowedAreas(Qt.RightDockWidgetArea)
-    install_collapsible_titlebar(manager, manager.assistant_dock, "Assistant")
-    manager.splitDockWidget(manager.tools_dock, manager.assistant_dock, Qt.Vertical)
     _default_sizes(manager)
 
     # ---- Settings: a window, not a tab (visited rarely) ---------------------
@@ -484,7 +472,7 @@ def install_collapsible_titlebar(manager, dock, title):
 
 
 def _default_sizes(manager):
-    manager.resizeDocks([manager.tools_dock, manager.assistant_dock], [560, 320], Qt.Vertical)
+    manager.resizeDocks([manager.tools_dock], [560], Qt.Vertical)
     manager.resizeDocks([manager.tools_dock], [500], Qt.Horizontal)
 
 
@@ -497,7 +485,7 @@ def open_settings(manager=None):
 
 
 def panels_menu_actions(manager):
-    return [manager.tools_dock.toggleViewAction(), manager.assistant_dock.toggleViewAction()]
+    return [manager.tools_dock.toggleViewAction()]
 
 
 def save_layout(manager):
@@ -522,32 +510,25 @@ def restore_layout(manager):
 
 
 def _repair_hidden_docks(manager):
-    """Never leave BOTH right-column docks hidden after a restore.
+    """Never leave the right-column dock hidden after a restore.
 
-    A saved state can hide a dock on purpose — hiding only the Assistant is a
-    legitimate, tested preference and is left alone. But if a state (or a
-    half-collapsed column) leaves BOTH Tools and Assistant hidden, the entire
-    right-hand column is gone and there is nothing left to click: the only way
-    back is the Panels menu or Reset layout, which a user who never hid anything
-    does not know to look for. This is the one case worth repairing instead of
-    honouring, so both are shown and given their default sizes.
+    A saved state may hide the dock on purpose, but if it comes back hidden and
+    the column collapses there is nothing left to click: the only way back is
+    the Panels menu or Reset layout, which a user who never hid anything does
+    not know to look for. Repair that case instead of honouring it.
     """
-    docks = (manager.tools_dock, manager.assistant_dock)
-    if any(dock.isVisible() for dock in docks):
+    if manager.tools_dock.isVisible():
         return
-    for dock in docks:
-        dock.show()
+    manager.tools_dock.show()
     _default_sizes(manager)
 
 
 def reset_layout(manager):
     from modules.config_store import save_plain_keys
 
-    for dock in (manager.tools_dock, manager.assistant_dock):
-        dock.setFloating(False)
-        dock.show()
-        manager.addDockWidget(Qt.RightDockWidgetArea, dock)
-    manager.splitDockWidget(manager.tools_dock, manager.assistant_dock, Qt.Vertical)
+    manager.tools_dock.setFloating(False)
+    manager.tools_dock.show()
+    manager.addDockWidget(Qt.RightDockWidgetArea, manager.tools_dock)
     _default_sizes(manager)
     manager.config["ui_dock_state"] = ""
     save_plain_keys(manager.config, ["ui_dock_state"])

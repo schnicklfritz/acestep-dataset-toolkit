@@ -187,7 +187,7 @@ def build_settings_tab(manager, parent):
     manager.role_provider_combo = {}
     manager.role_model_combo = {}
     _role_providers = ["default (global)", "groq", "gemini", "openrouter", "deepseek", "local"]
-    for role in ("aggregator", "captioner", "assistant"):
+    for role in ("aggregator", "captioner"):
         row = QHBoxLayout()
         prov = QComboBox()
         prov.addItems(_role_providers)

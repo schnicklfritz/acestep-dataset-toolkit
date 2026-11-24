@@ -1,4 +1,10 @@
-"""Tests for the ACE-Step 1.5XL caption schema, its prompt composer and validator.
+"""Tests for the ACE-Step 1.5XL caption prompt composer and the trim guard.
+
+Caption TEXT is deliberately NOT scored by a script any more (2026-11-18): the
+"5-12 tags then 8-16 comma-separated facts" rule was a song-generation prompt
+convention, not a LoRA training requirement, and upstream's own LoRA recipe uses
+a one-line prose caption. The prompt below still describes the shape the captioner
+aims for; judging whether a given caption is good is a human/LLM call.
 
 The load-bearing test here is ``test_every_kernel_placeholder_is_filled``: an
 unfilled ``{{X}}`` is VALID Python (a set containing a set), so a missing
@@ -6,22 +12,12 @@ substitution reaches Kaggle and dies there with a bare NameError 50+ seconds
 later. That already happened once with ``{{ATTN_IMPL}}``.
 
 The second is that the schema-less legacy prompt -- "Write 3 to 5 sentences. Start
-with A or An" -- can never come back through the config, since it directly
-contradicts the required front-loaded tag list.
+with A or An" -- can never come back through the config.
 """
 import os
 import re
 
-from modules.caption_quality import (
-    MAX_FACTS,
-    MIN_FACTS,
-    check_caption,
-    count_facts,
-    is_conforming,
-    max_consecutive_repeat,
-    tag_prefix,
-    trim_to_caption,
-)
+from modules.caption_quality import trim_to_caption
 from modules.caption_spec import (
     BUILTIN_SYSTEM_PROMPT,
     CAPTION_DENSITY_RULE,
@@ -59,11 +55,6 @@ def _placeholders(text):
 # the composer: the schema is set in stone, the user prompt is additive
 # --------------------------------------------------------------------------
 
-def test_gold_example_conforms_and_counter_example_does_not():
-    assert check_caption(GOLD_EXAMPLE) == []
-    assert check_caption(COUNTER_EXAMPLE), "the real failure must be flagged"
-
-
 def test_builtin_prompt_encodes_the_schema():
     assert CAPTION_FORMULA in BUILTIN_SYSTEM_PROMPT
     assert "5-12 comma-separated keywords" in BUILTIN_SYSTEM_PROMPT
@@ -80,11 +71,6 @@ def test_builtin_prompt_encodes_the_density_rule():
     # tag_prefix() splits on the first '.', so the gold example must carry
     # exactly one: the full stop that ends the tag block.
     assert GOLD_EXAMPLE.count(".") == 1
-
-
-def test_gold_example_is_dense_not_prose():
-    assert MIN_FACTS <= count_facts(GOLD_EXAMPLE) <= MAX_FACTS
-    assert len(tag_prefix(GOLD_EXAMPLE)) <= TAG_MAX
 
 
 def test_empty_addendum_changes_nothing():
@@ -174,73 +160,15 @@ def test_task_addendum_stacks_on_a_genuine_user_edit():
 
 
 # --------------------------------------------------------------------------
-# the validator
+# the schema numbers the prompt and the trim guard share
 # --------------------------------------------------------------------------
 
-def test_tag_prefix_stops_at_the_first_sentence():
-    text = "hard rock, drums, male vocal. It builds to a peak."
-    assert tag_prefix(text) == ["hard rock", "drums", "male vocal"]
-
-
-def test_too_few_front_loaded_keywords_is_flagged():
-    thin = "rock, drums, male vocal. It builds through the verse and peaks late on."
-    assert any("front-loaded" in i for i in check_caption(thin))
+def test_schema_numbers_are_the_documented_ones():
     assert (TAG_MIN, TAG_MAX, TAG_HARD_MAX) == (5, 12, 15)
-
-
-def test_bpm_in_the_caption_is_flagged():
-    text = ("hard rock, drums, bass, male vocal, raw production, 1970s analog. "
-            "Drives at 120 BPM through the verse. Peaks, then fades.")
-    assert any("BPM" in i for i in check_caption(text))
-
-
-def test_field_label_heading_is_flagged():
-    text = ("Genre & Style: hard rock, drums, bass, male vocal, raw production, "
-            "1970s analog. Builds to a peak. Fades out.")
-    assert any("heading" in i for i in check_caption(text))
-
-
-def test_missing_vocal_descriptor_is_flagged():
-    text = ("hard rock, drums, bass, electric guitar, raw production, "
-            "1970s analog. Builds to a peak. Fades out.")
-    assert any("vocal" in i for i in check_caption(text))
-
-
-def test_tags_only_caption_is_flagged_for_no_facts():
-    text = "hard rock, drums, bass, male vocal, raw production, 1970s analog"
-    assert any("acoustic fact" in i for i in check_caption(text))
-
-
-def test_degenerate_repetition_is_flagged():
-    text = ("hard rock, drums, bass, male vocal, raw production. "
-            + "don't go, " * 30 + "Fades out.")
-    assert any("degenerate repetition" in i for i in check_caption(text))
-
-
-def test_a_legitimate_repeated_instrument_name_is_not_flagged():
-    """The repeat check must not fire on ordinary captions."""
-    text = ("hard rock, distorted guitar, bass, male vocal, live drums, "
-            "raw production. Guitar and drums lock in tight through the verse. "
-            "The guitar solo peaks, then the drums drop out for the outro.")
-    assert not any("degenerate repetition" in i for i in check_caption(text))
-
-
-def test_empty_caption_is_flagged():
-    assert check_caption("") == ["caption is empty"]
-    assert check_caption("   ")
-
-
-def test_helpers_behave():
-    assert count_facts(
-        "tags, here. It builds through the verse and peaks. Then it fades out."
-    ) == 2
-    assert max_consecutive_repeat("go go go go go now")[0] == 5
-    assert is_conforming(GOLD_EXAMPLE) is True
-    assert is_conforming(COUNTER_EXAMPLE) is False
     assert MAX_DESCRIPTORS == 3
 
 
-def test_trim_is_a_no_op_for_a_conforming_caption():
+def test_trim_is_a_no_op_for_a_caption_under_budget():
     assert trim_to_caption(GOLD_EXAMPLE) == GOLD_EXAMPLE
 
 
@@ -248,14 +176,7 @@ TAGS = "hard rock, drums, bass, male vocal, raw production, 1970s analog"
 TOME = TAGS + ". " + "The band plays with conviction and the guitars ring out. " * 40
 
 
-def test_an_over_long_caption_is_flagged():
-    """A 2000-word caption is unusable; the token cap could not be trusted."""
-    issues = check_caption(TOME)
-    assert any("facts" in i for i in issues)
-    assert any("words" in i for i in issues)
-
-
-def test_trim_brings_a_tome_back_to_the_schema():
+def test_trim_brings_a_tome_back_under_the_budget():
     trimmed = trim_to_caption(TOME)
     assert len(trimmed.split()) <= CAPTION_MAX_WORDS
     assert trimmed.startswith("hard rock, drums, bass, male vocal")

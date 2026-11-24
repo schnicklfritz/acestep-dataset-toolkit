@@ -55,10 +55,6 @@ from workers.caption import RemoteCaptionWorker, resolve_backend
 from workers.structural import (
     StructuralPipelineBatchWorker,
 )
-from workers.assistant import (
-    AssistantWorker, APP_HELP_TEXT, ASSISTANT_TOOLS, build_system_prompt,
-    build_sound_profile, summarize_dataset,
-)
 
 # --- NEW: extracted widgets/orchestrator (replaces inline class definitions below) ---
 from widgets import WaveformWidget, ScatterPlotWidget
@@ -406,9 +402,6 @@ class DatasetManager(QMainWindow):
         struct_tab = QWidget()
         self.init_structural_tab(struct_tab)
 
-        assistant_tab = QWidget()
-        self.init_assistant_tab(assistant_tab)
-
         tag_tab = QWidget()
         self.init_tag_manager_tab(tag_tab)
 
@@ -456,7 +449,7 @@ class DatasetManager(QMainWindow):
         shell_pages = {
             "caption": caption_group_tab, "lyrics": lyrics_tab,
             "structure": pipelines_tab, "organize": organize_tab,
-            "assistant": assistant_tab, "settings": settings_tab,
+            "settings": settings_tab,
         }
 
         # --- Header Bar ---
@@ -2527,410 +2520,7 @@ class DatasetManager(QMainWindow):
         self.status_label.setText(f"Cleared caption override for '{s.get('filename', '?')}'.")
 
     # -----------------------------------------------------------------------
-    # AI Assistant Tab
     # -----------------------------------------------------------------------
-    def init_assistant_tab(self, parent):
-        layout = QVBoxLayout(parent)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
-
-        from ui.assistant_provider import build_provider_row
-
-        prov_row, prov_state = build_provider_row(self)
-        layout.addLayout(prov_row)
-        layout.addWidget(prov_state)
-
-        self.assistant_history = QTextBrowser()
-        self.assistant_history.setHtml(
-            "<b>🤖 AI Assistant</b><br>Ask about the app or your dataset. The "
-            "assistant can run tools against it: dataset summary, sound profile, "
-            "<b>curate for a target sound</b>, manifest validation, "
-            "health scan, instrument detection.<hr>"
-        )
-        layout.addWidget(self.assistant_history, 1)
-
-        input_row = QHBoxLayout()
-        self.assistant_input = QLineEdit()
-        self.assistant_input.setPlaceholderText(
-            "Ask something… e.g. 'curate my dataset toward a Black Sabbath / doom sound'"
-        )
-        self.assistant_input.returnPressed.connect(self.send_assistant_message)
-        self.assistant_send_btn = QPushButton("Send")
-        self.assistant_send_btn.clicked.connect(self.send_assistant_message)
-        clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self.clear_assistant)
-        input_row.addWidget(self.assistant_input, 1)
-        input_row.addWidget(self.assistant_send_btn)
-        input_row.addWidget(clear_btn)
-        layout.addLayout(input_row)
-
-        # --- Sample questions ---
-        suggest_row = QHBoxLayout()
-        suggest_row.addWidget(QLabel("Try:"))
-        self.assistant_suggest = QComboBox()
-        self.assistant_suggest.addItems([
-            "Curate my dataset toward a Black Sabbath / doom sound.",
-            "What is my dataset's current sound profile?",
-            "Which tracks look like outliers or near-duplicates?",
-            "Check whether 'Paranoid' by Black Sabbath has multitracks.",
-            "Audit my captions for consistency.",
-            "Validate my dataset manifest.",
-            "Help me write a caption for the selected track.",
-            "What tags fit a slow, powerful belted ballad?",
-            "How do I fix the flagged health issues?",
-            "Run the health audit on my dataset.",
-        ])
-        ask_btn = QPushButton("Ask")
-        ask_btn.clicked.connect(self.ask_suggested)
-        suggest_row.addWidget(self.assistant_suggest, 1)
-        suggest_row.addWidget(ask_btn)
-        layout.addLayout(suggest_row)
-
-        # --- Context options ---
-        opts_row = QHBoxLayout()
-        self.assistant_remember_check = QCheckBox("Remember context")
-        self.assistant_remember_check.setChecked(bool(self.config.get("assistant_remember", True)))
-        self.assistant_remember_check.toggled.connect(self._on_assistant_remember_toggled)
-        self.assistant_linear_check = QCheckBox("Step-by-step reasoning")
-        self.assistant_linear_check.setChecked(bool(self.config.get("assistant_linear_thinking", True)))
-        opts_row.addWidget(self.assistant_remember_check)
-        opts_row.addWidget(self.assistant_linear_check)
-        opts_row.addStretch()
-        layout.addLayout(opts_row)
-
-        self.assistant_status = QLabel("Ready.")
-        self.assistant_status.setProperty("muted", True)
-        layout.addWidget(self.assistant_status)
-
-        # Restore the persistent linear conversation.
-        if self.config.get("assistant_remember", True):
-            from modules.assistant_store import load_context
-            self._assistant_messages = load_context(int(self.config.get("assistant_context_size", 40)))
-            if self._assistant_messages:
-                self.assistant_history.append("<i>… restored previous conversation.</i>")
-        else:
-            self._assistant_messages = []
-
-    def ask_suggested(self):
-        q = self.assistant_suggest.currentText().strip()
-        if q:
-            self.assistant_input.setText(q)
-            self.send_assistant_message()
-
-    def _save_assistant_context(self):
-        if not self.config.get("assistant_remember", True):
-            return
-        from modules.assistant_store import save_context
-        save_context(self._assistant_messages, int(self.config.get("assistant_context_size", 40)))
-
-    def _on_assistant_remember_toggled(self, checked):
-        if not checked:
-            from modules.assistant_store import clear_context
-            clear_context()
-
-    def send_assistant_message(self):
-        text = self.assistant_input.text().strip()
-        if not text:
-            return
-        self.assistant_history.append(f"<b>You:</b> {html.escape(text)}<br>")
-        self.assistant_input.clear()
-        self._assistant_messages.append({"role": "user", "content": text})
-        self._save_assistant_context()
-        self._start_assistant()
-
-    def clear_assistant(self):
-        self._assistant_messages = []
-        self.assistant_history.setHtml("<b>🤖 AI Assistant</b> — conversation cleared.<hr>")
-        self.assistant_status.setText("Ready.")
-        if self.config.get("assistant_remember", True):
-            from modules.assistant_store import clear_context
-            clear_context()
-
-    def _set_assistant_busy(self, busy):
-        self.assistant_send_btn.setEnabled(not busy)
-        self.assistant_input.setEnabled(not busy)
-        self.assistant_status.setText("Thinking…" if busy else "Ready.")
-
-    def _assistant_tools(self):
-        """The tool list for one assistant turn."""
-        return list(ASSISTANT_TOOLS)
-
-    def _start_assistant(self):
-        from modules.llm_client import get_client
-
-        try:
-            get_client(self.config)
-        except ValueError as e:
-            QMessageBox.information(
-                self, "LLM Key Needed",
-                f"{e}\n\nSet it in ⚙ Settings → LLM Provider (Gemini's free tier works).",
-            )
-            self._set_assistant_busy(False)
-            return
-        self._set_assistant_busy(True)
-        summary = summarize_dataset(self.dataset)
-        sys_prompt = build_system_prompt(APP_HELP_TEXT, summary)
-        if self.assistant_linear_check.isChecked():
-            sys_prompt += "\n\nWork through the problem step by step before answering."
-        messages = [
-            {"role": "system", "content": sys_prompt}
-        ] + list(self._assistant_messages)
-        self.assistant_worker = AssistantWorker(
-            "", messages, tools=self._assistant_tools(), parent=self,
-            config=self.config,
-        )
-        self.assistant_worker.answer_ready.connect(self.on_assistant_answer)
-        self.assistant_worker.tool_requested.connect(self.on_assistant_tool)
-        self.assistant_worker.failed.connect(self.on_assistant_error)
-        self.assistant_worker.start()
-
-    def on_assistant_answer(self, answer):
-        self._set_assistant_busy(False)
-        self.assistant_history.append(f"<b>AI:</b><br>{html.escape(answer)}<hr>")
-        self._assistant_messages.append({"role": "assistant", "content": answer})
-        self._save_assistant_context()
-
-    def on_assistant_tool(self, name, args_json, call_id):
-        try:
-            args = json.loads(args_json or "{}")
-        except Exception:  # noqa: BLE001
-            args = {}
-        result = self.execute_assistant_tool(name, args)
-        self.assistant_history.append(
-            f"<i>⚙ tool: {html.escape(name)} → {html.escape(result[:200])}</i>"
-        )
-        self._assistant_messages.append({
-            "role": "assistant", "content": None,
-            "tool_calls": [{"id": call_id, "type": "function",
-                            "function": {"name": name, "arguments": args_json or "{}"}}],
-        })
-        self._assistant_messages.append({
-            "role": "tool", "tool_call_id": call_id, "content": result,
-        })
-        self._save_assistant_context()
-        self._start_assistant()
-
-    def execute_assistant_tool(self, name, args):
-        try:
-            if name == "get_dataset_summary":
-                return summarize_dataset(self.dataset) or "(dataset empty)"
-            if name == "list_tracks":
-                lines = []
-                for i, s in enumerate(self.dataset.get("samples", []), start=1):
-                    cap = (s.get("caption") or "").strip().replace("\n", " ")[:80]
-                    lines.append(f"{i}. {s.get('filename', '?')} — {cap or '(no caption)'}")
-                return "\n".join(lines) or "(no tracks)"
-            if name == "lookup_instruments":
-                from modules.instruments_db import lookup_instruments
-                found = lookup_instruments(args.get("filename", ""))
-                return ", ".join(found) if found else "(no match)"
-            if name == "validate_manifest":
-                from modules.manifest_validation import validate_manifest
-                issues = validate_manifest(self.dataset)
-                return "\n".join(issues) if issues else "Manifest is valid."
-            if name == "scan_health":
-                # The health audit was removed (can be re-added later as a module).
-                return (
-                    "The health audit (Scan & Fill) is not available in this build — "
-                    "it was removed and can be re-added later as a module."
-                )
-            if name == "detect_instruments":
-                # Instrument detection runs through the Structural pipeline
-                # (workers/tagger.py). There is no standalone trigger on the
-                # live DatasetManager, so point the user at the real control
-                # instead of claiming detection already started.
-                return (
-                    "Instrument detection runs as part of the Structural pipeline. "
-                    "Select a track and run 'Structural' (or use Detect via Captioner) "
-                    "to populate instrument tags."
-                )
-            if name == "get_dataset_sound_profile":
-                return build_sound_profile(self.dataset)
-            if name == "curate_dataset":
-                target = (args.get("target_sound") or "").strip()
-                if not target:
-                    return "Provide a target_sound (artist/genre/mood) to curate toward."
-                return (
-                    f"TARGET SOUND: {target}\n\n"
-                    f"CURRENT DATASET SOUND PROFILE:\n{build_sound_profile(self.dataset)}\n\n"
-                    "Suggest specific songs/artists/genres to add, and which gaps to fill "
-                    "(instruments, tempo, key, era) so the dataset converges on the target sound."
-                )
-            # --- Action tools: things the assistant does, not just reports ---
-            if name in ("set_track_metadata", "write_caption", "import_lyrics",
-                        "find_gaps", "create_virtual_dataset",
-                        "normalize_audio", "stage_temp_mp3"):
-                return self._run_assistant_action(name, args)
-            return f"Unknown tool: {name}"
-        except Exception as e:  # noqa: BLE001
-            return f"Tool error: {e}"
-
-    def _run_assistant_action(self, name, args):
-        """Execute an assistant action tool.
-
-        Two invariants live here, because neither can be enforced once the model
-        has made its choice:
-
-          * **Snapshot only after validation passes.** Pushing a snapshot before
-            refusing an action would put a no-op entry on the undo stack and
-            teach the user to distrust undo.
-          * **Refresh after every write.** The grid would otherwise still show
-            the pre-tool values while the model talks about the new ones.
-        """
-        from modules import assistant_actions as acts
-
-        if name == "find_gaps":
-            return acts.find_gaps(self.dataset)
-
-        if name == "stage_temp_mp3":
-            return self._stage_temp_mp3_plan(args)
-
-        if name == "normalize_audio":
-            return self._start_assistant_normalize(args)
-
-        if name not in ("set_track_metadata", "write_caption", "import_lyrics",
-                        "create_virtual_dataset"):
-            return f"Unknown tool: {name}"
-
-        if name == "create_virtual_dataset":
-            specs = args.get("tracks") or []
-            if not isinstance(specs, list) or not specs:
-                return "Refused: no tracks specified."
-            self.record_snapshot()
-            out = acts.create_virtual_dataset(
-                self.dataset, specs, (args.get("name") or "").strip()
-            )
-        else:
-            if name == "set_track_metadata":
-                field = args.get("field")
-                text = args.get("value")
-            elif name == "write_caption":
-                field, text = "caption", args.get("caption")
-            else:  # import_lyrics — a dedicated path, not a single-field write
-                field, text = "lyrics", args.get("lyrics")
-            if name == "set_track_metadata" and field not in acts.WRITABLE_FIELDS:
-                return f"Refused: '{field}' is not a field the assistant may write."
-            if name != "set_track_metadata" and not str(text or "").strip():
-                return f"Refused: '{field}' was empty."
-            indices, _unresolved = acts.resolve_indices(
-                self.dataset, args.get("tracks")
-            )
-            if not indices:
-                return f"No tracks matched {args.get('tracks')!r}."
-            self.record_snapshot()
-            if name == "import_lyrics":
-                # Three fields at once, plus clearing an instrumental flag —
-                # a single-field write would leave the track contradictory.
-                out = acts.import_lyrics(self.dataset, args.get("tracks"), text)
-            else:
-                out = acts.set_field_many(
-                    self.dataset, args.get("tracks"), field, text
-                )
-
-        self.refresh_table()
-        self.on_table_selection_changed()
-        return out
-
-    def _resolve_action_tracks(self, args):
-        """Shared lookup for the two ffmpeg-facing tools."""
-        from modules import assistant_actions as acts
-
-        indices, unresolved = acts.resolve_indices(self.dataset, args.get("tracks"))
-        if not indices:
-            return [], [], f"No tracks matched {args.get('tracks')!r}."
-        samples = self.dataset.get("samples", [])
-        return [samples[i] for i in indices], unresolved, None
-
-    def _stage_temp_mp3_plan(self, args):
-        """Return the ffmpeg commands for a scratch-MP3 staging pass.
-
-        Planning instead of running: ffmpeg on a whole track would block the
-        GUI thread from inside a tool call. The commands are exact, so they can
-        be reviewed, replayed, or handed to a worker later.
-        """
-        from modules import assistant_actions as acts
-
-        target_dir = (args.get("target_dir") or "").strip()
-        if not target_dir:
-            return "Refused: target_dir is required."
-        bitrate = (args.get("bitrate") or "192k").strip()
-        samples, unresolved, err = self._resolve_action_tracks(args)
-        if err:
-            return err
-
-        lines = ["Staging plan (not executed):"]
-        for s in samples:
-            src = s.get("audio_path") or (s.get("filename") or "")
-            stem = Path(src).stem or "track"
-            dst = os.path.join(target_dir, f"{stem}.mp3")
-            lines.append("  " + " ".join(
-                acts.build_temp_mp3_command(src, dst, bitrate)
-            ))
-        lines.append(
-            "Scratch MP3s are for upload/staging only — training audio stays "
-            "lossless. Nothing was executed."
-        )
-        if unresolved:
-            lines.append(f"(not found: {', '.join(str(u) for u in unresolved)})")
-        return "\n".join(lines)
-
-    def _start_assistant_normalize(self, args):
-        """Kick off the same DspNormalizerWorker the 🎚 DSP Normalize button uses.
-
-        Deliberately dialog-free: the button's file-picker and confirmation
-        flow cannot run inside a tool call (the model has no way to answer a
-        modal), and blocking the GUI on ffmpeg would freeze it for the length of
-        a track. The assistant supplies the target directory explicitly.
-        """
-        target_dir = (args.get("target_dir") or "").strip()
-        if not target_dir:
-            return "Refused: target_dir is required."
-        samples, unresolved, err = self._resolve_action_tracks(args)
-        if err:
-            return err
-
-        usable = [s for s in samples
-                  if (s.get("audio_path") or "") and os.path.exists(s["audio_path"])]
-        if not usable:
-            return "No selected track has audio on disk to normalize."
-
-        lufs = float(args.get("target_lufs")
-                     or self.config.get("dsp_target_lufs", -14.0))
-        sr = int(args.get("target_sr") or self.config.get("dsp_target_sr", 44100))
-
-        os.makedirs(target_dir, exist_ok=True)
-        self.normalization_dataset_backup = json.loads(json.dumps(self.dataset))
-        self.record_snapshot()
-        if hasattr(self, "normalize_btn"):
-            self.normalize_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-
-        self.active_worker = DspNormalizerWorker(
-            usable, target_dir=target_dir, target_sr=sr, target_lufs=lufs,
-        )
-        self.active_worker.progress.connect(self.on_worker_progress)
-        self.active_worker.file_normalized.connect(self.on_file_normalized)
-        self.active_worker.all_done.connect(self.on_normalize_done)
-        self.active_worker.error_occurred.connect(self.on_worker_error)
-        self.active_worker.start()
-
-        lines = [
-            f"Started EBU R128 normalization of {len(usable)} track(s) at "
-            f"{lufs} LUFS / {sr} Hz.",
-            f"Output: {os.path.join(target_dir, 'normalized_audio')} — originals "
-            f"copied first to {os.path.join(target_dir, 'originals_backup')}.",
-            "Originals are never overwritten. Watch the progress bar; this job "
-            "is still running when this message returns.",
-        ]
-        if unresolved:
-            lines.append(f"(not found: {', '.join(str(u) for u in unresolved)})")
-        return "\n".join(lines)
-
-    def on_assistant_error(self, err):
-        self._set_assistant_busy(False)
-        self.assistant_status.setText(f"Error: {err}")
-        QMessageBox.warning(self, "AI Assistant", str(err))
 
     # -----------------------------------------------------------------------
     # Tag Manager Tab
@@ -3027,7 +2617,7 @@ class DatasetManager(QMainWindow):
             ("Structure", pages["structure"]),
             ("Tags && checks", tags_page),
         ]
-        install_shell(self, parts, tool_pages, pages["assistant"], pages["settings"])
+        install_shell(self, parts, tool_pages, pages["settings"])
         # Named, not numbered. These used to be hardcoded indices compared in
         # _on_tab_changed, so inserting or reordering a page silently pointed the
         # hook at the wrong tab — no exception, just the wrong panel refreshing.
@@ -3936,7 +3526,7 @@ class DatasetManager(QMainWindow):
         key, ok = QInputDialog.getText(
             self, f"{info['label']} API key",
             f"Enter your {info['label']} API key.{hint}\n"
-            "Change provider in the Assistant panel or ⚙ Settings.",
+            "Change provider in ⚙ Settings.",
             QLineEdit.Password,
         )
         if not (ok and key.strip()):
@@ -4133,14 +3723,11 @@ class DatasetManager(QMainWindow):
         key_field, rem_field = LLM_KEY_FIELDS.get(active, ("groq_key", "remember_groq_key"))
         self.config[key_field] = self.llm_api_key.text().strip()
         self.config[rem_field] = self.remember_llm_api.isChecked()
-        # Per-role LLM overrides (aggregator / captioner / assistant).
-        for role in ("aggregator", "captioner", "assistant"):
+        # Per-role LLM overrides (aggregator / captioner).
+        for role in ("aggregator", "captioner"):
             prov = self.role_provider_combo[role].currentText()
             self.config[f"llm_provider_{role}"] = "" if prov == "default (global)" else prov
             self.config[f"llm_model_{role}"] = self.role_model_combo[role].currentText().strip()
-        if hasattr(self, "assistant_remember_check"):
-            self.config["assistant_remember"] = self.assistant_remember_check.isChecked()
-            self.config["assistant_linear_thinking"] = self.assistant_linear_check.isChecked()
         remember = self._remembered_secret_keys()
         try:
             save_config(self.config, remember=remember)

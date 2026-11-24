@@ -5,9 +5,9 @@ and sane values) and returns a list of human-readable issues.
 
 The field lists live in ``modules/dataset_schema.py`` so the schema has a single
 source of truth shared with the app's own dataset construction. Caption TEXT is
-checked against the annotation standard in ``modules/caption_quality.py``.
+presence-checked only: its wording is judged by a human or an LLM, not by a
+script (see ``modules/caption_quality.py`` for why that rule was retired).
 """
-from modules.caption_quality import check_caption
 from modules.dataset_schema import (
     REQUIRED_METADATA_FIELDS as REQUIRED_META_FIELDS,
     REQUIRED_SAMPLE_FIELDS,
@@ -35,14 +35,8 @@ def validate_manifest(dataset):
                 issues.append(f"sample {i} missing '{field}'")
         if s.get("is_instrumental") and (s.get("lyrics") or s.get("formatted_lyrics")):
             issues.append(f"sample {i} is instrumental but has lyrics")
-        caption = (s.get("caption") or "").strip()
-        if not caption:
+        if not (s.get("caption") or "").strip():
             issues.append(f"sample {i} has no caption")
-        else:
-            # ACE-Step 1.5XL caption schema (front-loaded tags, vocal descriptor,
-            # no BPM/key/time-signature, no headings, no decoding loops).
-            for issue in check_caption(caption):
-                issues.append(f"sample {i} caption: {issue}")
         bpm = s.get("bpm")
         if bpm and not (0 < bpm <= 300):
             issues.append(f"sample {i} BPM out of range: {bpm}")

@@ -18,22 +18,34 @@ placeholder and shows up only as a row with no ``filename`` and no ``audio_path`
 is exactly what these tests pin in both directions: quiet on a project file,
 loud on a manifest that leaked a row.
 """
-from modules.caption_spec import GOLD_EXAMPLE
 from modules.dataset_schema import new_dataset, new_sample
 from modules.manifest_validation import validate_manifest
+
+# Wording is not machine-scored any more; this is the shape upstream's own LoRA
+# tutorial uses for a caption.
+PROSE_CAPTION = "A high-energy J-pop track with synthesizer leads and fast tempo."
 
 
 def _valid_dataset():
     ds = new_dataset(name="valid")
     ds["samples"] = [new_sample(
         id="aaa111", filename="a.mp3", audio_path="./a.mp3", genre="Rock",
-        caption=GOLD_EXAMPLE,
+        caption=PROSE_CAPTION,
     )]
     return ds
 
 
 def _issues(ds):
     return [i for i in validate_manifest(ds)]
+
+
+def test_a_prose_caption_is_not_flagged():
+    """Caption wording is judged by a human/LLM, never by this validator.
+
+    Regression: a dense-tag schema imported from the song-generation prompt used
+    to reject a perfectly good descriptive caption at export time.
+    """
+    assert _issues(_valid_dataset()) == []
 
 
 def test_a_complete_dataset_has_no_issues():
@@ -59,9 +71,9 @@ def test_a_project_file_placeholder_is_not_flagged():
     ds = new_dataset(name="project_file")
     ds["samples"] = [
         new_sample(id="aaa111", filename="a.mp3", audio_path="./a.mp3", genre="Rock",
-                   caption=GOLD_EXAMPLE),
+                   caption=PROSE_CAPTION),
         new_sample(id="bbb222", filename="virtual_01_doom.wav", genre="Doom",
-                   caption=GOLD_EXAMPLE, virtual=True),
+                   caption=PROSE_CAPTION, virtual=True),
     ]
     assert not [i for i in _issues(ds) if "no filename or audio_path" in i]
 
