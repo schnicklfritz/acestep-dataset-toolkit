@@ -748,16 +748,13 @@ class DatasetManager(QMainWindow):
         )
         parts["lyrics_limit"] = self.lyrics_limit_label
 
-        try:
-            self.media_player = QMediaPlayer(self)
-            self.audio_output = QAudioOutput(self)
-            self.media_player.setAudioOutput(self.audio_output)
-            self.audio_output.setVolume(0.7)
-            self.media_player.positionChanged.connect(self._on_player_position)
-            self.media_player.mediaStatusChanged.connect(self._on_player_status)
-        except Exception as e:  # noqa: BLE001 — playback is best-effort
-            print(f"media player unavailable: {e}")
-            self.media_player = None
+        # Playback is created lazily by _ensure_player(). Building a
+        # QAudioOutput makes Qt enumerate audio devices; with no reachable
+        # audio server (headless test run, plain SSH session) that call blocks
+        # inside PipeWire rather than raising, so the try/except below would
+        # never run and startup would hang before any window appeared.
+        self.media_player = None
+        self.audio_output = None
 
         # --- Filter / search bar ---
         filter_bar = QHBoxLayout()
@@ -2547,7 +2544,7 @@ class DatasetManager(QMainWindow):
         self.assistant_history.setHtml(
             "<b>🤖 AI Assistant</b><br>Ask about the app or your dataset. The "
             "assistant can run tools against it: dataset summary, sound profile, "
-            "<b>curate for a target sound</b>, caption audit, manifest validation, "
+            "<b>curate for a target sound</b>, manifest validation, "
             "health scan, instrument detection.<hr>"
         )
         layout.addWidget(self.assistant_history, 1)
@@ -2727,9 +2724,6 @@ class DatasetManager(QMainWindow):
                 from modules.instruments_db import lookup_instruments
                 found = lookup_instruments(args.get("filename", ""))
                 return ", ".join(found) if found else "(no match)"
-            if name == "audit_captions":
-                from modules.caption_audit import audit_captions
-                return "\n".join(audit_captions(self.dataset))
             if name == "validate_manifest":
                 from modules.manifest_validation import validate_manifest
                 issues = validate_manifest(self.dataset)
@@ -2832,29 +2826,10 @@ class DatasetManager(QMainWindow):
                 out = acts.set_field_many(
                     self.dataset, args.get("tracks"), field, text
                 )
-                if name == "write_caption":
-                    out = self._caption_review(out, text)
 
         self.refresh_table()
         self.on_table_selection_changed()
         return out
-
-    def _caption_review(self, written, caption):
-        """Tell the model what is wrong with the caption it just wrote.
-
-        Writing and validating in the same call is deliberate: it turns a
-        silently-invalid caption into an immediate, self-correcting round trip
-        instead of something the user only finds during export.
-        """
-        try:
-            from modules.caption_quality import check_caption
-
-            issues = list(check_caption(caption))
-        except Exception as e:  # noqa: BLE001 — review must never break the write
-            return f"{written}\n(caption review unavailable: {e})"
-        if not issues:
-            return f"{written}\nSchema: conforms to the ACE-Step caption rules."
-        return written + "\nSchema issues:\n" + "\n".join(f"- {i}" for i in issues)
 
     def _resolve_action_tracks(self, args):
         """Shared lookup for the two ffmpeg-facing tools."""
@@ -4865,6 +4840,28 @@ class DatasetManager(QMainWindow):
             self.track_tag_input.blockSignals(False)
             self.inst_check.blockSignals(False)
 
+    def _ensure_player(self):
+        """Create the media player on first real use; return it or None.
+
+        Must stay out of __init__: QAudioOutput construction probes the audio
+        server, and without one (headless pytest, SSH-only session) it blocks
+        the calling thread indefinitely instead of raising.
+        """
+        if self.media_player is not None:
+            return self.media_player
+        try:
+            self.media_player = QMediaPlayer(self)
+            self.audio_output = QAudioOutput(self)
+            self.media_player.setAudioOutput(self.audio_output)
+            self.audio_output.setVolume(0.7)
+            self.media_player.positionChanged.connect(self._on_player_position)
+            self.media_player.mediaStatusChanged.connect(self._on_player_status)
+        except Exception as e:  # noqa: BLE001 — playback is best-effort
+            print(f"media player unavailable: {e}")
+            self.media_player = None
+            self.audio_output = None
+        return self.media_player
+
     def _load_track_preview(self, sample):
         path = sample.get("audio_path", "") if sample else ""
         valid = bool(path) and os.path.exists(path)
@@ -4879,7 +4876,7 @@ class DatasetManager(QMainWindow):
                 self.waveform.set_position_frac(0.0)
 
     def toggle_track_playback(self):
-        if self.media_player is None:
+        if self._ensure_player() is None:
             return
         if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.media_player.pause()
@@ -7142,7 +7139,7 @@ class DatasetManager(QMainWindow):
         lay.addLayout(row)
 
         def play():
-            if self.media_player is None:
+            if self._ensure_player() is None:
                 return
             sel = combo.currentText()
             path = sample.get("audio_path", "") if sel == "Full Mix" else stems.get(sel.replace("Stem: ", ""), "")
