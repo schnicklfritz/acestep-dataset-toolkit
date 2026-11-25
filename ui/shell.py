@@ -36,6 +36,17 @@ class FlowLayout(QLayout):
         super().__init__(parent)
         self._items = []
         self._spacing = spacing
+        # Re-entrancy guard. heightForWidth() and setGeometry() both call
+        # _do_layout(), and the real pass moves children; a child resize
+        # invalidates the parent, which asks for heightForWidth again — from
+        # inside the pass that is still running. Unguarded that recurses
+        # forever (a stylesheet polish walks every widget in the process, so it
+        # fires on every theme change). Nested calls get the height already
+        # computed instead.
+        # Deliberately NOT a cache: a cache is only safe once invalidate()
+        # reliably fires on every child change, which is a separate bug.
+        self._laying_out = False
+        self._last_height = 0
         self.setContentsMargins(0, 0, 0, 0)
 
     def addItem(self, item):
@@ -57,11 +68,26 @@ class FlowLayout(QLayout):
         return True
 
     def heightForWidth(self, width):
-        return self._do_layout(QRect(0, 0, width, 0), True)
+        if self._laying_out:
+            return self._last_height
+        self._laying_out = True
+        try:
+            self._last_height = self._do_layout(QRect(0, 0, width, 0), True)
+        finally:
+            self._laying_out = False
+        return self._last_height
 
     def setGeometry(self, rect):
         super().setGeometry(rect)
-        self._do_layout(rect, False)
+        if self._laying_out:
+            # A child resize from our own pass re-entered us; the pass in
+            # flight owns the geometry, so there is nothing left to do.
+            return
+        self._laying_out = True
+        try:
+            self._last_height = self._do_layout(rect, False)
+        finally:
+            self._laying_out = False
 
     def sizeHint(self):
         return self.minimumSize()

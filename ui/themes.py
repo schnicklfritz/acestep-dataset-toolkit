@@ -369,9 +369,18 @@ def apply_theme(app, config):
     process. That is correct at startup and for a one-off change, but it is what
     makes a live Appearance/zoom control freeze the GUI thread for seconds (see
     ``apply_theme_to``). Prefer this only when new top-level windows may appear.
+
+    The repolish is only paid when the sheet actually CHANGES. Qt re-polishes
+    every widget in the process even when handed an identical string, including
+    windows this call has nothing to do with — a second window in the same
+    process, test fixtures that still hold an earlier one. Measured: constructing
+    a second DatasetManager with the same theme took 26 s instead of 7 s, and the
+    cost grew with every manager left alive (7 / 26 / 35 / 46 s).
     """
     _name, p = resolve_palette(config)
-    app.setStyleSheet(_stylesheet(config))
+    sheet = _stylesheet(config)
+    if app.styleSheet() != sheet:
+        app.setStyleSheet(sheet)
     app.setPalette(_qpalette(p))
     return _name, p
 
