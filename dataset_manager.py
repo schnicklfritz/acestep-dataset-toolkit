@@ -981,8 +981,6 @@ class DatasetManager(QMainWindow):
         self.lyrics_capitalizer_btn.clicked.connect(self.open_lyric_capitalizer)
         self.lyrics_export_lrc_btn.clicked.connect(
             self.export_selected_lyrics_lrc)
-        self.lyrics_align_kaggle_btn.clicked.connect(
-            self.align_selected_lyrics_kaggle)
         self.lyrics_add_row_btn.clicked.connect(self._lyrics_add_contract_row)
         self.lyrics_del_row_btn.clicked.connect(self._lyrics_remove_contract_row)
         self.lyrics_reset_btn.clicked.connect(self._lyrics_reset_contracts)
@@ -6499,98 +6497,6 @@ class DatasetManager(QMainWindow):
             return
         export_lrc(text.strip(), sample.get("lyrics_segments") or [], path)
         self.status_label.setText(f"Lyrics exported to {Path(path).name}.")
-
-    # ------------------------------------------------------------------
-    # Word-level alignment (Kaggle MMS_FA)
-    # ------------------------------------------------------------------
-
-    def align_selected_lyrics_kaggle(self):
-        """Force-align the selected track's lyrics on a Kaggle GPU.
-
-        One push does two things at once, because both come from the same
-        alignment: it writes ``lyrics_segments`` (the line starts ``export_lrc``
-        needs, until now never populated) and a lyrics text whose SHOUTED words
-        are UPPERCASE — the classifier's 90-95% recall target.
-
-        The upload is real (the audio goes to a private Kaggle dataset), so this
-        refuses early rather than half-way: no track, no audio, no lyrics, or a
-        job already running all return without touching the network.
-        """
-        sample = self.get_selected_sample()
-        if not sample:
-            QMessageBox.warning(self, "No Track Selected", "Select a track first.")
-            return
-        audio = sample.get("audio_path") or ""
-        if not audio or not os.path.exists(audio):
-            QMessageBox.warning(
-                self, "Audio Missing", "This track's audio file was not found.")
-            return
-        text = sample.get("formatted_lyrics") or sample.get("lyrics") or ""
-        if not text.strip():
-            QMessageBox.information(
-                self, "No Lyrics", "This track has no lyrics to align yet.")
-            return
-        running = getattr(self, "_align_worker", None)
-        if running is not None and running.isRunning():
-            QMessageBox.information(
-                self, "Alignment Running", "An alignment job is already running.")
-            return
-
-        from workers.kaggle_alignment import KaggleAlignmentWorker
-
-        worker = KaggleAlignmentWorker(
-            audio, text, config=self.config, parent=self)
-        self._align_worker = worker
-        worker.progress.connect(self.on_worker_progress)
-        worker.failed.connect(self._on_alignment_failed)
-        # Bind the sample now: the selection may move while the GPU job runs,
-        # and the timings belong to the track that was aligned.
-        worker.finished_ok.connect(
-            lambda result, s=sample: self._on_alignment_done(s, result))
-        worker.finished.connect(self._on_alignment_finished)
-        self.lyrics_align_kaggle_btn.setEnabled(False)
-        self.status_label.setText("Aligning lyrics on a Kaggle GPU...")
-        worker.start()
-
-    def _on_alignment_done(self, sample, result):
-        """Store the timings and the shout-cased lyrics as ONE undo step."""
-        segments = []
-        for segment in result.get("segments") or []:
-            try:
-                start = float(segment.get("start"))
-            except (TypeError, ValueError):
-                continue
-            text = str(segment.get("text") or "").strip()
-            if text:
-                segments.append({"start": start, "text": text})
-        if not segments:
-            QMessageBox.warning(
-                self, "Alignment Empty",
-                "The job returned no aligned lyric lines; nothing was written.")
-            return
-
-        self.record_snapshot()
-        sample["lyrics_segments"] = segments
-        # The kernel's text differs from the input only in capitalization, so
-        # writing it back is what makes the shout marks visible in the field and
-        # in every export. Both lyric fields are kept in step, as every other
-        # writer in the app does (see modules.dataset_schema.lyrics_source).
-        aligned = (result.get("lyrics") or "").strip()
-        if aligned:
-            sample["formatted_lyrics"] = aligned
-            sample["lyrics"] = aligned
-        self.refresh_table()
-        ratio = float(result.get("shout_ratio") or 0.0)
-        self.status_label.setText(
-            f"Aligned {len(segments)} line(s) — {ratio:.0%} of words shouted.")
-
-    def _on_alignment_failed(self, message):
-        self.status_label.setText("Word alignment failed.")
-        QMessageBox.warning(self, "Alignment Failed", message)
-
-    def _on_alignment_finished(self):
-        self.lyrics_align_kaggle_btn.setEnabled(True)
-        self._align_worker = None
 
     def open_ab_captions(self):
         sample = self.get_selected_sample()

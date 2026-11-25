@@ -216,18 +216,11 @@ def build_lyrics_tab(manager, parent):
         "Save the selected track's lyrics as an .lrc file (with its word "
         "timings when the track has them)."
     )
-    manager.lyrics_align_kaggle_btn = QPushButton("⏱ Align words (Kaggle)")
-    manager.lyrics_align_kaggle_btn.setToolTip(
-        "GPU forced alignment (MMS_FA): gives every lyric line a timestamp and "
-        "capitalizes the words that were shouted. Writes the word timings that "
-        "Export .lrc reads. Uploads the track to a private Kaggle dataset."
-    )
     preview_row.addWidget(manager.lyrics_preview_btn)
     preview_row.addWidget(manager.lyrics_apply_btn)
     preview_row.addWidget(manager.lyrics_manual_edit_btn)
     preview_row.addWidget(manager.lyrics_capitalizer_btn)
     preview_row.addWidget(manager.lyrics_export_lrc_btn)
-    preview_row.addWidget(manager.lyrics_align_kaggle_btn)
     preview_row.addStretch()
     p_layout.addLayout(preview_row)
     layout.addWidget(preview)
