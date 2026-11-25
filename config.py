@@ -135,7 +135,7 @@ DEFAULT_CONFIG = {
     "dsp_target_lufs": -14.0,
     "dsp_target_sr": 44100,
     # ---- Lyrics transcription ----
-    "lyrics_engine": "kaggle",   # kaggle (default, GPU) | whisperx | gemini | acestep_transcriber (experimental)
+    "lyrics_engine": "whisperx",   # whisperx (local, default) | gemini
     "lyrics_language": "",            # empty = auto-detect
     "lyrics_initial_prompt": "",      # e.g. "1970s hard rock by Black Sabbath"
     # ---- Caption backend (pluggable providers) ----

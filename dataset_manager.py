@@ -603,12 +603,10 @@ class DatasetManager(QMainWindow):
         self.lyrics_engine_combo = QComboBox()
         self.lyrics_engine_combo.addItems([
             "whisperx (local)",
-            "kaggle (default, gpu)",
             "gemini",
-            "acestep-transcriber (experimental)"
         ])
         saved_engine = self.config.get("lyrics_engine", "whisperx")
-        engine_map = {"whisperx": 0, "kaggle": 1, "gemini": 2, "acestep_transcriber": 3}
+        engine_map = {"whisperx": 0, "gemini": 1}
         self.lyrics_engine_combo.setCurrentIndex(engine_map.get(saved_engine, 0))
         self.lyrics_engine_combo.currentTextChanged.connect(self.save_pipeline_defaults)
         lyrics_strip.addWidget(self.lyrics_engine_combo)
@@ -3802,11 +3800,9 @@ class DatasetManager(QMainWindow):
         self.config["dsp_target_sr"] = self.sr_spin.value()
         if hasattr(self, "lyrics_engine_combo"):
             self.config["lyrics_engine"] = {
-                "kaggle (default, gpu)": "kaggle",
                 "whisperx (local)": "whisperx",
                 "gemini": "gemini",
-                "acestep-transcriber (experimental)": "acestep_transcriber",
-            }.get(self.lyrics_engine_combo.currentText(), "kaggle")
+            }.get(self.lyrics_engine_combo.currentText(), "whisperx")
             self.config["lyrics_language"] = self.lyrics_language_edit.text().strip()
             self.config["lyrics_initial_prompt"] = self.lyrics_prompt_edit.text().strip()
         try:
@@ -5746,11 +5742,6 @@ class DatasetManager(QMainWindow):
         # ⚙️ SYSTEM DEFENSE MAPPING: Translate any legacy keys on-the-fly to prevent unhandled branches
         if raw_engine in ("whisperx", "local_whisperx", ""):
             engine = "local_whisperx"
-        elif "kaggle" in raw_engine or "acestep" in raw_engine:
-            if "acestep" in raw_engine:
-                engine = "kaggle_acestep"
-            else:
-                engine = "kaggle_whisperx"
         elif "gemini" in raw_engine:
             engine = "gemini_api"
         else:
@@ -5774,7 +5765,7 @@ class DatasetManager(QMainWindow):
                     self, "WhisperX Required",
                     "WhisperX is not installed locally on this machine.\n\n"
                     "Run: pip install whisperx\n\n"
-                    "Or switch the backend choice in ⚙ Settings to a Kaggle or Gemini option.",
+                    "Or switch the engine in ⚙ Settings to Gemini.",
                 )
                 self.transcribe_btn.setEnabled(True)
                 return
@@ -5782,15 +5773,6 @@ class DatasetManager(QMainWindow):
             self.lyrics_worker = TranscribeLyricsWorker(
                 audio_path, engine="whisperx", language=language, 
                 initial_prompt=initial_prompt, config=self.config, parent=self
-            )
-            
-        elif engine in ("kaggle_whisperx", "kaggle_acestep"):
-            # Pipes execution directly out to your isolated dual-engine file module
-            from workers.kaggle_lyrics import KaggleLyricsWorker
-            target_mode = "whisperx" if engine == "kaggle_whisperx" else "acestep"
-            self.lyrics_worker = KaggleLyricsWorker(
-                audio_path, language=language, initial_prompt=initial_prompt, 
-                config=self.config, mode=target_mode
             )
             
         elif engine == "gemini_api":

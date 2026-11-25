@@ -200,7 +200,6 @@ def test_the_preflight_fails_on_a_bad_slug_alone(monkeypatch):
 
 @pytest.mark.parametrize("path", [
     "workers/caption.py",           # ACE-Step captioner
-    "workers/kaggle_lyrics.py",     # Kaggle lyrics
     "workers/kaggle_stems.py",      # Demucs stems
     "workers/structure.py",         # SongFormer structure
     "workers/structural.py",        # section captioning

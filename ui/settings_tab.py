@@ -321,14 +321,14 @@ def build_settings_tab(manager, parent):
     lf.setContentsMargins(8, 18, 8, 8)
     manager.lyrics_engine_combo = QComboBox()
     manager.lyrics_engine_combo.addItems([
-        "kaggle (default, GPU)", "whisperx (local)", "gemini", "acestep-transcriber (experimental)",
+        "whisperx (local)", "gemini",
     ])
-    cur_eng = str(manager.config.get("lyrics_engine", "kaggle") or "kaggle").lower()
+    cur_eng = str(manager.config.get("lyrics_engine", "whisperx") or "whisperx").lower()
     for i in range(manager.lyrics_engine_combo.count()):
         if manager.lyrics_engine_combo.itemText(i).lower().startswith(cur_eng):
             manager.lyrics_engine_combo.setCurrentIndex(i)
             break
-    manager.lyrics_engine_combo.setToolTip("Which engine transcribes lyrics. Gemini uses the audio-native Gemini backend; ace-step-transcriber is experimental.")
+    manager.lyrics_engine_combo.setToolTip("Which engine transcribes lyrics: WhisperX on this machine, or the audio-native Gemini backend.")
     lf.addRow("Engine:", manager.lyrics_engine_combo)
     manager.lyrics_language_edit = QLineEdit(manager.config.get("lyrics_language", ""))
     manager.lyrics_language_edit.setPlaceholderText("e.g. en (empty = auto-detect)")
