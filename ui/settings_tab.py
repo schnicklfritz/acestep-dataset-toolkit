@@ -276,16 +276,6 @@ def build_settings_tab(manager, parent):
     )
     p_form.addRow("Structure Backend:", manager.structure_backend_combo)
 
-    manager.stem_model_combo = QComboBox()
-    manager.stem_model_combo.setToolTip("Demucs model for Kaggle stem separation (htdemucs_6s adds guitar + piano).")
-    manager.stem_model_combo.addItems(["htdemucs", "htdemucs_ft", "htdemucs_6s", "mdx_extra"])
-    cur_stem = manager.config.get("kaggle_stem_model", "htdemucs_ft")
-    for i in range(manager.stem_model_combo.count()):
-        if manager.stem_model_combo.itemText(i) == cur_stem:
-            manager.stem_model_combo.setCurrentIndex(i)
-            break
-    p_form.addRow("Kaggle Stem Model:", manager.stem_model_combo)
-
     stem_out_row = QHBoxLayout()
     manager.stem_out_edit = QLineEdit(manager.config.get("stem_output_dir", ""))
     manager.stem_out_edit.setToolTip("Folder where separated stems are written (empty = default ~/mvsep_stems).")

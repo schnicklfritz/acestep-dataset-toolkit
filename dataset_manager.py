@@ -3038,7 +3038,7 @@ class DatasetManager(QMainWindow):
         stem_layout = QHBoxLayout()
         stem_layout.addWidget(QLabel("Stem source:"))
         self.struct_stem_combo = QComboBox()
-        self.struct_stem_combo.addItems(["Import existing stems", "Separate via MVSEP", "Separate via Kaggle (Demucs)"])
+        self.struct_stem_combo.addItems(["Import existing stems", "Separate via MVSEP"])
         stem_layout.addWidget(self.struct_stem_combo)
         self.mvsep_gui_button = QPushButton(
             "🎛 Configure / Test MVSEP"
@@ -3291,7 +3291,7 @@ class DatasetManager(QMainWindow):
                 stem_options['instrument_models'] = models
 
         options = {
-            "stem_source": ("kaggle_demucs" if stem_source == "Separate via Kaggle (Demucs)" else ("mvsep" if stem_source == "Separate via MVSEP" else "import")),
+            "stem_source": ("mvsep" if stem_source == "Separate via MVSEP" else "import"),
             "use_deepseek": self.struct_deepseek_check.isChecked(),
             "use_lyrics": self.struct_seg_combo.currentText() == "Lyrics tags",
             "humanize": humanize,
@@ -3792,7 +3792,6 @@ class DatasetManager(QMainWindow):
         self.config["structure_backend"] = (
             "songformer" if self.structure_backend_combo.currentIndex() == 1 else "librosa"
         )
-        self.config["kaggle_stem_model"] = self.stem_model_combo.currentText()
         self.config["stem_output_dir"] = self.stem_out_edit.text().strip()
         self.config["dsp_target_lufs"] = self.lufs_spin.value()
         self.config["dsp_target_sr"] = self.sr_spin.value()

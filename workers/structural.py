@@ -43,9 +43,6 @@ class StructuralPipelineWorker(QThread):
             if source == 'mvsep':
                 self.progress.emit(15, "Calling MVSEP API for stem separation...")
                 stem_paths = self._call_mvsep(self.file_path)
-            elif source == 'kaggle_demucs':
-                self.progress.emit(15, "Running Kaggle Demucs stem separation...")
-                stem_paths = self._call_kaggle_stems(self.file_path)
             else:
                 self.progress.emit(15, "Looking for imported stems...")
                 stem_paths = self._find_imported_stems(self.file_path)
@@ -134,20 +131,6 @@ class StructuralPipelineWorker(QThread):
         method = 'polarformer+multi+instrument'
         stems = separator.separate(audio_path, method=method, options=stem_options)
         return stems
-
-    def _call_kaggle_stems(self, audio_path):
-        """Separate stems via Kaggle GPU Demucs and map files back to stem types."""
-        from workers.kaggle_stems import run_kaggle_stems
-
-        paths = run_kaggle_stems(
-            audio_path, self.config,
-            progress_cb=lambda p, m: self.progress.emit(p, m),
-        )
-        stem_paths = {}
-        for p in paths:
-            stem_type = os.path.basename(p).rsplit(".", 1)[0].split("__")[-1]
-            stem_paths[stem_type] = p
-        return stem_paths
 
     def _split_lead_backing(self, stem_paths):
         """Optional lead/backing vocal split (MVSEP model or experimental DSP)."""

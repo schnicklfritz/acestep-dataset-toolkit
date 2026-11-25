@@ -130,7 +130,6 @@ DEFAULT_CONFIG = {
     "segment_min_sec": 12.0,
     "segment_max_k": 20,
     "structure_backend": "librosa",   # librosa (default) | songformer (functional labels, Kaggle)
-    "kaggle_stem_model": "htdemucs_ft",
     "stem_output_dir": "",               # empty = default location
     "dsp_target_lufs": -14.0,
     "dsp_target_sr": 44100,
