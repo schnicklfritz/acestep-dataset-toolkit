@@ -108,7 +108,10 @@ def counter():
 
 
 def test_counter_reports_both_streams(counter, qapp):
-    text = counter().update()
+    # The "≈" marker is emitted when no tokenizer is installed, which is a
+    # property of the machine; test_counter_labels_estimated_numbers pins that
+    # separately. This test is about the two streams and their caps.
+    text = counter().update().replace("≈", "")
     assert "Lyrics 0 / 512 tokens" in text
     assert "Caption 0 / 256 tokens" in text
 
