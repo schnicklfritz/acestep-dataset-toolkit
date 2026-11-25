@@ -127,9 +127,6 @@ DEFAULT_CONFIG = {
     # rule engine's canned text, DeepSeek's filename-only draft) so a placeholder
     # can never be mistaken for a grounded caption. Off = no stamp.
     "caption_stamp_placeholders": True,
-    "segment_min_sec": 12.0,
-    "segment_max_k": 20,
-    "structure_backend": "librosa",   # librosa (default) | songformer (functional labels, Kaggle)
     "stem_output_dir": "",               # empty = default location
     "dsp_target_lufs": -14.0,
     "dsp_target_sr": 44100,

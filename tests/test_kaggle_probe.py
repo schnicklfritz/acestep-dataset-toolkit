@@ -200,8 +200,6 @@ def test_the_preflight_fails_on_a_bad_slug_alone(monkeypatch):
 
 @pytest.mark.parametrize("path", [
     "workers/caption.py",           # ACE-Step captioner
-    "workers/structure.py",         # SongFormer structure
-    "workers/structural.py",        # section captioning
 ])
 def test_every_kaggle_run_path_runs_the_preflight(path):
     with open(os.path.join(ROOT, path), encoding="utf-8") as fh:

@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import html
 import uuid
 import time
 import shutil
@@ -52,9 +51,6 @@ from ui.track_table import (
 
 # Modern worker implementations (split into workers/ modules).
 from workers.caption import RemoteCaptionWorker, resolve_backend
-from workers.structural import (
-    StructuralPipelineBatchWorker,
-)
 
 # --- NEW: extracted widgets/orchestrator (replaces inline class definitions below) ---
 from widgets import WaveformWidget, ScatterPlotWidget
@@ -200,7 +196,6 @@ class DatasetManager(QMainWindow):
 
         self.init_ui()
         self.apply_custom_theme()
-        self.refresh_band_profiles()
 
     # -----------------------------------------------------------------------
     # Undo / Redo
@@ -399,9 +394,6 @@ class DatasetManager(QMainWindow):
         advanced_tab = QWidget()
         self.init_advanced_tab(advanced_tab)
 
-        struct_tab = QWidget()
-        self.init_structural_tab(struct_tab)
-
         tag_tab = QWidget()
         self.init_tag_manager_tab(tag_tab)
 
@@ -415,15 +407,10 @@ class DatasetManager(QMainWindow):
         self.init_ace_step_tab(ace_step_tab)
 
         # --- Grouped tabs: keep the top level to a short, scannable list ----
-        # Pipelines (Structural / Advanced) share one tab with inner
-        # sub-tabs; Organize (Tag Manager / Embedding Map) likewise.
-        pipelines_tab = self._build_grouped_tab(
-            "Pipeline",
-            [
-                ("🎶 Structural", struct_tab),
-                ("🧠 Advanced", advanced_tab),
-            ],
-        )
+        # Organize (Tag Manager / Embedding Map) keeps its inner sub-tabs. The
+        # Structure page is the Advanced pipeline alone: the Kaggle "Structural"
+        # sub-tab it used to be grouped with was removed.
+        structure_page = advanced_tab
         organize_tab = self._build_grouped_tab(
             "Organize",
             [
@@ -448,7 +435,7 @@ class DatasetManager(QMainWindow):
 
         shell_pages = {
             "caption": caption_group_tab, "lyrics": lyrics_tab,
-            "structure": pipelines_tab, "organize": organize_tab,
+            "structure": structure_page, "organize": organize_tab,
             "settings": settings_tab,
         }
 
@@ -2984,521 +2971,6 @@ class DatasetManager(QMainWindow):
         layout.addStretch()
 
     # -----------------------------------------------------------------------
-    # Structural Pipeline Tab
-    # -----------------------------------------------------------------------
-    def init_structural_tab(self, parent):
-        layout = QVBoxLayout(parent)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        group = QGroupBox("🎶 Structural Pipeline (Standard)")
-        inner = QVBoxLayout(group)
-
-        info = QLabel(
-            "This pipeline separates stems (import or MVSEP), finds structural boundaries,\n"
-            "captions each section per stem, and aggregates via the configured LLM into a\n"
-            "master caption for the whole track."
-        )
-        info.setWordWrap(True)
-        info.setProperty("muted", True)
-        inner.addWidget(info)
-
-        # ---- Scope selection ----
-        scope_layout = QHBoxLayout()
-        scope_layout.addWidget(QLabel("Scope:"))
-        self.struct_scope_combo = QComboBox()
-        self.struct_scope_combo.addItems([
-            "All Tracks",
-            "Tracks Missing Captions",
-            "Selected Tracks (from list)"
-        ])
-        self.struct_scope_combo.currentTextChanged.connect(self.on_struct_scope_changed)
-        scope_layout.addWidget(self.struct_scope_combo)
-        inner.addLayout(scope_layout)
-
-         # ---- Track list (selectable, visible only when needed) ----
-        self.track_list_widget = QListWidget()
-        self.track_list_widget.setSelectionMode(QListWidget.ExtendedSelection)
-        self.track_list_widget.setMaximumHeight(100)
-        self.track_list_widget.setVisible(False)
-        inner.addWidget(self.track_list_widget)
-
-        # ---- Track number input (visible when scope is "Selected Tracks (from list)") ----
-        number_input_layout = QHBoxLayout()
-        number_input_layout.addWidget(QLabel("Track numbers (or select from list above):"))
-        self.track_numbers_input = QLineEdit()
-        self.track_numbers_input.setPlaceholderText("e.g., 1,3,5 or 1-3,5")
-        self.track_numbers_input.setVisible(False)
-        number_input_layout.addWidget(self.track_numbers_input)
-        inner.addLayout(number_input_layout)  
-
-        # ---- Populate list if dataset has tracks ----
-        self.refresh_track_list()
-
-        # Stem source
-        stem_layout = QHBoxLayout()
-        stem_layout.addWidget(QLabel("Stem source:"))
-        self.struct_stem_combo = QComboBox()
-        self.struct_stem_combo.addItems(["Import existing stems", "Separate via MVSEP"])
-        stem_layout.addWidget(self.struct_stem_combo)
-        self.mvsep_gui_button = QPushButton(
-            "🎛 Configure / Test MVSEP"
-        )
-        self.mvsep_gui_button.clicked.connect(self.open_mvsep_dialog)
-        inner.addWidget(self.mvsep_gui_button)
-        inner.addLayout(stem_layout)
-
-        # Segmentation source
-        seg_layout = QHBoxLayout()
-        seg_layout.addWidget(QLabel("Segmentation:"))
-        self.struct_seg_combo = QComboBox()
-        self.struct_seg_combo.addItems(["Lyrics tags", "MFCC agglomerative"])
-        self.struct_seg_combo.setToolTip("Lyrics tags are more accurate; MFCC is fallback.")
-        seg_layout.addWidget(self.struct_seg_combo)
-        inner.addLayout(seg_layout)
-
-        # Humanization preset
-        preset_layout = QHBoxLayout()
-        preset_layout.addWidget(QLabel("Humanization Preset:"))
-        self.humanize_preset_combo = QComboBox()
-        self.humanize_preset_combo.addItems([
-            "None",
-            "Hank Williams",
-            "Kurt Cobain",
-            "Jimi Hendrix",
-            "Janis Joplin",
-            "Bob Dylan",
-            "Pink Floyd (Gilmour)",
-            "Ozzy Osbourne"
-        ])
-        preset_layout.addWidget(self.humanize_preset_combo)
-        inner.addLayout(preset_layout)
-
-        self.humanize_check = QCheckBox("Apply humanization")
-        self.humanize_check.setChecked(True)
-        inner.addWidget(self.humanize_check)
-
-        # ---- Instrument extraction group ----
-        sep_group = QGroupBox("Instrument‑Specific Stem Extraction")
-        sep_layout2 = QVBoxLayout(sep_group)
-
-        self.instrument_extraction_check = QCheckBox("Enable instrument‑specific extraction (recommended)")
-        self.instrument_extraction_check.setChecked(True)
-        sep_layout2.addWidget(self.instrument_extraction_check)
-
-        disclaimer = QLabel(
-            "⚠️ Disclaimer: The song‑specific recommendation may not be perfect.\n"
-            "If instruments are not removed by the recommended options,\n"
-            "you must experiment with other models that may or may not be on the list."
-        )
-        disclaimer.setWordWrap(True)
-        disclaimer.setProperty("tone", "warning"); disclaimer.setProperty("small", True)
-        sep_layout2.addWidget(disclaimer)
-
-
-
-
-        model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("Additional models to run:"))
-        self.extra_models_input = QLineEdit()
-        self.extra_models_input.setPlaceholderText("e.g., MVSep Organ, MVSep Harpsichord")
-        model_layout.addWidget(self.extra_models_input)
-        sep_layout2.addLayout(model_layout)
-
-        note = QLabel("You can also manually type additional MVSEP model names above.")
-        note.setProperty("muted", True); note.setProperty("small", True)
-        sep_layout2.addWidget(note)
-
-        inner.addWidget(sep_group)
-
-        # Band profile
-        band_layout = QHBoxLayout()
-        band_layout.addWidget(QLabel("Band:"))
-        self.band_combo = QComboBox()
-        self.band_combo.addItem("None")
-        self.band_combo.currentTextChanged.connect(self.on_band_changed)
-        band_layout.addWidget(self.band_combo)
-
-        band_layout.addWidget(QLabel("Era:"))
-        self.era_combo = QComboBox()
-        self.era_combo.addItem("None")
-        band_layout.addWidget(self.era_combo)
-
-        band_layout.addWidget(QLabel("Extra Notes:"))
-        self.band_notes = QLineEdit()
-        self.band_notes.setPlaceholderText("e.g., specific amp, recording notes")
-        band_layout.addWidget(self.band_notes)
-
-        inner.addLayout(band_layout)
-
-        # LLM aggregation toggle (attribute name kept for compatibility)
-        self.struct_deepseek_check = QCheckBox("Use the LLM for aggregation")
-        self.struct_deepseek_check.setChecked(True)
-        inner.addWidget(self.struct_deepseek_check)
-
-        # Run button
-        self.run_struct_btn = QPushButton("🚀 Run Structural Pipeline")
-        self.run_struct_btn.setProperty("role", "primary")
-        self.run_struct_btn.clicked.connect(self.run_structural_pipeline)
-        inner.addWidget(self.run_struct_btn)
-
-        # Progress
-        self.struct_progress = QProgressBar()
-        self.struct_progress.setVisible(False)
-        inner.addWidget(self.struct_progress)
-
-        self.struct_status = QLabel("Ready")
-        inner.addWidget(self.struct_status)
-
-        layout.addWidget(group)
-        layout.addStretch()
-
-    # -----------------------------------------------------------------------
-    # Structural Pipeline Methods
-    # -----------------------------------------------------------------------
-    def run_structural_pipeline(self):
-        # ---- Determine which tracks to process based on scope ----
-        scope = self.struct_scope_combo.currentText().strip()
-        all_samples = self.dataset.get("samples", [])
-
-        if scope == "All Tracks":
-            tracks = list(all_samples)
-
-            if not tracks:
-                QMessageBox.warning(
-                    self,
-                    "No Tracks",
-                    "The dataset is empty.",
-                )
-                return
-
-        elif scope == "Tracks Missing Captions":
-            tracks = [
-                sample
-                for sample in all_samples
-                if not (sample.get("caption") or "").strip()
-            ]
-
-            if not tracks:
-                QMessageBox.information(
-                    self,
-                    "Nothing to Process",
-                    "All tracks already have captions.",
-                )
-                return
-
-        else:
-            # The only remaining Structural Pipeline scope is:
-            # "Selected Tracks (from list)".
-            selected_indices = []
-
-            numbers_text = self.track_numbers_input.text().strip()
-
-            if numbers_text:
-                parsed_indices = self._parse_track_numbers(numbers_text)
-
-                if parsed_indices is None:
-                    QMessageBox.warning(
-                        self,
-                        "Invalid Input",
-                        "Use track numbers or ranges, for example: "
-                        "1,3,5 or 1-3,5.",
-                    )
-                    return
-
-                selected_indices.extend(parsed_indices)
-
-            for item in self.track_list_widget.selectedItems():
-                try:
-                    track_number = int(item.text().split(" - ", 1)[0])
-                    selected_indices.append(track_number)
-                except (ValueError, IndexError):
-                    continue
-
-            selected_indices = sorted(set(selected_indices))
-
-            valid_indices = [
-                index
-                for index in selected_indices
-                if 1 <= index <= len(all_samples)
-            ]
-
-            if not valid_indices:
-                QMessageBox.warning(
-                    self,
-                    "No Tracks Selected",
-                    "For 'Selected Tracks (from list)', select one or more "
-                    "tracks from the list or enter numbers such as 1,3,5.",
-                )
-                return
-
-            tracks = [
-                all_samples[index - 1]
-                for index in valid_indices
-            ]
-        
-        # ---- Read UI options ----
-        stem_source = self.struct_stem_combo.currentText()
-        if stem_source == "Separate via MVSEP":
-            if not self.config.get("mvsep_api_key"):
-                key, ok = QInputDialog.getText(self, "MVSEP API Key", "Enter your MVSEP API key:", QLineEdit.Password)
-                if ok and key.strip():
-                    self.config["mvsep_api_key"] = key.strip()
-                    self.mvsep_key.setText(key.strip())
-                else:
-                    return
-
-        if self.struct_deepseek_check.isChecked() and not self._ensure_llm_key("aggregator"):
-            return
-
-        # ONE shared prompt (it also carries the "remember on this device"
-        # choice) instead of three copies that could drift apart.
-        if not self._ensure_kaggle_credentials():
-            return
-
-        # ---- Band profile ----
-        band = self.band_combo.currentText()
-        era = self.era_combo.currentText()
-        extra_notes = self.band_notes.text()
-        band_context = ""
-        instrument_context = ""
-        production_context = ""
-        vocal_context = ""
-        humanize_preset = "None"
-
-        if band != "None" and era != "None":
-            profiles = self.load_band_profiles()
-            band_data = profiles.get(band, {})
-            era_data = next((e for e in band_data.get("eras", []) if e["name"] == era), {})
-            band_context = f"{band} – {era}"
-            instrument_context = era_data.get("instruments", "")
-            production_context = era_data.get("production", "")
-            vocal_context = era_data.get("vocal_character", "")
-            humanize_preset = era_data.get("humanization_preset", "None")
-
-        # ---- Humanization and stem options ----
-        humanize = self.humanize_check.isChecked()
-        stem_options = {}
-        if self.instrument_extraction_check.isChecked():
-            # Use the first track in the list for caption recommendation
-            sample = tracks[0] if tracks else None
-            caption_text = sample.get("caption", "") if sample else ""
-            if caption_text:
-                stem_options['use_caption_recommendation'] = True
-                stem_options['caption_text'] = caption_text
-            extra_models = self.extra_models_input.text().strip()
-            if extra_models:
-                models = [m.strip() for m in extra_models.split(',') if m.strip()]
-                stem_options['instrument_models'] = models
-
-        options = {
-            "stem_source": ("mvsep" if stem_source == "Separate via MVSEP" else "import"),
-            "use_deepseek": self.struct_deepseek_check.isChecked(),
-            "use_lyrics": self.struct_seg_combo.currentText() == "Lyrics tags",
-            "humanize": humanize,
-            "humanize_preset": humanize_preset,
-            "band_context": band_context,
-            "instrument_context": instrument_context,
-            "production_context": production_context,
-            "vocal_context": vocal_context,
-            "extra_notes": extra_notes,
-            "stem_options": stem_options
-        }
-
-        # ---- Start batch worker ----
-        self.run_struct_btn.setEnabled(False)
-        self.struct_progress.setVisible(True)
-        self.struct_progress.setValue(0)
-        self.struct_status.setText(f"Starting structural pipeline on {len(tracks)} track(s)...")
-
-        self.batch_worker = StructuralPipelineBatchWorker(
-            tracks=tracks,
-            config=self.config,
-            options=options
-        )
-        self.batch_worker.progress.connect(self.on_struct_progress)
-        self.batch_worker.track_done.connect(self.on_struct_track_done)
-        self.batch_worker.all_done.connect(self.on_struct_batch_done)
-        self.batch_worker.error_occurred.connect(self.on_struct_error)
-        self.batch_worker.start()
-
-    def on_struct_progress(self, pct, msg):
-        self.struct_progress.setValue(pct)
-        self.struct_status.setText(msg)
-
-    def on_struct_batch_done(self):
-        """Called when the structural BATCH worker finishes every track.
-
-        ``StructuralPipelineBatchWorker.all_done`` is ``Signal()`` -- no
-        arguments. This handler was connected in two places but never defined,
-        and because ``.connect(self.on_struct_batch_done)`` evaluates the
-        attribute immediately, starting a batch structural run raised
-        AttributeError before the worker even began.
-        """
-        self.struct_progress.setVisible(False)
-        self.struct_status.setText("Structural pipeline completed for all tracks.")
-        self.status_label.setText(
-            "Structural pipeline finished for the batch. Review the captions "
-            "and lyrics."
-        )
-        self.refresh_table()
-        self.on_table_selection_changed()
-
-    def on_struct_step(self, step_name, data):
-        self.struct_status.setText(f"Completed step: {step_name}")
-
-    def on_struct_finished(self, track_id, result):
-        self.struct_progress.setVisible(False)
-        self.run_struct_btn.setEnabled(True)
-        self.struct_status.setText("Pipeline completed successfully.")
-
-        for sample in self.dataset["samples"]:
-            if sample["id"] == track_id:
-                self.record_snapshot()
-                sample["caption"] = result["final_caption"]
-                sample["structural_segments"] = result["sections"]
-                sample["stem_paths"] = result["stem_paths"]
-                sample["chunk_paths"] = result["chunk_paths"]
-                break
-        self.refresh_table()
-        self.on_table_selection_changed()
-
-        QMessageBox.information(self, "Structural Pipeline Done",
-                                f"Final caption:\n\n{result['final_caption'][:500]}...")
-
-    def on_struct_error(self, err):
-        self.struct_progress.setVisible(False)
-        self.run_struct_btn.setEnabled(True)
-        self.struct_status.setText("Error: " + err)
-        QMessageBox.critical(self, "Structural Pipeline Error", err)
-
-    def on_struct_track_done(self, track_id, result):
-        # Update the sample with the results from this track
-        for sample in self.dataset["samples"]:
-            if sample["id"] == track_id:
-                self.record_snapshot()
-                sample["caption"] = result["final_caption"]
-                sample["structural_segments"] = result["sections"]
-                sample["stem_paths"] = result["stem_paths"]
-                sample["chunk_paths"] = result["chunk_paths"]
-                tags = result.get("tags") or {}
-                if tags:
-                    sample["tags"] = tags
-                    if tags.get("bpm"):
-                        sample["bpm"] = tags["bpm"]
-                    if tags.get("key"):
-                        sample["keyscale"] = tags["key"]
-                break
-        self.refresh_table()
-        self.on_table_selection_changed()
-
- 
-
-    def load_band_profiles(self):
-        """Load band profiles from band_profiles.json."""
-        path = os.path.join(os.path.dirname(__file__), "band_profiles.json")
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"Error loading band profiles: {e}")
-        return {}
-
-    def refresh_band_profiles(self):
-        """Populate the band combo box with loaded profiles."""
-        profiles = self.load_band_profiles()
-        self.band_combo.clear()
-        self.band_combo.addItem("None")
-        for band in profiles.keys():
-            self.band_combo.addItem(band)
-
-    def on_band_changed(self, band_name):
-        """Update the era combo when a band is selected."""
-        self.era_combo.clear()
-        self.era_combo.addItem("None")
-        if band_name == "None":
-            return
-        profiles = self.load_band_profiles()
-        band_data = profiles.get(band_name, {})
-        for era in band_data.get("eras", []):
-            self.era_combo.addItem(era["name"])
-
-    def get_structural_scope_samples(self):
-        """Return tracks selected by the Structural Pipeline scope pulldown."""
-        samples = self.dataset.get("samples", [])
-        scope = self.struct_scope_combo.currentText()
-
-        if scope == "All Tracks":
-            return list(samples)
-
-        if scope == "Tracks Missing Captions":
-            return [
-                sample
-                for sample in samples
-                if not (sample.get("caption") or "").strip()
-            ]
-
-        if scope == "Selected Tracks":
-            selected = self.get_selected_sample()
-
-            if selected is None:
-                raise ValueError(
-                    "Choose a track in Dataset Studio first, then run the "
-                    "Structural Pipeline with scope set to 'Selected Tracks'."
-                )
-
-            return [selected]
-
-        raise ValueError(f"Unknown Structural Pipeline scope: {scope}")
-
-
-    def on_struct_scope_changed(self, scope_text):
-        """Show manual selection controls only for the selected-tracks scope."""
-        show_selected_controls = scope_text == "Selected Tracks (from list)"
-
-        self.track_list_widget.setVisible(show_selected_controls)
-        self.track_numbers_input.setVisible(show_selected_controls)
-
-        if show_selected_controls:
-            self.refresh_track_list()
-
-
-
- 
-    def refresh_track_list(self):
-        """Populate the track list with numbered filenames."""
-        self.track_list_widget.clear()
-        samples = self.dataset.get("samples", [])
-        for i, s in enumerate(samples, start=1):
-            name = s.get("filename", f"Track {i}")
-            self.track_list_widget.addItem(f"{i} - {name}")
-
-    def _parse_track_numbers(self, text):
-        """
-        Parse user input like "1,3,5" or "1-3,5" or "1 3 5" into a list of ints.
-        Returns list of ints or None if invalid.
-        """
-        indices = []
-        parts = text.replace(',', ' ').split()
-        for part in parts:
-            if '-' in part:
-                try:
-                    start, end = part.split('-')
-                    start = int(start.strip())
-                    end = int(end.strip())
-                    if start > end:
-                        start, end = end, start
-                    indices.extend(range(start, end + 1))
-                except ValueError:
-                    return None
-            else:
-                try:
-                    indices.append(int(part))
-                except ValueError:
-                    return None
-        return sorted(set(indices))
-
-    # -----------------------------------------------------------------------
     # Advanced Pipeline (from Advanced Tools tab)
     # -----------------------------------------------------------------------
     def _ensure_llm_key(self, role):
@@ -3787,11 +3259,6 @@ class DatasetManager(QMainWindow):
             "mvsep (backing-vocal model)": "mvsep",
             "heuristic (experimental)": "heuristic",
         }.get(self.lead_vocal_combo.currentText(), "off")
-        self.config["segment_min_sec"] = self.min_sec_spin.value()
-        self.config["segment_max_k"] = self.max_k_spin.value()
-        self.config["structure_backend"] = (
-            "songformer" if self.structure_backend_combo.currentIndex() == 1 else "librosa"
-        )
         self.config["stem_output_dir"] = self.stem_out_edit.text().strip()
         self.config["dsp_target_lufs"] = self.lufs_spin.value()
         self.config["dsp_target_sr"] = self.sr_spin.value()
@@ -6547,7 +6014,11 @@ class DatasetManager(QMainWindow):
             return
         segs = sample.get("structural_segments") or []
         if not segs:
-            QMessageBox.information(self, "Riff/Hook", "No structural sections yet — run the Structural Pipeline first.")
+            QMessageBox.information(
+                self, "Riff/Hook",
+                "No structural sections yet — run the Advanced Structural Pipeline "
+                "(Structure tab) on this track first.",
+            )
             return
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Riff / Hook Tags — {sample.get('filename', '')}")

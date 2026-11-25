@@ -249,33 +249,6 @@ def build_settings_tab(manager, parent):
         manager.lead_vocal_combo.setCurrentIndex(2)
     p_form.addRow("Lead/Backing Vocal Split:", manager.lead_vocal_combo)
 
-    manager.min_sec_spin = QDoubleSpinBox()
-    manager.min_sec_spin.setToolTip("Minimum section length in seconds (shorter sections are merged).")
-    manager.min_sec_spin.setRange(1.0, 120.0)
-    manager.min_sec_spin.setSingleStep(0.5)
-    manager.min_sec_spin.setDecimals(1)
-    manager.min_sec_spin.setValue(float(manager.config.get("segment_min_sec", 12.0)))
-    p_form.addRow("Min Section Length (s):", manager.min_sec_spin)
-
-    manager.max_k_spin = QSpinBox()
-    manager.max_k_spin.setToolTip("Maximum number of structural sections.")
-    manager.max_k_spin.setRange(2, 40)
-    manager.max_k_spin.setValue(int(manager.config.get("segment_max_k", 20)))
-    p_form.addRow("Max Sections:", manager.max_k_spin)
-
-    manager.structure_backend_combo = QComboBox()
-    manager.structure_backend_combo.addItems([
-        "librosa (default)",
-        "songformer (functional labels, Kaggle)",
-    ])
-    cur_struct = str(manager.config.get("structure_backend", "librosa") or "librosa").lower()
-    manager.structure_backend_combo.setCurrentIndex(1 if cur_struct.startswith("song") else 0)
-    manager.structure_backend_combo.setToolTip(
-        "songformer splits sections into real labels (intro/verse/chorus/bridge/solo/outro) "
-        "via a Kaggle GPU kernel; falls back to librosa automatically."
-    )
-    p_form.addRow("Structure Backend:", manager.structure_backend_combo)
-
     stem_out_row = QHBoxLayout()
     manager.stem_out_edit = QLineEdit(manager.config.get("stem_output_dir", ""))
     manager.stem_out_edit.setToolTip("Folder where separated stems are written (empty = default ~/mvsep_stems).")
@@ -285,6 +258,16 @@ def build_settings_tab(manager, parent):
     stem_out_row.addWidget(manager.stem_out_edit)
     stem_out_row.addWidget(browse_btn)
     p_form.addRow("Stem Output Folder:", stem_out_row)
+
+    # The MVSEP dialog used to be opened from the Structural pipeline page.
+    # That page is gone (it was the Kaggle captioning pipeline), so the button
+    # that opens the dialog lives with the other pipeline defaults.
+    manager.mvsep_gui_button = QPushButton("🎛 Configure / Test MVSEP")
+    manager.mvsep_gui_button.setToolTip(
+        "Open the MVSEP dialog: pick a model and separate a track through "
+        "mvsep.com, and test the API key stored above.")
+    manager.mvsep_gui_button.clicked.connect(manager.open_mvsep_dialog)
+    p_form.addRow("MVSEP:", manager.mvsep_gui_button)
 
     manager.lufs_spin = QDoubleSpinBox()
     manager.lufs_spin.setToolTip("Target loudness for DSP normalization (EBU R128).")

@@ -237,7 +237,8 @@ def test_the_caption_run_resolves_instead_of_calling_resolve_backend():
 
 def test_the_pipeline_prompts_share_one_helper():
     source = _manager_source()
-    # One per Kaggle pipeline button. The Spatial tab (and its misnamed
-    # run_spatial_pipeline) was removed; only the structural pipeline remains.
-    assert source.count("if not self._ensure_kaggle_credentials():") == 1
+    # The Spatial and Structural pipelines are gone (both were Kaggle-backed).
+    # The captioner still resolves credentials through this same helper, but no
+    # pipeline button guards on it with `if not ...: return` any more.
+    assert source.count("if not self._ensure_kaggle_credentials():") == 0
     assert "Enter Kaggle username" not in source, "an old inline prompt survived"
